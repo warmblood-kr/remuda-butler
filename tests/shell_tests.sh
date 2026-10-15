@@ -47,6 +47,7 @@ for lua in "$REPO"/tests/*.lua; do
   # The Matrix relay state tests need core's remuda.json; its shell wrapper
   # runs them inside the pinned daemon instead of standalone LuaJIT.
   [[ $(basename "$lua") == session_tree.lua || $(basename "$lua") == butler_matrix_relay.lua || $(basename "$lua") == butler_coordination_config.lua ]] && continue
+  case $(basename "$lua") in butler_adopt.lua|butler_approval_retry.lua|butler_schedule_cli.lua|butler_typed_lines_cli.lua) continue ;; esac # real-parser coverage: lua/butler_cli_unit_test.lua
   run "$(basename "$lua")" luajit "tests/$(basename "$lua")"
 done
 for sh in "$REPO"/tests/*.sh; do

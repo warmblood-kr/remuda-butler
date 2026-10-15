@@ -127,7 +127,9 @@ local function fits_spec(spec, args)
   return report.ok and report.kind ~= "help", report
 end
 command(5, "doctor", "  remuda butler doctor", function(args)
-  if fits_spec(ZERO_ARG_CLI_SPEC, args) then
+  local fits, report = fits_spec(ZERO_ARG_CLI_SPEC, args)
+  if report and report.kind == "help" then return report.text end
+  if fits then
     local doctor = remuda._butler_doctor
     local lines = doctor.render(doctor.probe())
     local state = remuda._butler_permission_report or {}
@@ -327,10 +329,14 @@ command(8, "close", "  remuda butler close <name> [--force]\n  remuda butler clo
   end
 end)
 command(10, "sessions", "  remuda butler sessions", function(args)
-  if fits_spec(ZERO_ARG_CLI_SPEC, args) then return remuda._butler_sessions() end
+  local fits, report = fits_spec(ZERO_ARG_CLI_SPEC, args)
+  if report and report.kind == "help" then return report.text end
+  if fits then return remuda._butler_sessions() end
 end)
 command(12, "status", "  remuda butler status  (0=up, 75=launching, 1=failed)", function(args)
-  if fits_spec(ZERO_ARG_CLI_SPEC, args) then
+  local fits, report = fits_spec(ZERO_ARG_CLI_SPEC, args)
+  if report and report.kind == "help" then return report.text end
+  if fits then
     local message, code = remuda._butler_status()
     if code ~= 0 then
       if type(remuda.fail) == "function" then return remuda.fail(message, code) end
@@ -402,6 +408,7 @@ local AGENTS_CLI_SPEC = {
 }
 command(15, "agents", "  remuda butler agents [--all]", function(args)
   local fits, report = fits_spec(AGENTS_CLI_SPEC, args)
+  if report and report.kind == "help" then return report.text end
   if fits then return registry_list(report.values.all == true) end
 end)
 command(17, "status-commands", "  remuda butler status-commands on|off", function(args, caller)
@@ -536,8 +543,8 @@ command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A
     if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
     error(report.text, 0)
   end
-  local kind = report.values.AGENT
-  local parent = report.values.LEADER or current_agent(caller) or "butler"
+  local kind = report.values.agent
+  local parent = report.values.leader or current_agent(caller) or "butler"
   local model, cwd = report.values.model, report.values.cwd
   local state = { sandbox = report.values.sandbox, writable = parsed_writable(report.values.writable) }
   local words = "remuda butler topic delegate " .. report.values.NAME .. " --agent " .. tostring(kind or "codex")

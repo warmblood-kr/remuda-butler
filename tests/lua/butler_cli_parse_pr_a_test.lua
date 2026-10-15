@@ -254,3 +254,10 @@ T.test("send-to-leader with no words keeps the existing usage result", function(
   local out = invoke("send-to-leader", { "send-to-leader" })
   T.eq(out, "nil|none", "send-to-leader with no words")
 end)
+
+T.test("topic delegate preserves explicit agent and leader options", function()
+  start_butler()
+  T.eval('remuda._butler_topic_delegate = function(name, task, unused, kind, parent) return name .. "|" .. task .. "|" .. tostring(kind) .. "|" .. tostring(parent) end')
+  local out = T.eval('return remuda._butler_command_run("topic", {"topic", "delegate", "child", "--agent", "claude", "--leader", "chosen-leader", "do", "work"}, remuda._pr_a_caller)')
+  T.eq(out, "child|do work|claude|chosen-leader")
+end)

@@ -155,3 +155,14 @@ T.test("guard switch help shows supported subcommands and state arguments", func
       and approvals:find("Example: remuda butler guard approvals status", 1, true),
     "guard approvals help omitted its state values or example: " .. approvals)
 end)
+
+T.test("zero-argument and agents help describe the selected command", function()
+  start_butler()
+  for _, verb in ipairs({"doctor", "sessions", "status", "agents"}) do
+    for _, flag in ipairs({"--help", "-h"}) do
+      local out = T.eval('return remuda._butler_command_run(' .. string.format('%q', verb) .. ', {' .. string.format('%q', verb) .. ', ' .. string.format('%q', flag) .. '}, nil)')
+      T.expect(out:find("Usage: remuda butler " .. verb, 1, true), out)
+      T.expect(out:find("Example:", 1, true), out)
+    end
+  end
+end)

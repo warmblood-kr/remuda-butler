@@ -44,14 +44,17 @@ local function matrix_verb(about, args, options, next_command)
 end
 local matrix_arg_spec = {
   name = "remuda butler matrix",
-  options = { matrix_json, matrix_room },
+  options = { matrix_json, matrix_room,
+    opt("n", "N", "History only: number of events (default: 20; range: 1..200)", "n", true),
+    opt("o", "PATH", "Download only: absolute output path (default: $HOME/matrix-<media>)", "o", true),
+  },
   verbs = {
     status = matrix_verb("Show the configured Matrix account and joined room count. Example: remuda butler matrix status", nil, nil, "remuda butler matrix rooms"),
     rooms = matrix_verb("List configured rooms or search public rooms. Example: remuda butler matrix rooms --public remuda", { arg("TERM", "Search public room names and aliases", false) },
       { opt("public", nil, "Search public rooms instead of listing configured rooms") }, "remuda butler matrix rooms"),
     notifications = matrix_verb("Get or set a room notification policy. Example: remuda butler matrix notifications none", { arg("MODE", "all, mentions-followed, or none (default: show current policy)", false) }, nil, "remuda butler matrix rooms"),
     history = matrix_verb("Show recent events in a room. Example: remuda butler matrix history -n 20", nil,
-      { opt("n", "N", "Number of events (default: 20; range: 1..200)", "n") }, "remuda butler matrix thread EVENT_ID"),
+      nil, "remuda butler matrix thread EVENT_ID"),
     thread = matrix_verb("Show every reply in a Matrix thread. Example: remuda butler matrix thread '$EVENT_ID'",
       { arg("EVENT_ID", "Event that starts the thread, e.g. $abc123, or a Butler mail id (01M...)", true) }, nil,
       "remuda butler matrix reply EVENT_ID TEXT"),
@@ -67,7 +70,7 @@ local matrix_arg_spec = {
       nil, { opt("id", "EVENT_ID", "Show one quarantined event") },
       "remuda butler matrix status"),
     download = matrix_verb("Download a Matrix media item. Example: remuda butler matrix download -o '$PWD/image.png' mxc://server/media",
-      { arg("MXC", "Matrix content URI", true) }, { opt("o", "PATH", "Absolute output path (default: $HOME/matrix-<media>)", "o") },
+      { arg("MXC", "Matrix content URI", true) }, nil,
       "remuda butler matrix status"),
     send = matrix_verb("Send a message to a Matrix room. Example: remuda butler matrix --room '!room:server' send 'hello'",
       { arg("TEXT", "Message text, - for stdin, or --file PATH", false, true) },
@@ -199,17 +202,19 @@ local function parse(args)
   end
   local options = {
     room = values.room,
-    json = values.json == true,
+    json = values.json == true or nil,
     n = values.n,
     output = values.o,
     id = values.id,
-    public = values.public == true,
+    public = values.public == true or nil,
     reason = values.reason,
     thread = values.thread,
     caption = values.caption,
   }
   local room_verbs = { notifications = true, history = true, thread = true, event = true, send = true,
     follow = true, unfollow = true, reply = true, react = true, upload = true, redact = true }
+  if options.n and method ~= "history" then return nil, nil, report end
+  if options.output and method ~= "download" then return nil, nil, report end
   if options.room and not room_verbs[method] then return nil, nil, report end
   if method == "rooms" then
     options.public_term = words("TERM")[1]

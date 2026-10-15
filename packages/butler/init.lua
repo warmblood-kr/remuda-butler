@@ -107,6 +107,19 @@ return {
   api = "remuda-module-v1",
   state_version = 1,
   initialize = function() return { compaction_enabled = false, active_choosers = {}, next_chooser_id = 0 } end,
+  source_refresh_ready = function(state)
+    if next(state.active_choosers or {}) then return "a launch chooser is active" end
+    if host._butler_launching or host._butler_start_pending then return "Butler is starting" end
+    local bus = host._butler_bus or {}
+    if next(bus.pending_tasks or {}) then return "mail delivery is pending" end
+    if next(bus.dialog_states or {}) then return "a managed dialog is active" end
+    local matrix = host.butler and host.butler.matrix
+    if matrix and matrix.relay and matrix.relay.instance then return "Matrix relay is active" end
+    local approval = host.butler and host.butler.approval
+    if approval and type(approval.source_refresh_busy) == "function" and approval.source_refresh_busy() then
+      return "an approval is pending"
+    end
+  end,
   -- Registers the CLI verbs only; `start` boots. Cores without the hook ignore this field.
   commands = function(state)
     commands_only = true

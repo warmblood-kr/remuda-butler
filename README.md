@@ -117,9 +117,17 @@ remuda butler --agent codex
 `remuda mod update butler` updates the installed extension on disk. To apply
 an update to the running daemon immediately, use
 `remuda mod update butler --reload`. After editing the installed Butler files
-directly, run `remuda -e "remuda.reload('butler')"`. There is no file watcher;
-ordinary edits and updates without `--reload` leave the running Lua image
-unchanged until an explicit reload or daemon restart. Reload requires the
+directly, run `remuda -e "remuda.reload('butler')"`. With a core supporting
+source refresh, development commands can use
+`REMUDA_RELOAD_SOURCE=1 remuda butler COMMAND`: before dispatch, core compares
+already loaded entry/helper source and reloads changed lifecycle code. This is
+opt-in and applies on the next command, without restarting the daemon. A failed
+refresh fails the command visibly; corrected source is retried. Use this during
+idle development. Butler defers refresh visibly while launch choosers, startup,
+mail delivery, managed dialogs, approvals, or its Matrix relay are active; retry
+when idle. An explicit reload remains a deliberate lifecycle replacement.
+There is no background file watcher. Ordinary edits and updates without either
+opt-in refresh or `--reload` leave the running Lua image unchanged. Reload requires the
 lifecycle-managed Butler module; `remuda exec butler` does not re-run an active
 module.
 

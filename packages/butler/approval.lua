@@ -60,6 +60,14 @@ local function random_id(state)
   return nil
 end
 
+function approval.source_refresh_busy()
+  if next(pending_requests) or next(applying) then return true end
+  for _, record in pairs(attached and attached.state and attached.state.approvals or {}) do
+    if record.status == "open" or record.status == "approved" then return true end
+  end
+  return false
+end
+
 local function hex(bytes)
   local out = {}
   for i = 1, #bytes do out[i] = string.format("%02x", bytes:byte(i)) end

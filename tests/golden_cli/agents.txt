@@ -9,20 +9,38 @@ actions:
 (none)
 
 ### remuda butler "agents" "--help"
-exit: 2
+exit: 0
 stdout:
+List Butler agents. Example: remuda butler agents --all
+
+Usage: remuda butler agents [OPTIONS]
+
+Options:
+  -h, --help  Print help
+      --all   Include ended agents
+
+Next: remuda butler sessions
 
 stderr:
-<GLOBAL-USAGE>
+
 actions:
 (none)
 
 ### remuda butler "agents" "-h"
-exit: 2
+exit: 0
 stdout:
+List Butler agents. Example: remuda butler agents --all
+
+Usage: remuda butler agents [OPTIONS]
+
+Options:
+  -h, --help  Print help
+      --all   Include ended agents
+
+Next: remuda butler sessions
 
 stderr:
-<GLOBAL-USAGE>
+
 actions:
 (none)
 
@@ -109,11 +127,20 @@ actions:
 (none)
 
 ### remuda butler "agents" "--help" "--all"
-exit: 2
+exit: 0
 stdout:
+List Butler agents. Example: remuda butler agents --all
+
+Usage: remuda butler agents [OPTIONS]
+
+Options:
+  -h, --help  Print help
+      --all   Include ended agents
+
+Next: remuda butler sessions
 
 stderr:
-<GLOBAL-USAGE>
+
 actions:
 (none)
 

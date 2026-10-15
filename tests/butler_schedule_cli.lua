@@ -157,7 +157,7 @@ rejected("a dangling --to", words("add", "n1", "7 * * * *", "t", "--to"))
 ok("an unknown target is named", rejected("an unknown target", words("add", "n1", "7 * * * *", "t", "--to", "ghost")):find("ghost"))
 rejected("a target given as an id", words("add", "n1", "7 * * * *", "t", "--to", "01HABCDEFGHJKMNPQRSTVWXYZ0"))
 local usage = rejected("a bare add", words("add"))
-ok("usage is shown", usage:find("Usage: remuda butler schedule list", 1, true))
+ok("usage is shown", usage:find("Usage: remuda butler schedule add", 1, true))
 ok("a bare schedule shows usage", cli.cli(words()).error:find("Usage:", 1, true))
 ok("an unknown verb shows usage", cli.cli(words("rename")).error:find("Usage:", 1, true))
 

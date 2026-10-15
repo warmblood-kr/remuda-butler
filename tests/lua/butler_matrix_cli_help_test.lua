@@ -13,7 +13,7 @@ T.test("Matrix verbs use declared parser help with arguments, options, defaults 
   start_butler()
   local verbs = {
     "status", "rooms", "history", "thread", "event", "get", "follow", "unfollow",
-    "quarantine", "download", "send", "reply", "react", "upload", "redact", "join", "leave", "mark-all",
+    "notifications", "quarantine", "download", "send", "reply", "react", "upload", "redact", "join", "leave", "mark-all",
   }
   for _, verb in ipairs(verbs) do
     local help = T.eval("return remuda.butler.matrix.cli({\"matrix\", \"" .. verb .. "\", \"--help\"})")

@@ -54,7 +54,7 @@ end)
 
 T.test("zero-arg verbs decline anything else (global usage)", function()
   for _, verb in ipairs({ "doctor", "sessions", "status" }) do
-    for _, extra in ipairs({ "extra", "--help", "-h", "help", "--json", "--" }) do
+    for _, extra in ipairs({ "extra", "help", "--json", "--" }) do
       both(verb, { verb, extra }, "true|nil")
     end
   end
@@ -67,8 +67,7 @@ T.test("agents takes only a single --all, with and without the parser", function
     T.eq(run(false, "agents", args), with, "same listing without the parser")
   end
   for _, bad in ipairs({ { "--all", "--all" }, { "--all=1" }, { "extra" }, { "--bogus" }, { "--" },
-    { "--", "--all" }, { "--all", "extra" }, { "extra", "--all" }, { "--help" }, { "-h" }, { "help" },
-    { "--help", "--all" }, { "-a" } }) do
+    { "--", "--all" }, { "--all", "extra" }, { "extra", "--all" }, { "help" }, { "-a" } }) do
     local args = { "agents" }
     for _, word in ipairs(bad) do args[#args + 1] = word end
     for _, parser in ipairs({ true, false }) do

@@ -22,8 +22,13 @@ end
 function M.encode(value) return literal(value) end
 
 function M.decode(text)
-  local chunk = assert(loadstring("return " .. text))
-  setfenv(chunk, {})
+  local chunk
+  if loadstring then
+    chunk = assert(loadstring("return " .. text))
+    setfenv(chunk, {})
+  else
+    chunk = assert(load("return " .. text, "literal JSON", "t", {}))
+  end
   return chunk()
 end
 
