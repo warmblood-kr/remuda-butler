@@ -206,16 +206,17 @@ end
 
 -- Returns attached (bool), or nil when liveness cannot be verified (fail closed).
 -- An attached terminal may only be supervising; the owner approved this text, so it
--- does not block typing (the composer-safe notify policy still guards drafts).
+-- does not block typing (the approved-text policy still guards drafts).
 local function pane_attached(session)
   if type(remuda.ls) ~= "function" then return nil end
   local ok, rows = pcall(remuda.ls)
   if not ok or type(rows) ~= "table" then return nil end
-  local live, attached = false, false
+  local live, attached, instance = false, false, nil
   for _, row in ipairs(rows) do
     if type(row) == "table" and row.name == session then
       live = row.alive == true
       attached = row.attached == true
+      instance = row.instance_id
     end
   end
   if not live then return nil end
@@ -226,7 +227,7 @@ local function pane_attached(session)
     if not read_ok then return nil end
     attached = attached or flag == true
   end
-  return attached
+  return attached, instance
 end
 
 -- Read-back: "typed" only means remuda.type_text returned. Look for the text on the pane afterwards, tolerating
@@ -291,23 +292,35 @@ function M.type_text(session, exact_bytes, provenance)
   if type(session) ~= "string" or session == "" or type(exact_bytes) ~= "string" then
     return false, "invalid_request"
   end
+  local instance = { M.session_instance(session) }
   local bus = remuda._butler_bus or {}
   if type(bus.pending_tasks) == "table" and bus.pending_tasks[session] then
-    return false, "pane_busy"
+    return false, "workflow_owned"
   end
-  local attached = pane_attached(session)
+  local attached, core_instance = pane_attached(session)
   if attached == nil then return false, "session_not_live" end
-  if type(remuda._butler_notify_policy) ~= "function" then return false, "pane_busy" end
-  local checked, safe = pcall(remuda._butler_notify_policy, session)
-  if not checked or not safe then return false, "pane_busy" end
+  if type(remuda._butler_approved_text_policy) ~= "function" then return false, "input_policy_unavailable" end
+  local checked, safe, reason = pcall(remuda._butler_approved_text_policy, session)
+  if not checked then return false, "input_policy_error" end
+  if not safe then return false, reason or "input_policy_denied" end
   if type(remuda.type_text) ~= "function" then return false, "type_failed" end
   if type(provenance) == "table" and type(provenance.before_write) == "function" then
     local marked, allowed = pcall(provenance.before_write)
     if not marked or allowed ~= true then return false, "delivery_marker_failed" end
+    -- The durable marker can yield. It must not authorize a replacement target
+    -- or overwrite a draft/human/workflow that appeared while it was written.
+    local id, marker = M.session_instance(session)
+    if id ~= instance[1] or marker ~= instance[2] then return false, "session_changed" end
+    local current_attached, current_instance = pane_attached(session)
+    if current_attached == nil or current_instance ~= core_instance then return false, "session_changed" end
+    attached = current_attached
+    if bus.pending_tasks and bus.pending_tasks[session] then return false, "workflow_owned" end
+    checked, safe, reason = pcall(remuda._butler_approved_text_policy, session)
+    if not checked then return false, "input_policy_error" end
+    if not safe then return false, reason or "input_policy_denied" end
   end
   local needles = needles_of(exact_bytes)
   local before = screen_counts(session, needles)
-  local instance = { M.session_instance(session) }
   local typed, result = pcall(remuda.type_text, session, exact_bytes)
   if not typed or result == false then return false, "type_failed", true end
   local trace = remuda._butler_session_trace or _G._butler_session_trace

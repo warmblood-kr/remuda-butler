@@ -255,6 +255,61 @@ function remuda._butler_composer_decision(kind, session, screen)
   return raw, raw_text
 end
 
+-- Owner-approved exact text has its own admission policy. Rendering uncertainty
+-- allows input; only positive draft/human/modal evidence blocks it. Recent output
+-- is not a turn signal and never establishes that a composer cannot receive input.
+function remuda._butler_approved_text_policy(session, now)
+  local agent = bus.agents[session]
+  if not agent then
+    for _, candidate in pairs(bus.agents) do
+      if candidate.session_name == session then agent = candidate; break end
+    end
+  end
+  local lifecycle = remuda._butler_state or remuda._butler_compaction_state or {}
+  if agent and lifecycle.compaction_fleet_active == (agent.id or agent.session_name) then
+    return false, "workflow_owned"
+  end
+  local row
+  for _, candidate in ipairs(remuda.ls()) do
+    if candidate.name == session then row = candidate end
+  end
+  if not row or not row.alive then return false, "session_not_live" end
+  if row.attached and type(row.human_idle) == "number"
+      and row.human_idle < (remuda._butler_notice_human_idle or 10) then
+    return false, "human_active"
+  end
+  if row.attached and row.human_idle == nil then
+    -- Legacy core has no human-input clock. Preserve its independent pause
+    -- guard, without calling an unknown composer busy.
+    now = now or os.time()
+    local captured, screen = pcall(remuda.capture, session)
+    if not captured or type(screen) ~= "string" then return false, "human_pause_pending" end
+    local seen = bus.notice_screens[session] or {}
+    bus.notice_screens[session] = seen
+    if seen.approved_screen ~= screen then
+      seen.approved_screen, seen.approved_since = screen, now
+      return false, "human_pause_pending"
+    end
+    if now - seen.approved_since < NOTICE_STABLE_SECONDS then return false, "human_pause_pending" end
+  end
+  local dialogs = remuda.butler and remuda.butler.dialogs
+  if not dialogs or type(dialogs.check) ~= "function" then return false, "input_policy_unavailable" end
+  local allowed, state = dialogs.check(session)
+  if not allowed then
+    local reason = state and state.id
+    if reason == "session_unavailable" or reason == "session_replaced" then return false, reason end
+    return false, "known_modal"
+  end
+  local captured, screen = pcall(remuda.capture, session)
+  if not captured or type(screen) ~= "string" then return true, "renderer_unknown" end
+  local kind = agent and agent.kind or ""
+  local startup = remuda._butler_agent_startup[kind] or {}
+  if startup.picker and startup.picker(screen) then return false, "known_modal" end
+  local parsed, decision = pcall(remuda._butler_composer_decision, kind, session, screen)
+  if parsed and decision == "NON-EMPTY" then return false, "composer_nonempty" end
+  return true, parsed and decision == "EMPTY" and "composer_empty" or "renderer_unknown"
+end
+
 -- Startup dialogs are not empty prompts, so task/notice policy cannot be used
 -- to decide whether a key or close is safe. Protect attached human panes using
 -- the same idle/stable-screen rule, while allowing detached panes to proceed.

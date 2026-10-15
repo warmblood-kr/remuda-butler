@@ -7667,7 +7667,7 @@ end
 
 local function with_approved_text_stubs(run)
   local old_type, old_key, old_policy, old_trace = remuda.type_text, remuda.key,
-    remuda._butler_notify_policy, remuda._butler_session_trace
+    remuda._butler_approved_text_policy, remuda._butler_session_trace
   local old_ls, old_session, old_bus = remuda.ls, remuda.session, remuda._butler_bus
   local typed, keys, traces = {}, {}, {}
   local safe = true
@@ -7679,14 +7679,14 @@ local function with_approved_text_stubs(run)
     keys[#keys + 1] = { session = session, key = key }
     return true
   end
-  remuda._butler_notify_policy = function() return safe end
+  remuda._butler_approved_text_policy = function() return safe, "composer_nonempty" end
   remuda._butler_bus = { agents = { butler = { id = "butler", session_name = "butler", session_start_marker = "butler-start" } } }
   remuda.ls = function() return { { name = "butler", alive = true, attached = false } } end
   remuda.session = function() return { attached = false } end
   remuda._butler_session_trace = function(kind, detail) traces[#traces + 1] = { kind, detail } end
   local ok, err = pcall(run, typed, keys, traces, function(value) safe = value end)
   remuda.type_text, remuda.key = old_type, old_key
-  remuda._butler_notify_policy, remuda._butler_session_trace = old_policy, old_trace
+  remuda._butler_approved_text_policy, remuda._butler_session_trace = old_policy, old_trace
   remuda.ls, remuda.session, remuda._butler_bus = old_ls, old_session, old_bus
   if not ok then error(err, 0) end
 end
@@ -8000,11 +8000,11 @@ local function test_approved_text_cancel_and_failed_delivery_are_one_shot()
       local cancel_id = assert(remuda.butler.approve_text.request("butler", "cancel me", ASKER))
       env.client:pump()
       local cancelled = env.relay:state().approvals[cancel_id]
-      remuda._butler_notify_policy = function() return false end
+      remuda._butler_approved_text_policy = function() return false end
       room_events(env, { text_event("$approve-busy", OWNER, "yes", cancelled.event_id) })
       assert(cancelled.status == "approved" and #typed == 0,
         "a pre-write busy refusal stays retryable")
-      remuda._butler_notify_policy = function() return true end
+      remuda._butler_approved_text_policy = function() return true end
       room_events(env, { reaction("$cancel-approved", OWNER, cancelled.event_id, CROSS) })
       assert(cancelled.status == "denied" and #typed == 0,
         "an owner cross cancels an approved-but-undelivered request")
@@ -8044,7 +8044,7 @@ local function test_approved_text_refusal_stays_approved_for_owner_retry()
       room_events(env, { text_event("$busy-answer", OWNER, "yes " .. id, rec.event_id) })
       assert(rec.status == "approved" and #typed == 0 and #keys == 0,
         "busy target remains approved but undelivered")
-      assert(thread_replies(env, rec.event_id, "refused: pane_busy") == 1,
+      assert(thread_replies(env, rec.event_id, "refused: composer_nonempty") == 1,
         "owner gets the refusal reason")
       set_safe(true)
       room_events(env, { text_event("$retry-answer", OWNER, "yes", rec.event_id) })
