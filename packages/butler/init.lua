@@ -9,7 +9,7 @@ end
 local host = getmetatable(_G).__index.remuda
 local cli_parse = assert(host.cli and host.cli.parse,
   "Butler CLI requires remuda.cli.parse (Remuda core #465 or later); upgrade Remuda")
-local system, dialogs
+local system, dialogs, input_originals
 local booted, main_loaded = false, false
 local function load_main()
   if main_loaded then return end
@@ -18,6 +18,7 @@ local function load_main()
   system = assert(host._butler_system)
   host.exec("butler/main")
   dialogs = host.butler and host.butler.dialogs
+  input_originals = host._butler_dialog_originals
 end
 local function start_matrix_relay()
   local matrix = host.butler and host.butler.matrix
@@ -108,6 +109,7 @@ return {
   state_version = 1,
   initialize = function() return { compaction_enabled = false, active_choosers = {}, next_chooser_id = 0 } end,
   source_refresh_ready = function(state)
+    if host._module_resume_supported ~= true then return "core lacks lifecycle resume; upgrade Remuda before source refresh" end
     if state.compaction_fleet_active then return "compaction is active" end
     for _, member in pairs(state.compaction_members or {}) do
       if member.compaction_in_progress or member.dialog_operation or member.restore_pending_attempt_active then
@@ -145,6 +147,28 @@ return {
     host._butler_state = state
     boot()
     stop_legacy_matrix_relay()
+  end,
+  -- Rollback restores this activation's registrations. Reinstall only resources
+  -- stop() unwrapped; cached start/main closures must not reread a broken helper.
+  resume = function(state)
+    local ok, err = pcall(function()
+      host._butler_state = state
+      if dialogs then
+        host.butler.dialogs = dialogs
+        host._butler_dialog_originals = input_originals
+        dialogs.install()
+      end
+      if booted then start_matrix_relay() end
+    end)
+    if not ok then
+      -- Never leave raw input exposed if the old activation cannot resume.
+      -- Keep the originals for a later explicit, corrected activation.
+      host._butler_dialog_originals = input_originals
+      local function refuse() error("Butler input gate recovery failed; reload Butler when idle", 0) end
+      host.key, host.type_text = refuse, refuse
+      if input_originals and input_originals.send then host.send = refuse end
+      error(err, 0)
+    end
   end,
   stop = function(state)
     if dialogs then dialogs.stop() end
