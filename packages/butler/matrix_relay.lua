@@ -1991,7 +1991,7 @@ function relay.new(options)
           state.pending[ev.event_id] = {
             sender = ev.sender, room_id = actual_room, event_id = ev.event_id,
             created_at = timestamp(ev), body = body,
-            normalized_mentions = mention_ids,
+            normalized_mentions = #mention_ids > 0 and mention_ids or nil,
             thread_root = thread_root, in_reply_to = in_reply_to,
             mxc = valid_media_uri(media_uri(content)) and media_uri(content) or nil,
             room = cfg.rooms[actual_room], room_kind = cfg.rooms[actual_room], context_mail_id = context_mail_id,

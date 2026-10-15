@@ -19,8 +19,6 @@ remuda.exec = function() end
 local matrix_module_ok, matrix_module_error = pcall(dofile, "packages/butler/matrix.lua")
 remuda.exec = package_exec
 assert(matrix_module_ok, matrix_module_error)
-dofile("packages/butler/matrix_mentions.lua")
-dofile("tests/butler_matrix_mentions.lua")
 local ASKER = "team-1-mx"
 dofile("packages/butler/system.lua")
 dofile("packages/butler/matrix_setup.lua")
@@ -44,6 +42,7 @@ dofile("packages/butler/guard_policy.lua")
 dofile("packages/butler/guard_grants.lua")
 dofile("packages/butler/guard_approval.lua")
 dofile("packages/butler/matrix_delivery_policy.lua")
+dofile("packages/butler/matrix_mentions.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function remove_dir(dir)
@@ -8631,3 +8630,8 @@ do
   assert(ok,err)
 end
 print('ok: Matrix durable owner plaintext admission contract')
+
+-- Keep the isolated mail persistence fixture after all relay tests: it loads
+-- mail.lua with a temporary bus/config and should not affect their globals.
+dofile("packages/butler/matrix_mentions.lua")
+dofile("tests/butler_matrix_mentions.lua")
