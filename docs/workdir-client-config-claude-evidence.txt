@@ -27,7 +27,7 @@ R/.claude/settings.local.json: deny touch wcc_denied; R/sub/.claude/settings.loc
 ## 7 worktree W: --settings allows wcc_flag (route works in worktree)
   RAN (marker created): allowed
 
-NOTE: in PART 1 the allow probes (#0,#1,#4,#5,#7) are NOT discriminating: ~/.claude/settings.json already allows Bash(touch:*) and Bash(python:*), so the baseline ran. Only the deny probes (#2,#3,#6: deny wins over --settings allow; main-checkout/root deny applies from subdir and worktree) are meaningful. A first PART 2 with python3 -c was dropped for the same reason. PART 3 below uses 'dd', which no user rule allows.
+NOTE: in PART 1 the allow probes (#0,#1,#4,#5,#7) are NOT discriminating: ~/.claude/settings.json already allows Bash(touch:*) and an interpreter allow rule, so the baseline ran. Only the deny probes (#2,#3,#6: deny wins over --settings allow; main-checkout/root deny applies from subdir and worktree) are meaningful. A first PART 2 using an interpreter one-liner was dropped for the same reason. PART 3 below uses 'dd', which no user rule allows.
 
 === PART 3: command 'dd if=/dev/null of=NAME count=0' (no user rule allows dd). Rule A = Bash(dd if=/dev/null:*) ===
 
