@@ -119,7 +119,9 @@ return {
     if host._butler_launching or host._butler_start_pending then return "Butler is starting" end
     local bus = host._butler_bus or {}
     if next(bus.pending_tasks or {}) then return "mail delivery is pending" end
-    if next(bus.dialog_states or {}) then return "a managed dialog is active" end
+    for _, dialog in pairs(bus.dialog_states or {}) do
+      if dialog.blocked or dialog.id or dialog.reporting then return "a managed dialog is active" end
+    end
     local matrix = host.butler and host.butler.matrix
     if matrix and matrix.relay and matrix.relay.instance then return "Matrix relay is active" end
     local approval = host.butler and host.butler.approval
