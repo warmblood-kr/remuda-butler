@@ -321,6 +321,14 @@ function M.type_text(session, exact_bytes, provenance)
   end
   local needles = needles_of(exact_bytes)
   local before = screen_counts(session, needles)
+  -- Policy/audit and read-back baseline collection can also yield. Fence the
+  -- originally approved identity again at the final synchronous write boundary.
+  local current_attached, current_instance = pane_attached(session)
+  local id, marker = M.session_instance(session)
+  if current_attached == nil or current_instance ~= core_instance
+      or id ~= instance[1] or marker ~= instance[2] then return false, "session_changed" end
+  if bus.pending_tasks and bus.pending_tasks[session] then return false, "workflow_owned" end
+  attached = current_attached
   local typed, result = pcall(remuda.type_text, session, exact_bytes)
   if not typed or result == false then return false, "type_failed", true end
   local trace = remuda._butler_session_trace or _G._butler_session_trace

@@ -96,6 +96,31 @@ local saved_policy=remuda._butler_approved_text_policy
 remuda._butler_approved_text_policy=function() error('synthetic policy fault') end
 check(unknown,false,'input_policy_error')
 remuda._butler_approved_text_policy=saved_policy
+local policy_calls=0
+remuda._butler_approved_text_policy=function(...)
+  policy_calls=policy_calls+1
+  if policy_calls==2 then
+    core_instance='replacement'
+    bus.agents.codex.session_start_marker='replacement'
+  end
+  return true
+end
+check(unknown,false,'session_changed',{before_write=function() return true end})
+remuda._butler_approved_text_policy=saved_policy
+core_instance='cx'
+bus.agents.codex.session_start_marker='synthetic-start'
+local capture=remuda.capture
+remuda.capture=function()
+  core_instance='replacement'
+  bus.agents.codex.session_start_marker='replacement'
+  return unknown
+end
+remuda._butler_approved_text_policy=function() return true end
+check(unknown,false,'session_changed')
+remuda.capture=capture
+remuda._butler_approved_text_policy=saved_policy
+core_instance='cx'
+bus.agents.codex.session_start_marker='synthetic-start'
 remuda.butler.dialogs.install()
 local audit=remuda.butler.guard_policy.append
 remuda.butler.guard_policy.append=function() return false end
