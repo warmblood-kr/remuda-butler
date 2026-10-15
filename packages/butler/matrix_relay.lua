@@ -8,6 +8,9 @@ local approve_text = assert(remuda.butler.approve_text,
   "load butler/approve_text before butler/matrix_relay")
 local status_command = assert(remuda.butler.status_command,
   "load butler/status_command before butler/matrix_relay")
+if not (remuda.butler.matrix and remuda.butler.matrix.mention_normalization) then
+  remuda.exec("butler/matrix_mentions")
+end
 local mention_normalization = assert(remuda.butler.matrix.mention_normalization,
   "load butler/matrix_mentions before butler/matrix_relay")
 -- Trust words are bound at load (main.lua execs matrix_request before
