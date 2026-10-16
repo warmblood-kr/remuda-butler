@@ -154,11 +154,9 @@ function remuda._butler_prompt_is_empty(kind, screen)
   return "NON-EMPTY", text
 end
 
--- The one delivery policy: may Butler type into SESSION now? Every pane needs
--- a known empty prompt. An attached pane also needs the human to pause
--- (human_idle >= remuda._butler_notice_human_idle, default 10s) or, on a core
--- without human_idle, a screen unchanged for NOTICE_STABLE_SECONDS. Anything
--- unrecognised defers.
+-- Notice admission preserves the live-session and human-pause guards. An
+-- explicitly idle client may receive input despite an unknown/nonempty renderer;
+-- composer emptiness is only required for the legacy busy-client queue path.
 function remuda._butler_notify_policy(session, now)
   now = now or os.time()
   local row
@@ -167,9 +165,6 @@ function remuda._butler_notify_policy(session, now)
   end
   if not row or not row.alive then return false end
   local attached = row.attached
-  -- Do not gate on session.is_busy: it can reflect background agents while
-  -- this pane's prompt is idle. Require a known empty composer below, and an
-  -- attached human's idle pause above, before any notice is typed.
   local seen = bus.notice_screens[session] or {}
   bus.notice_screens[session] = seen
   local screen
@@ -187,6 +182,29 @@ function remuda._butler_notify_policy(session, now)
       return false
     end
     if now - seen.since < NOTICE_STABLE_SECONDS then return false end
+  end
+  -- Use the shared exception classifier before either admission path. Its
+  -- session identity, current-instance, audit and modal restrictions still apply.
+  local dialogs = remuda.butler and remuda.butler.dialogs
+  if dialogs and type(dialogs.check) == "function" then
+    local checked, allowed = pcall(dialogs.check, session)
+    if not checked or not allowed then return false end
+  end
+  local idle = false
+  if type(remuda.session) == "function" then
+    local checked, state = pcall(remuda.session, session)
+    idle = checked and type(state) == "table" and state.is_busy == false
+  end
+  if idle then
+    -- Do not clear, probe or reinterpret stale composer text as a busy turn.
+    -- Keep the startup detector for callers without the shared dialog module.
+    local captured, current = pcall(remuda.capture, session)
+    local agent = bus.agents[session]
+    local startup = remuda._butler_agent_startup[agent and agent.kind or ""] or {}
+    if captured and type(current) == "string" and known_startup_modal(startup, current) then
+      return false
+    end
+    return true
   end
   local full_screen, prompt_screen = screen, screen
   if remuda.capture_styled then
@@ -1040,7 +1058,7 @@ local function deliver_notice(session)
     if notice_now() - recovering.started_at >= NOTICE_RECOVERY_TIMEOUT_S then
       if remuda._butler_notify_policy(session) then
         if not notice_fallback_or_fail(session, recovering, pending,
-            "recovery-timeout; prompt-empty; falling-back-to-normal-delivery") then return false end
+            "recovery-timeout; policy-allows; falling-back-to-normal-delivery") then return false end
         recovering = nil
       else
         return notice_recovery_error(session, recovering, "recovery timed out after 20 seconds")

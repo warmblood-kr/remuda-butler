@@ -1454,7 +1454,7 @@ fn five_relay_mails_wait_until_a_busy_pane_is_free_and_coalesce() {
 /// #29: one case per branch of `remuda._butler_notify_policy`, with `ls` and
 /// `capture` stubbed and the clock passed in.
 #[test]
-fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
+fn notify_policy_preserves_legacy_empty_prompt_when_client_is_not_idle() {
     let dir = scratch("notice-policy");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
@@ -1469,7 +1469,7 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
             local row, screen = {{ name = 'p1', alive = true, attached = true }}, ''
             remuda.ls = function() return {{ row }} end
             remuda.capture = function() return screen end
-            remuda.session = function() return {{ is_busy = false }} end
+            remuda.session = function() return {{ is_busy = true }} end
             local policy, t = remuda._butler_notify_policy, 0
             local function settled(text) t = t + 100; screen = text; policy('p1', t); return policy('p1', t + 3) end
             local r = {{}}
@@ -1508,12 +1508,13 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
 }
 
 #[test]
-fn codex_trace_row_followed_by_user_draft_is_not_empty_or_typed_over() {
+fn idle_codex_trace_row_followed_by_text_does_not_block_notice() {
     let (path, _daemon) = butler_with_member("codex-trace-row-draft");
     let got = eval(
         &path,
         r#"
-        local row = { name = 'm1', alive = true, attached = false }
+        local row = { name = 'm1', alive = true, attached = false,
+          instance_id = remuda._butler_bus.agents.m1.instance_id }
         local screen = '› 2026-10-01T12:00:00Z ERROR foo::bar: why?\nWhat is the status?'
         remuda.ls = function() return { row } end
         remuda.capture = function() return screen end
@@ -1531,7 +1532,7 @@ fn codex_trace_row_followed_by_user_draft_is_not_empty_or_typed_over() {
         return decision .. '|' .. tostring(remuda._notice_test_typed)
         "#,
     );
-    assert_eq!(got, "NON-EMPTY|0", "a trace-looking draft must be preserved: {got}");
+    assert_eq!(got, "NON-EMPTY|1", "idle nonempty rendering must allow the notice: {got}");
 }
 
 #[test]
@@ -2415,7 +2416,7 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
         r#"local real_ls, real_capture, real_styled, real_session = remuda.ls, remuda.capture, remuda.capture_styled, remuda.session
         local row, spans = { name = 'p1', alive = true, attached = true }, {}
         remuda.ls = function() return { row } end
-        remuda.session = function() return { is_busy = false } end
+        remuda.session = function() return { is_busy = true } end
         remuda.capture = function() error('the new-core path must not need plain capture') end
         remuda.capture_styled = function()
           return { rows = { { { text = 'history', dim = false } }, spans }, cursor = { row = 2, col = 3, visible = true } }

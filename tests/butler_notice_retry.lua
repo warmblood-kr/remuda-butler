@@ -128,8 +128,8 @@ remuda._butler_notice.notice_recovery_error("orphan", {
 }, "recovery timed out")
 assert(sent[#sent][1] == "butler", "leaderless recipient failure falls back to root Butler")
 
--- If type_text reports another write in flight, a later non-empty composer is
--- re-probed before any retry; another sender's task or human draft is untouched.
+-- If type_text reports another write in flight, retry after its one-second
+-- deferral. An explicitly idle client is eligible despite non-empty rendering.
 -- This is an isolated delivery-policy scenario; prior simulated retries may
 -- have advanced unread mail past its reminder interval.
 bus.notice_sent_at, bus.notice_reminder_at = {}, {}
@@ -159,8 +159,8 @@ assert(type_attempts == 1 and bus.notice_recoveries.lead == nil
 screen = "› another sender's task text / human draft"
 now = now + 1.1
 remuda._butler_deliver_notices()
-assert(type_attempts == 1 and #unsafe_writes == 0,
-  "a retry never types or submits into the non-empty composer")
+assert(type_attempts == 2 and #unsafe_writes == 1,
+  "an idle retry submits normally without clearing the non-empty composer")
 
 -- A failed notice write may leave part of its text behind. Even if the
 -- delivery policy's capture is stale and looks empty, the retry's fresh
