@@ -42,6 +42,7 @@ dofile("packages/butler/guard_policy.lua")
 dofile("packages/butler/guard_grants.lua")
 dofile("packages/butler/guard_approval.lua")
 dofile("packages/butler/matrix_delivery_policy.lua")
+dofile("packages/butler/matrix_mentions.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function remove_dir(dir)
@@ -6928,6 +6929,61 @@ local function rx_check(name, test)
   if not ok then rx_failures[#rx_failures + 1] = name .. ": " .. tostring(err) end
 end
 
+rx_check("confirmed mentions through relay", function()
+  local dir, config_path = fixture()
+  local client, delivered, held_for_restart = scripted_client(), {}, false
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function(event)
+      if event.event_id == "$mention-pills" and not held_for_restart then
+        held_for_restart = true
+        error("hold for restart")
+      end
+      delivered[#delivered + 1] = event
+      return true
+    end,
+  })
+  assert(relay:start())
+  client:complete(1, { json = { next_batch = "s0" } })
+  client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$mention-pills", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "Hello Alice and Alice",
+          format = "org.matrix.custom.html",
+          formatted_body = "Hello <a href='https://matrix.to/#/@alice:example.org'>Alice</a> and "
+            .. '<a href="https://matrix.to/#/@ally:example.org">Alice</a>',
+          ["m.mentions"] = { user_ids = { "@alice:example.org", "@ally:example.org" } } } },
+      { type = "m.room.message", event_id = "$mention-plain", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "Alice" } },
+      { type = "m.room.message", event_id = "$mention-media", sender = "@alice:example.org",
+        content = { msgtype = "m.file", body = "file.txt", filename = "file.txt",
+          url = "mxc://example.org/file" } },
+    } } },
+  } } } })
+  local first_attempts = {}
+  for _, event in ipairs(delivered) do first_attempts[event.event_id] = event end
+  assert(not first_attempts["$mention-pills"], "mention delivery should remain pending for restart")
+  relay:stop()
+  local resumed_client = scripted_client()
+  relay = relay_module.new({ config_path = config_path, matrix = resumed_client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end,
+  })
+  assert(relay:start())
+  local by_id = {}
+  for _, event in ipairs(delivered) do by_id[event.event_id] = event end
+  assert(by_id["$mention-pills"] and by_id["$mention-pills"].body == "Hello @Alice and @Alice",
+    "confirmed pills should normalize at the relay delivery boundary")
+  assert(by_id["$mention-pills"].normalized_mentions[1] == "@alice:example.org"
+      and by_id["$mention-pills"].normalized_mentions[2] == "@ally:example.org",
+    "same-display-name pills should retain their distinct MXIDs in occurrence order")
+  assert(by_id["$mention-plain"] and by_id["$mention-plain"].body == "Alice"
+      and by_id["$mention-plain"].normalized_mentions == nil,
+    "plain display-name text must not be rewritten or marked as a mention")
+  assert(by_id["$mention-media"] and by_id["$mention-media"].normalized_mentions == nil,
+    "media events must not receive mention metadata")
+  relay:stop()
+  cleanup_fixture(dir, config_path)
+end)
+
 rx_check("test_baseline_resume_filters_and_envelope", test_baseline_resume_filters_and_envelope)
 rx_check("test_allowlisted_media_types_and_sender_filter", test_allowlisted_media_types_and_sender_filter)
 test_media_field_cap_preserves_utf8()
@@ -8629,3 +8685,8 @@ do
   assert(ok,err)
 end
 print('ok: Matrix durable owner plaintext admission contract')
+
+-- Keep the isolated mail persistence fixture after all relay tests: it loads
+-- mail.lua with a temporary bus/config and should not affect their globals.
+dofile("packages/butler/matrix_mentions.lua")
+dofile("tests/fixtures/matrix-mention-normalization.lua")
