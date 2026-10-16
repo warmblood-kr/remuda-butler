@@ -300,6 +300,14 @@ local function observe(name, agent, alias, instance, screen, failure)
     if state.id ~= id or state.signature ~= signature then
       state.id, state.signature, state.captures = id, signature, 0
       state.audited, state.reported = nil, nil
+      local diagnostics = remuda._butler_diagnostics
+      if diagnostics and type(diagnostics.record) == 'function' then
+        local reason = id == 'unknown_choice' and 'heuristic_unknown_choice'
+          or (id == 'capture_unavailable' or id == 'session_unavailable'
+            or id == 'session_replaced' or id == 'detection_unavailable') and id
+          or 'heuristic_dialog'
+        pcall(diagnostics.record, 'control', 'stopped', reason, agent.id)
+      end
     end
     state.captures = state.captures + 1
     state.blocked = true -- stop on the first capture, not after debounce

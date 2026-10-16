@@ -142,6 +142,15 @@ command(5, "doctor", "  remuda butler doctor", function(args)
     return table.concat(lines, "\n")
   end
 end)
+for offset, verb in ipairs({ "diagnostics", "diagnostics-list" }) do
+  command(5 + offset / 10, verb, "  remuda butler " .. verb
+    .. (verb == "diagnostics" and " [--page N]" or " [--json]")
+    .. " [--subsystem mail|matrix|notice|control] [--severity info|warn|error]", function(args)
+    local result, why = remuda._butler_diagnostics.command(args)
+    if result then return result end
+    return remuda.fail(why, 2)
+  end)
+end
 local QUOTA_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
