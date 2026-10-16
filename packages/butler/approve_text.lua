@@ -330,10 +330,23 @@ function M.type_text(session, exact_bytes, provenance)
   if bus.pending_tasks and bus.pending_tasks[session] then return false, "workflow_owned" end
   attached = current_attached
   local writer = type(provenance) == "table" and provenance.queue_write
-  local typed, result
-  if type(writer) == "function" then typed, result = pcall(writer, exact_bytes)
-  else typed, result = pcall(remuda.type_text, session, exact_bytes) end
-  if not typed or result == false then return false, "type_failed", true end
+  local typed, result, detail
+  if type(writer) == "function" then typed, result, detail = pcall(writer, exact_bytes)
+  else typed, result, detail = pcall(remuda.type_text, session, exact_bytes) end
+  if typed and result == false and detail == "rejected_before_write" then
+    return false, "input_rejected", true, nil, "rejected_before_write"
+  end
+  if not typed then
+    -- The instance-bound native provider uses this stable suffix for
+    -- prewrite identity/liveness refusals. Other errors may follow partial
+    -- writes and must never trigger a replay.
+    local detail = tostring(result)
+    if detail:match("no input was written$") then
+      return false, "input_rejected", true, nil, "rejected_before_write"
+    end
+    return false, "type_failed", true, nil, "outcome_uncertain"
+  end
+  if result == false then return false, "type_failed", true, nil, "outcome_uncertain" end
   local trace = remuda._butler_session_trace or _G._butler_session_trace
   if type(trace) == "function" then
     pcall(trace, "matrix_approved_text", "target=" .. M.display_inline(session) .. " " .. provenance_text(provenance)

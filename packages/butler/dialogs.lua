@@ -491,7 +491,7 @@ local function gated_write_with_hooks(original, operation, name, hooks, ...)
   -- No prepared text or arbitrary key strings enter the log.
   local key = select(1, ...)
   local safe_key = type(key) == 'string' and (key == 'RET' or key == 'ESC' or key == 'UP'
-    or key == 'DOWN' or key == 'C-u' or key:match('^%d$'))
+    or key == 'DOWN' or key == 'C-u' or key == 'C-l' or key:match('^%d$'))
   local action = operation == 'key' and (safe_key and ('key/' .. key) or 'terminal_key') or operation
   if not audit(name, agent, state, 'dialog_action', action, 'before_write') then
     error('Butler dialog audit unavailable; input refused', 0)
@@ -527,7 +527,16 @@ local function gated_write_with_hooks(original, operation, name, hooks, ...)
   local result = pack(pcall(original, name, ...))
   local outcome = not result[1] and 'error' or result[2] == false and 'refused' or 'returned'
   audit(name, agent, state, 'dialog_action_result', action, outcome)
-  if not result[1] then error(result[2], 0) end
+  if not result[1] then
+    -- Bound providers may report a typed refusal whose contract guarantees
+    -- that no payload bytes were written. Normalize it for the shared queue;
+    -- all other failures remain errors with an uncertain outcome.
+    if operation == 'type_text' and type(result[2]) == 'string'
+        and result[2]:match('no input was written$') then
+      return false, 'rejected_before_write'
+    end
+    error(result[2], 0)
+  end
   return unpack_args(result, 2, result.n)
 end
 

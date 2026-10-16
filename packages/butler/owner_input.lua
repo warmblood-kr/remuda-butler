@@ -180,6 +180,9 @@ local function deliver(r)
   local hooks={expected_instance=r.instance_id,recheck=function()return admissible(r)end,identity=function()return same_target(r)end}
   hooks.before=function()
     if admissible(r)~=true then return false end
+    -- Each provider operation in the one bounded repair attempt is separately
+    -- fenced. Persist intent and the approval marker only once.
+    if marked then return true end
     local marker=store:begin(r.id);if not marker then return false end
     marked=true
     if r.route=='prepared' then
@@ -188,8 +191,31 @@ local function deliver(r)
     end
     return true
   end
-  local ok,reason,_,_,provider=prepared.type_text(r.session,r.text,{owner=r.owner,event_id=r.event_id,
-    request_id=r.id,queue_write=function(bytes)return guarded_write('type_text',r.session,hooks,bytes)end})
+  local function type_once()
+    return prepared.type_text(r.session,r.text,{owner=r.owner,event_id=r.event_id,
+      request_id=r.id,queue_write=function(bytes)return guarded_write('type_text',r.session,hooks,bytes)end})
+  end
+  local ok,reason,_,_,provider=type_once()
+  if not ok and provider=='rejected_before_write' then
+    -- Repair behavior belongs to the session's agent adapter; the queue owns
+    -- only the bounded retry rule and the instance-fenced key delivery.
+    local agent
+    for id,candidate in pairs((remuda._butler_bus or{}).agents or{})do
+      if type(candidate)=='table' and candidate.id==r.agent_id
+          and(candidate.session_name or id) == r.session then agent=candidate;break end
+    end
+    local adapter=agent and(remuda._butler_agent_startup or{})[agent.kind]
+    if adapter and type(adapter.repair_rejected_input)=='function' then
+      local called,repaired=pcall(adapter.repair_rejected_input,function(key)
+        if type(key)~='string' or hooks.identity()~=true then return false end
+        local written,result=pcall(guarded_write,'key',r.session,hooks,key)
+        return written and result==true
+      end)
+      if called and repaired==true and hooks.identity()==true then
+        ok,reason,_,_,provider=type_once()
+      end
+    end
+  end
   if not marked then
     local current=store:get(r.id)
     if current and current.status=='dispatch_intent' then return store:hold(r.id,'marker_outcome_unknown')end

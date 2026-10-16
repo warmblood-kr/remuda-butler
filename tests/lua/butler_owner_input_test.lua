@@ -9,6 +9,7 @@ local function subject(name,run,without_provider)
     local f,b=remuda,remuda._butler_bus
     local mode={screen='synthetic unparseable footer',instance='fixture-core'}
     local writes,keys,notes={},{},{}
+    local type_attempts=0
     f.fs={};for k,v in pairs(api.fs)do f.fs[k]=v end
     f.json,f.cli,f.random_bytes,f.clock=api.json,api.cli,api.random_bytes,api.clock
     f.butler.approval=nil;f.butler.owner_input=nil;f.butler.guard_grants=nil
@@ -22,6 +23,10 @@ local function subject(name,run,without_provider)
     f.session=function()return{is_busy=true}end -- output activity is not admission.
     f.capture=function()if mode.on_capture then mode.on_capture()end;return mode.screen end;f.capture_styled=nil
     f.type_text=function(_,bytes)
+      type_attempts=type_attempts+1
+      if type_attempts<=(mode.reject_before_write or 0) then
+        error('Codex composer/input rejected; no input was written')
+      end
       writes[#writes+1]=bytes
       if mode.write_throw then error('synthetic ambiguous partial write')end
       if mode.write_false then return false end
@@ -69,6 +74,7 @@ local function subject(name,run,without_provider)
         content={msgtype='m.text',body='!'..text}}
     end
     run({queue=queue,request=request,event=event,state=state,mode=mode,writes=writes,keys=keys,
+      type_attempts=function()return type_attempts end,
       approval=approval,prepared=prepared,bus=b,notes=notes,store_path=dir..'/remuda/butler/input-queue.json'})
   end)
   _G.remuda,_G._butler_session_trace=original,trace
@@ -120,9 +126,38 @@ T.test('marker failure and ambiguous provider outcomes never replay',function()
    s.request('AC02','exact')
    if outcome=='late'or outcome=='unverified'then s.mode.provider=outcome else s.mode[outcome]=true end
    s.queue.tick();T.eq(#s.writes,1);T.eq(s.queue.status()[1].status,'uncertain')
+   T.eq(#s.keys,0,'uncertain delivery never invokes repair')
    s.queue.tick();T.eq(#s.writes,1)
   end)
  end
+end)
+
+T.test('a provider-confirmed no-write rejection gets one adapter repair and one text retry',function()
+ subject('repair-once',function(s)
+  s.request('AC03','exact')
+  s.mode.reject_before_write=1
+  s.queue.tick()
+  T.eq(s.type_attempts(),2,'initial attempt plus one retry')
+  T.eq(table.concat(s.writes,','),'exact','the rejected attempt wrote no payload')
+  T.eq(table.concat(s.keys,','),'C-l','Codex adapter supplies the redraw key')
+  T.eq(s.queue.status()[1].status,'delivered')
+ end)
+ subject('repair-key-refused',function(s)
+  s.request('AC04','exact')
+  s.mode.reject_before_write=1;s.mode.key_false=true
+  s.queue.tick()
+  T.eq(s.type_attempts(),1,'a refused repair cannot authorize retry')
+  T.eq(#s.writes,0);T.eq(#s.keys,1);T.eq(s.queue.status()[1].status,'uncertain')
+ end)
+ subject('repair-rejection-repeats',function(s)
+  s.request('AC05','exact')
+  s.mode.reject_before_write=2
+  s.queue.tick()
+  T.eq(s.type_attempts(),2,'repair is bounded to one retry')
+  T.eq(#s.writes,0);T.eq(table.concat(s.keys,','),'C-l')
+  T.eq(s.queue.status()[1].status,'uncertain')
+  s.queue.tick();T.eq(s.type_attempts(),2,'durable uncertain intent is not replayed')
+ end)
 end)
 T.test('cross-ledger acceptance and marker gaps cannot expire or replay accepted input',function()
  subject('association-gap',function(s)

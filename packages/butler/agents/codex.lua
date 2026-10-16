@@ -140,6 +140,11 @@ remuda._butler_agent_startup.codex = {
     end
     return screen:find("Ask Codex", 1, true) ~= nil
   end,
+  -- This adapter owns the Codex redraw binding. The shared owner-input path
+  -- calls it only after the provider proves the original text wrote no bytes.
+  repair_rejected_input = function(redraw)
+    return type(redraw) == "function" and redraw("C-l") == true
+  end,
   working = function(screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
   clear_input = "C-u",
   -- #29: the empty composer's fixed placeholder (codex 0.156.0), exact match.
