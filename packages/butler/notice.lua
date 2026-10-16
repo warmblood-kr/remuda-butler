@@ -155,8 +155,9 @@ function remuda._butler_prompt_is_empty(kind, screen)
 end
 
 -- Notice admission preserves the live-session and human-pause guards. An
--- explicitly idle client may receive input despite an unknown/nonempty renderer;
--- composer emptiness is only required for the legacy busy-client queue path.
+-- explicitly idle client may receive input into an EMPTY or UNPARSEABLE
+-- composer; a parseable NON-EMPTY draft or a failed capture is refused, since
+-- type_text inserts at the cursor. Busy clients still require EMPTY.
 function remuda._butler_notify_policy(session, now)
   now = now or os.time()
   local row
@@ -201,12 +202,11 @@ function remuda._butler_notify_policy(session, now)
     local captured, current = pcall(remuda.capture, session)
     local agent = bus.agents[session]
     local startup = remuda._butler_agent_startup[agent and agent.kind or ""] or {}
-    if captured and type(current) == "string" and known_startup_modal(startup, current) then
-      return false
-    end
+    -- An unseen composer may hold a draft: fail closed.
+    if not captured or type(current) ~= "string" then return false end
+    if known_startup_modal(startup, current) then return false end
     -- type_text inserts at the cursor: never merge into a parseable draft.
-    if captured and type(current) == "string"
-        and remuda._butler_prompt_is_empty(agent and agent.kind or "", current) == "NON-EMPTY" then
+    if remuda._butler_prompt_is_empty(agent and agent.kind or "", current) == "NON-EMPTY" then
       return false
     end
     return true

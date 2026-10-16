@@ -106,9 +106,9 @@ for _, api in ipairs({ function() return nil end, function() return {} end,
   assert(not remuda._butler_notify_policy("lead"), "unknown busy telemetry keeps legacy policy")
 end
 remuda.session = function() return { is_busy = false } end
--- Unknown capture is a screen-policy uncertainty, not a busy signal.
+-- An unseen composer may hold a draft: fail closed on capture error/non-string.
 remuda.capture = function() error("capture unavailable") end
-assert(remuda._butler_notify_policy("lead"), "idle capture failure allows screen dimension")
+assert(not remuda._butler_notify_policy("lead"), "idle capture failure defers")
 remuda.capture = function() return {} end
-assert(remuda._butler_notify_policy("lead"), "idle malformed capture allows screen dimension")
+assert(not remuda._butler_notify_policy("lead"), "idle malformed capture defers")
 print("ok - idle nonempty notice admission and expired fallback")
