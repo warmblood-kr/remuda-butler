@@ -1509,7 +1509,7 @@ fn notify_policy_preserves_legacy_empty_prompt_when_client_is_not_idle() {
 }
 
 #[test]
-fn idle_codex_trace_row_followed_by_text_does_not_block_notice() {
+fn codex_trace_row_followed_by_user_draft_is_not_empty_or_typed_over() {
     let (path, _daemon) = butler_with_member("codex-trace-row-draft");
     let got = eval(
         &path,
@@ -1533,7 +1533,7 @@ fn idle_codex_trace_row_followed_by_text_does_not_block_notice() {
         return decision .. '|' .. tostring(remuda._notice_test_typed)
         "#,
     );
-    assert_eq!(got, "NON-EMPTY|1", "idle nonempty rendering must allow the notice: {got}");
+    assert_eq!(got, "NON-EMPTY|0", "a trace-looking draft must be preserved: {got}");
 }
 
 #[test]

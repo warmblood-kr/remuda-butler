@@ -53,7 +53,19 @@ end
 assert(remuda._butler_prompt_is_empty("claude", garbled) == "NON-EMPTY")
 for _, kind in ipairs({ "claude", "codex" }) do
   bus.agents.lead.kind = kind
-  for _, screen in ipairs({ garbled, "unrecognized garbled renderer", "❯ actual draft" }) do
+  -- A parseable garbled composer is indistinguishable from a draft: legacy probe/backoff.
+  for _, expired in ipairs({ false, true }) do
+    reset(garbled, expired)
+    deliver("lead")
+    assert(#typed == 0, kind .. " parseable garbled composer is not typed into")
+    if expired then
+      assert(bus.notices.lead.retry_at, "expired probe keeps timeout backoff")
+    else
+      assert(bus.notice_recoveries.lead.phase == "probe", "fresh notice enters probe")
+      assert(#bus.notice_recoveries.lead.message_ids == 4, "all four notices tracked")
+    end
+  end
+  for _, screen in ipairs({ "unrecognized garbled renderer" }) do
     for _, expired in ipairs({ false, true }) do
       reset(screen, expired)
       deliver("lead")
@@ -64,6 +76,19 @@ for _, kind in ipairs({ "claude", "codex" }) do
     end
   end
 end
+-- type_text inserts at the cursor: a parseable real draft would merge with the
+-- notice and be submitted by the verify/Return step, so it must be refused.
+for _, kind in ipairs({ "claude", "codex" }) do
+  bus.agents.lead.kind = kind
+  local draft = "\226\157\175 actual draft"
+  reset(draft, false)
+  remuda.type_text = function(_, text) typed[#typed + 1] = text; frames[1] = draft .. text; return "submitted" end
+  deliver("lead")
+  assert(#typed == 0, kind .. " idle real draft must not be typed into")
+  assert(not (bus.notice_recoveries.lead and bus.notice_recoveries.lead.phase == "verify_notice"),
+    kind .. " idle real draft must not be submitted")
+end
+remuda.type_text = function(_, text) typed[#typed + 1] = text; return "submitted" end
 -- Independent positive restrictions remain effective, regardless of composer text.
 for _, guard in ipairs({ "human", "modal", "replaced", "dead", "busy" }) do
   reset(garbled, false)

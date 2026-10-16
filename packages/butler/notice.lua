@@ -204,6 +204,11 @@ function remuda._butler_notify_policy(session, now)
     if captured and type(current) == "string" and known_startup_modal(startup, current) then
       return false
     end
+    -- type_text inserts at the cursor: never merge into a parseable draft.
+    if captured and type(current) == "string"
+        and remuda._butler_prompt_is_empty(agent and agent.kind or "", current) == "NON-EMPTY" then
+      return false
+    end
     return true
   end
   local full_screen, prompt_screen = screen, screen
