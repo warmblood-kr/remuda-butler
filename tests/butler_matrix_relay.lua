@@ -848,6 +848,9 @@ local function test_matrix_download_explicit_output_without_home()
 end
 
 local function test_state_restart_corruption_and_processed_cap()
+  -- A restart re-reads mention permission state, filtered to create and power
+  -- levels in the configured room so a large room cannot overflow the response cap.
+  local RESTART_STATE = "&full_state=true&filter=%7B%22room%22%3A%7B%22state%22%3A%7B%22types%22%3A%5B%22m.room.create%22%2C%22m.room.power_levels%22%5D%2C%22rooms%22%3A%5B%22%21room%3Aexample.org%22%5D%7D%7D%7D"
   local dir, config_path = fixture()
   local client = scripted_client()
   local state_path = config_path .. ".since"
@@ -866,7 +869,7 @@ local function test_state_restart_corruption_and_processed_cap()
   assert(relay:state().pending["$pending"].references == nil,
     "invalid saved references should be discarded when pending state loads")
   relay:start()
-  assert(client.requests[1].path == "/_matrix/client/v3/sync?since=persisted&timeout=30000",
+  assert(client.requests[1].path == "/_matrix/client/v3/sync?since=persisted&timeout=30000" .. RESTART_STATE,
     "restart must resume the stored cursor without running a baseline")
   relay:stop()
 
@@ -874,7 +877,7 @@ local function test_state_restart_corruption_and_processed_cap()
   local legacy = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
   assert(legacy:state().since == "legacy-cursor", "old cursor-only state must remain readable")
   legacy:start()
-  assert(client.requests[2].path == "/_matrix/client/v3/sync?since=legacy-cursor&timeout=30000")
+  assert(client.requests[2].path == "/_matrix/client/v3/sync?since=legacy-cursor&timeout=30000" .. RESTART_STATE)
   legacy:stop()
 
   local bad = assert(io.open(state_path, "wb")); bad:write("{broken"); bad:close()
@@ -901,6 +904,8 @@ local function test_state_restart_corruption_and_processed_cap()
 end
 
 local function test_pending_delivery_retries_safely_after_restart()
+  -- Same filtered restart snapshot as test_state_restart_corruption_and_processed_cap.
+  local RESTART_STATE = "&full_state=true&filter=%7B%22room%22%3A%7B%22state%22%3A%7B%22types%22%3A%5B%22m.room.create%22%2C%22m.room.power_levels%22%5D%2C%22rooms%22%3A%5B%22%21room%3Aexample.org%22%5D%7D%7D%7D"
   local dir, config_path = fixture()
   local first_client, second_client = scripted_client(), scripted_client()
   local successes = 0
@@ -926,7 +931,7 @@ local function test_pending_delivery_retries_safely_after_restart()
   assert(successes == 1, "restart must retry the pending envelope")
   assert(restarted:state().pending["$pending-restart"] == nil)
   assert(restarted:state().processed["$pending-restart"])
-  assert(second_client.requests[1].path == "/_matrix/client/v3/sync?since=s1&timeout=30000")
+  assert(second_client.requests[1].path == "/_matrix/client/v3/sync?since=s1&timeout=30000" .. RESTART_STATE)
   second_client:complete(1, { json = { next_batch = "s2", rooms = { join = {
     ["!room:example.org"] = { timeline = { events = {
       { type = "m.room.message", event_id = "$pending-restart", sender = "@alice:example.org",
@@ -5586,6 +5591,150 @@ end
 -- once; each waiting mail goes out when ITS fetch answers or fails.
 
 rx_tests = {
+  { "test_rx_structured_room_mentions_and_permission_state", function()
+    local dir, path = rx_fixture()
+    rx_with_dir(dir, function()
+      local relay, client, delivered = rx_relay(path)
+      local cursor = 0
+      local function power(level, threshold)
+        return { type = "m.room.power_levels", state_key = "", sender = OWNER,
+          content = { users = { [OWNER] = level }, notifications = { room = threshold } } }
+      end
+      local function mention(id, metadata, body)
+        local event = rx_msg(id, OWNER, body or "announcement")
+        event.content["m.mentions"] = metadata == nil and { room = true } or metadata
+        return event
+      end
+      local function sync(events, states, room, limited, kind)
+        cursor = cursor + 1
+        client:sync({ json = { next_batch = "roommention" .. cursor, rooms = {
+          [kind or "join"] = { [room or NEW] = {
+            state = states and { events = states } or nil,
+            timeline = { events = events, limited = limited } } } } } })
+        rx_context(client, true)
+      end
+      sync({ mention("$unknown") })
+      assert(not rx_find(delivered, "$unknown"), "unknown state fails closed")
+      sync({ mention("$positive") }, { power(50, 50) })
+      assert(rx_find(delivered, "$positive"), "structured room mention needs no literal text")
+      assert(not rx_followed(relay, NEW, "$positive"), "room mentions never auto-follow")
+      sync({ mention("$before"), power(0, 50), mention("$after"),
+        power(50, 50), mention("$restored") })
+      assert(rx_find(delivered, "$before") and not rx_find(delivered, "$after")
+        and rx_find(delivered, "$restored"), "power changes apply at the message point")
+      sync({ mention("$gap") }, { power(0, 50) }, NEW, true)
+      assert(not rx_find(delivered, "$gap"), "limited timeline applies state delta first")
+      sync({ mention("$gap-restored") }, { power(50, 50) }, NEW, true)
+      assert(rx_find(delivered, "$gap-restored"), "known delta permits limited timeline mention")
+      for index, metadata in ipairs({ { room = false }, { room = "true" }, { room = 1 }, "true", {} }) do
+        sync({ mention("$malformed" .. index, metadata, "@room @roommate #alias:example.org") })
+        assert(not rx_find(delivered, "$malformed" .. index), "only boolean true is a room mention")
+      end
+      local html = mention("$html", {}, "#alias:example.org")
+      html.content.format, html.content.formatted_body = "org.matrix.custom.html",
+        "<a href='https://matrix.to/#/#alias:example.org'>@room</a>"
+      sync({ html, rx_msg("$substring", OWNER, "@roommate"), rx_msg("$legacy", OWNER, "@room") })
+      assert(not rx_find(delivered, "$html") and not rx_find(delivered, "$substring")
+        and not rx_find(delivered, "$legacy"), "text and room links never imply structured broadcast")
+      sync({ mention("$badpower") }, { power("50", 50) })
+      assert(not rx_find(delivered, "$badpower"), "malformed power state fails closed")
+      sync({ mention("$foreign") }, { power(100, 50) }, "!foreign:example.org")
+      sync({ mention("$invited") }, { power(100, 50) }, NEW, false, "invite")
+      sync({ mention("$postinvite") })
+      assert(not rx_find(delivered, "$foreign") and not rx_find(delivered, "$invited")
+        and not rx_find(delivered, "$postinvite"), "only configured joined rooms grant permission")
+      sync({ mention("$rejoined") }, { power(50, 50) })
+      sync({}, nil, NEW, false, "leave")
+      sync({ mention("$afterleave") })
+      assert(rx_find(delivered, "$rejoined") and not rx_find(delivered, "$afterleave"),
+        "leave clears permission before rejoin")
+      sync({ mention("$none") }, { power(50, 50) })
+      relay:set_notification_mode(NEW, "none")
+      sync({ mention("$none-suppressed") })
+      assert(not rx_find(delivered, "$none-suppressed"), "none mode suppresses room mentions")
+      relay:set_notification_mode(NEW, "mentions-followed")
+      sync({ rx_msg("$direct-unchanged", OWNER, "@bot:example.org hello"),
+        rx_msg("$follow-unchanged", OWNER, "reply", rx_thread("$direct-unchanged")) })
+      sync({ rx_msg("$home-unchanged", OWNER, "plain") }, nil, HOME)
+      assert(rx_find(delivered, "$direct-unchanged") and rx_find(delivered, "$follow-unchanged")
+        and rx_find(delivered, "$home-unchanged"), "direct, followed and HOME delivery unchanged")
+      relay:stop()
+      relay, client, delivered = rx_relay(path)
+      assert(client.requests[1].path:find("full_state=true&filter=", 1, true)
+        and client.requests[1].path:find("m.room.power_levels", 1, true),
+        "restart requests a full state snapshot filtered to permission state")
+      sync({ mention("$restart-unknown") })
+      assert(not rx_find(delivered, "$restart-unknown"), "restart never trusts persisted privilege")
+      sync({ mention("$restart-known") }, { power(50, 50) })
+      assert(rx_find(delivered, "$restart-known"), "fresh permission state enables notification")
+      relay:stop()
+      relay:start()
+      assert(client.requests[#client.requests].path:find("full_state=true&filter=", 1, true),
+        "stop/start also clears cached permission and fetches full state")
+      sync({ mention("$same-instance-restart") })
+      assert(not rx_find(delivered, "$same-instance-restart"), "stop/start cannot retain permission")
+      relay:stop()
+      client, delivered = invite_client(), {}
+      relay = relay_module.new({ config_path = path, matrix = client,
+        deliver = function(event) delivered[#delivered + 1] = event return { id = "default" } end })
+      relay:start()
+      local create = { type = "m.room.create", state_key = "", sender = OWNER,
+        content = { creator = OWNER, room_version = "10" } }
+      sync({ mention("$default-creator") }, { create })
+      assert(rx_find(delivered, "$default-creator"), "complete state without power levels gives creator 100")
+      local stranger = mention("$default-stranger")
+      stranger.sender = STRANGER
+      sync({ stranger })
+      assert(not rx_find(delivered, "$default-stranger"), "noncreator default 0 cannot notify room")
+      sync({ mention("$old-creator-zero") }, { power(0, 50) })
+      assert(not rx_find(delivered, "$old-creator-zero"), "old creator obeys explicit power levels")
+      create.content = { room_version = "12" }
+      sync({ mention("$v12-creator") }, { create, power(0, 50) })
+      assert(rx_find(delivered, "$v12-creator"), "v12 creator has infinite power")
+      -- Decode real JSON: the core preserves the distinction between [] and {}.
+      local invalid_power = {
+        '[]', 'null',
+        '{"notifications":[],"users_default":50}',
+        '{"users":[],"users_default":50}',
+        '{"notifications":null,"users_default":50}',
+        '{"users":null,"users_default":50}',
+        '{"users_default":null}',
+        '{"users_default":1e20}',
+        '{"users_default":9007199254740992}',
+        '{"users_default":-9007199254740992}',
+        '{"notifications":{"room":-9007199254740992},"users_default":50}',
+        '{"notifications":{"room":9007199254740992},"users_default":50}',
+        '{"users":{"' .. OWNER .. '":1e20}}',
+      }
+      for index, raw in ipairs(invalid_power) do
+        local event = power(50, 50)
+        event.content = remuda.json.decode(raw)
+        sync({ mention("$json-invalid" .. index) }, { event })
+        assert(not rx_find(delivered, "$json-invalid" .. index), "malformed decoded power fails closed: " .. raw)
+      end
+      local valid_power = {
+        '{"notifications":{},"users":{},"users_default":50}',
+        '{"notifications":{"room":9007199254740991},"users_default":9007199254740991}',
+        '{"notifications":{"room":-9007199254740991},"users_default":-9007199254740991}',
+      }
+      for index, raw in ipairs(valid_power) do
+        local event = power(50, 50)
+        event.content = remuda.json.decode(raw)
+        sync({ mention("$json-valid" .. index) }, { event })
+        assert(rx_find(delivered, "$json-valid" .. index), "valid decoded objects and integer bounds work")
+      end
+      local missing = power(100, 50)
+      missing.content = nil
+      sync({ mention("$missing-power-content") }, { missing })
+      assert(not rx_find(delivered, "$missing-power-content"), "malformed power is not absent power")
+      sync({}, nil, NEW, false, "leave")
+      create.content = { creator = OWNER, room_version = "10" }
+      sync({ mention("$rejoin-default") }, { create })
+      assert(rx_find(delivered, "$rejoin-default"), "rejoin full state restores absent-power defaults")
+      relay:stop()
+    end)
+  end },
+
   { "test_typed_line_switches_and_non_candidates", test_typed_line_switches_and_non_candidates },
   { "test_typed_line_replay_after_restart_and_history_are_not_typed", test_typed_line_replay_after_restart_and_history_are_not_typed },
   { "test_typed_line_target_routing", test_typed_line_target_routing },

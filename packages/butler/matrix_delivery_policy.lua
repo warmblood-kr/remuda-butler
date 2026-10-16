@@ -12,7 +12,8 @@ function policy.accept_mode(mode, mentioned, followed)
 end
 
 function policy.accept_received(cfg, room, subscriptions, event)
-  return policy.accept_mode(matrix.notification_mode(cfg, room), event.is_mention == true,
+  local mentioned = event.is_room_mention == true or event.is_mention == true
+  return policy.accept_mode(matrix.notification_mode(cfg, room), mentioned,
     policy.followed(subscriptions, event.thread_root))
 end
 
@@ -20,8 +21,9 @@ function policy.accept_pending(cfg, room, subscriptions, event)
   -- An accepted trusted mention may have created a follow. Explicitly removing
   -- that follow while mail waits also revokes the mention's pending eligibility.
   -- Old persisted events without mention_follow_root retain the original rule.
-  local mentioned = event.is_mention == true and (event.mention_follow_root == nil
-    or policy.followed(subscriptions, event.mention_follow_root))
+  -- A permitted structured room mention is not a follow-dependent mention.
+  local mentioned = event.is_room_mention == true or (event.is_mention == true and (event.mention_follow_root == nil
+    or policy.followed(subscriptions, event.mention_follow_root)))
   return policy.accept_mode(matrix.notification_mode(cfg, room), mentioned,
     policy.followed(subscriptions, event.thread_root))
 end

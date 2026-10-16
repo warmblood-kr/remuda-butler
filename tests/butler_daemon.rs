@@ -3794,7 +3794,10 @@ fn butler_matrix_relay_persists_cursor_filters_and_deduplicates_fake_events() {
 
     let baseline = "http://matrix.example.org/_matrix/client/v3/sync?timeout=0";
     let first_sync = "http://matrix.example.org/_matrix/client/v3/sync?since=s0&timeout=100";
-    let resumed_sync = "http://matrix.example.org/_matrix/client/v3/sync?since=s1&timeout=100";
+    // A restart resumes the cursor and re-reads room-mention permission state:
+    // full state, filtered to create and power levels in the configured room, so
+    // a large room cannot overflow the response cap and stall live sync.
+    let resumed_sync = "http://matrix.example.org/_matrix/client/v3/sync?since=s1&timeout=100&full_state=true&filter=%7B%22room%22%3A%7B%22state%22%3A%7B%22types%22%3A%5B%22m.room.create%22%2C%22m.room.power_levels%22%5D%2C%22rooms%22%3A%5B%22%21relay%3Aexample.org%22%5D%7D%7D%7D";
     let body = "line one\n\t\\line two";
     let in_room = serde_json::json!([
         {"type":"m.room.member","event_id":"$state-event","sender":"@alice:example.org","content":{"msgtype":"m.text","body":"not a message"}},

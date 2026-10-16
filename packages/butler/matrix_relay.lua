@@ -92,7 +92,7 @@ local function query(path, params)
   local parts = {}
   local order
   if params.from ~= nil then order = { "from", "dir", "limit" }
-  elseif params.since ~= nil then order = { "since", "timeout" }
+  elseif params.since ~= nil then order = { "since", "timeout", "full_state", "filter" }
   else order = { "timeout", "dir", "limit" } end
   for _, key in ipairs(order) do
     local value = params[key]
@@ -381,6 +381,74 @@ local function mentions(content, body, mxid)
     end
     at = first + 1
   end
+end
+
+-- Notification permission is room state, not message text or owner trust.
+-- A complete sync distinguishes absent power levels from state not yet fetched.
+local function notification_state_event(room, event)
+  if room.unusable or type(event) ~= "table" or event.state_key ~= "" then return end
+  if event.type == "m.room.power_levels" then
+    room.power, room.power_seen = event.content, true
+  elseif event.type == "m.room.create" then
+    room.create, room.creator = event.content, event.sender
+  end
+end
+
+-- Inline sync filter: state limited to the two events notification permission
+-- reads, in configured rooms only. Sorted so the request URL is stable.
+local function notification_state_filter(rooms)
+  local ids = {}
+  for room_id in pairs(rooms) do ids[#ids + 1] = encode(room_id) end
+  table.sort(ids)
+  return '{"room":{"state":{"types":["m.room.create","m.room.power_levels"],"rooms":['
+    .. table.concat(ids, ",") .. "]}}}"
+end
+
+local function room_mention_allowed(room, content, sender)
+  local function object(value)
+    if type(value) ~= "table" or value == json.null or getmetatable(value) == JSON_ARRAY_MT then
+      return false
+    end
+    for key in pairs(value) do if type(key) ~= "string" then return false end end
+    return true
+  end
+  local mention = content["m.mentions"]
+  if not object(mention) or mention.room ~= true or not room or room.unusable then return false end
+  local function integer(value, default)
+    if value == nil then return default end
+    if type(value) == "number" and value == value and value ~= math.huge
+        and value >= -9007199254740991 and value <= 9007199254740991
+        and value % 1 == 0 then return value end
+  end
+  local create = room.create
+  local version = type(create) == "table" and (create.room_version or "1") or nil
+  local known_version = type(version) == "string" and version:match("^%d+$")
+    and tonumber(version) >= 1 and tonumber(version) <= 12
+  local creator = known_version and type(create) == "table" and
+    (tonumber(version) <= 10 and create.creator or nil) or nil
+  if known_version and tonumber(version) >= 11 then creator = room.creator end
+  local is_creator = sender == creator
+  if type(create) == "table" and known_version and tonumber(version) >= 12
+      and type(create.additional_creators) == "table" then
+    for _, user in ipairs(create.additional_creators) do
+      if user == sender then is_creator = true end
+    end
+  end
+  local power = room.power
+  if power == nil and not room.power_seen then
+    if not room.complete or not known_version then return false end
+    return is_creator -- all other users default to 0; notification threshold is 50.
+  end
+  if not object(power) then return false end
+  if power.notifications ~= nil and not object(power.notifications) then return false end
+  if power.users ~= nil and not object(power.users) then return false end
+  local threshold = integer(power.notifications and power.notifications.room, 50)
+  local default_level = integer(power.users_default, 0)
+  if default_level == nil then return false end
+  local level = integer(power.users and power.users[sender], default_level)
+  if threshold == nil or level == nil then return false end
+  if is_creator and known_version and tonumber(version) >= 12 then return true end
+  return level >= threshold
 end
 
 local function media_uri(content)
@@ -745,6 +813,7 @@ function relay.new(options)
   local context_fetching, context_fetch_handles = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
   local untrusted_receive_times = {}
+  local notification_rooms, notification_full_state = {}, true
   local typed_line_refusal_at
   local status_reply_at = {}
   -- ponytail: in memory, a restart may repeat the line once
@@ -1745,6 +1814,9 @@ function relay.new(options)
     local added = {}
     for _, ev in ipairs(type(events) == "table" and events or {}) do
       if type(ev) == "table" then
+        if room_id and notification_rooms[room_id] then
+          notification_state_event(notification_rooms[room_id], ev)
+        end
         local event_id = type(ev.event_id) == "string" and ev.event_id or ""
         if (event_id == "" or (not state.processed[event_id] and not state.pending[event_id]))
           and ev.sender ~= cfg.self_mxid then
@@ -1956,6 +2028,7 @@ function relay.new(options)
           local actual_room = room_id or cfg.room
           local sender_kind = member_kind(ev.sender, cfg)
           local is_mention = mentions(content, content.body, cfg.self_mxid)
+          local is_room_mention = room_mention_allowed(notification_rooms[actual_room], content, ev.sender)
           local thread_id = thread_root or in_reply_to
           local subscriptions = state.subscriptions[actual_room] or json.object({})
           state.subscriptions[actual_room] = subscriptions
@@ -1966,7 +2039,7 @@ function relay.new(options)
           end
           local is_agent = sender_kind == "AGENT"
           local accepted = matrix.delivery_policy.accept_received(cfg, actual_room, subscriptions, {
-            thread_root = thread_root, is_mention = is_mention,
+            thread_root = thread_root, is_mention = is_mention, is_room_mention = is_room_mention,
           })
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
@@ -2019,6 +2092,7 @@ function relay.new(options)
             from_agent = is_agent,
             trusted = trusted,
             is_mention = is_mention,
+            is_room_mention = is_room_mention,
             mention_follow_root = is_mention and trusted and subscriptions[follow_root] ~= nil
               and follow_root or nil,
             subscribe_thread = is_mention and trusted,
@@ -2396,6 +2470,41 @@ function relay.new(options)
         remuda._butler_matrix_live_config = cfg
       end
     end
+    if path == SYNC_PATH then
+      local rooms = type(response.rooms) == "table" and response.rooms or {}
+      for _, kind in ipairs({ "leave", "invite" }) do
+        for room_id in pairs(type(rooms[kind]) == "table" and rooms[kind] or {}) do
+          notification_rooms[room_id] = nil
+        end
+      end
+      for room_id in pairs(notification_rooms) do
+        if not cfg.rooms[room_id] then notification_rooms[room_id] = nil end
+      end
+      for room_id, room in pairs(type(rooms.join) == "table" and rooms.join or {}) do
+        if cfg.rooms[room_id] and type(room) == "table" then
+          local snapshot = notification_rooms[room_id] or {}
+          -- Full state is at the START of the timeline. Never use state_after
+          -- as permission for earlier messages. Missing full state fails closed.
+          if notification_full_state then snapshot = {} end
+          if room.state_after ~= nil then snapshot = { unusable = true } end
+          if type(room.state) == "table" and type(room.state.events) == "table" then
+            if notification_full_state then snapshot.complete = true end
+            for _, event in ipairs(room.state.events) do notification_state_event(snapshot, event) end
+            -- Newly joined rooms include full state, including the create event.
+            if snapshot.create ~= nil then snapshot.complete = true end
+          elseif room.timeline and room.timeline.limited == true then
+            snapshot = {}
+          end
+          notification_rooms[room_id] = snapshot
+          if state.since == nil then
+            for _, event in ipairs(room.timeline and room.timeline.events or {}) do
+              notification_state_event(snapshot, event)
+            end
+          end
+        end
+      end
+      if type(response.next_batch) == "string" then notification_full_state = false end
+    end
     if path == SYNC_PATH and state.since == nil then
       if type(response.next_batch) ~= "string" then failed(); return end
       handle_invites(response)
@@ -2459,7 +2568,15 @@ function relay.new(options)
     elseif state.since == nil then
       begin_request(SYNC_PATH, { timeout = "0" }, 10)
     else
-      begin_request(SYNC_PATH, { since = state.since, timeout = tostring(cfg.timeout_ms) }, cfg.timeout_ms / 1000 + 10)
+      local query = { since = state.since, timeout = tostring(cfg.timeout_ms) }
+      if notification_full_state then
+        -- Restart: room mention permission needs state at the timeline start, but
+        -- unfiltered full state can exceed the response cap in large rooms and
+        -- stall live sync. Limit the snapshot to create and power levels for
+        -- configured rooms; the timeline itself is not filtered.
+        query.full_state, query.filter = "true", notification_state_filter(cfg.rooms)
+      end
+      begin_request(SYNC_PATH, query, cfg.timeout_ms / 1000 + 10)
     end
   end
 
@@ -2467,6 +2584,7 @@ function relay.new(options)
     if active then return false end
     generation = generation + 1
     live_sync_ready = false
+    notification_rooms, notification_full_state = {}, true
     active = true
     remuda._butler_matrix_live_config = cfg
     if approval and type(approval.reapply_approved) == "function" then approval.reapply_approved() end
