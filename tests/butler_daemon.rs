@@ -9628,8 +9628,18 @@ fn butler_matrix_cli_rejects_invalid_send_dash_and_fails_cleanly_without_pending
     let help = remuda_timed(&dir, &["-s", "s", "butler", "help"]);
     assert!(help.status.success(), "Butler help failed: {}", String::from_utf8_lossy(&help.stderr));
     let help = String::from_utf8_lossy(&help.stdout);
-    assert!(help.contains("event|get EVENT_ID"), "help omitted the event alias row");
-    assert!(help.contains("join ROOM (operator)"), "help omitted operator guidance");
+    assert!(help.contains("\n\nMatrix:\n") && help.contains("remuda butler matrix --help"),
+        "help must group Matrix and point at its own help: {help}");
+    assert!(!help.contains("redact EVENT_ID"), "help must not list every Matrix verb: {help}");
+    let matrix_help = remuda_timed(&dir, &["-s", "s", "butler", "matrix", "--help"]);
+    assert!(matrix_help.status.success(), "matrix --help failed: {}",
+        String::from_utf8_lossy(&matrix_help.stderr));
+    let matrix_help = String::from_utf8_lossy(&matrix_help.stdout);
+    assert!(matrix_help.contains("\n\nRead:\n") && matrix_help.contains("\n\nWrite:\n"),
+        "matrix --help must group its verbs: {matrix_help}");
+    assert!(matrix_help.contains("event|get EVENT_ID"), "matrix --help omitted the event alias row");
+    assert!(matrix_help.contains("join ROOM (ID, #alias, or public name; operator)"),
+        "matrix --help omitted operator guidance");
     let approvals = remuda_timed(&dir, &["-s", "s", "butler", "approvals"]);
     assert!(approvals.status.success(), "operator approvals failed: {}",
         String::from_utf8_lossy(&approvals.stderr));
