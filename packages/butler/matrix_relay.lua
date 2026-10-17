@@ -1861,6 +1861,7 @@ function relay.new(options)
           if approval_verdict == "grant" and approval_record and approval_record.kind ~= "guard_action" then
             approval_record, approval_verdict = nil, nil
           end
+          local route_mail = false
           local recovery_line = type(content.body) == "string" and (content.body == "!recover-input" or content.body:match("^!recover%-input%s"))
           local typed_line_candidate = not recovery_line and not approval_record and cfg.allowed_senders[ev.sender] == true
             and member_kind(ev.sender, cfg) == "HUMAN"
@@ -1983,8 +1984,11 @@ function relay.new(options)
             persist()
           elseif typed_line_enabled and typed_line_check_failed then
             -- The event was marked processed above; keep this response moving without a retry loop.
+            route_mail = true
           elseif typed_line_enabled and not switch_disabled
               and typed_line_scope_allowed then
+            -- The owner line is typed only after the strict gate above (allowlisted HUMAN sender, live sync, age,
+            -- rate, switches). The typing is additive: the same event then continues to the ordinary mail path.
             if live_sync == true then
               local handled, err = pcall(handle_typed_line, ev, room_id or cfg.room, typed_line_check)
               if not handled then mark_typed_line_error(ev, room_id or cfg.room, err) end
@@ -1993,7 +1997,12 @@ function relay.new(options)
               persist()
               send_typed_line_reply(ev, room_id or cfg.room, typed_line_refusal("not_live"))
             end
+            -- A queue refusal leaves the event unprocessed so a later sync can retry it; mail waits for that retry.
+            route_mail = event_id == "" or state.processed[event_id] == true
           else
+            route_mail = true
+          end
+          if route_mail then
           local reason
           if event_id == "" then reason = "missing_event_id"
           elseif ev.type ~= "m.room.message" then reason = "unsupported_event_type"
