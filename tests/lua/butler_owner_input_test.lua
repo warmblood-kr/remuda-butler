@@ -257,3 +257,32 @@ T.test('open, denied and expired approvals never enter the queue or block plain 
   T.eq(table.concat(s.writes,','),'plain,unapproved AE01')
  end)
 end)
+local function resolve_notes(s)
+ local out={};for _,n in ipairs(s.notes)do if n:find('input-queue resolve',1,true)then out[#out+1]=n end end;return out
+end
+T.test('later input passes an uncertain head on a verified empty composer; head is never retyped',function()
+ subject('pass-uncertain',function(s)
+  s.request('AF01','stuck');s.mode.provider='unverified';s.queue.tick()
+  local id=s.queue.status()[1].id;T.eq(s.queue.status()[1].status,'uncertain');T.eq(table.concat(s.writes,','),'stuck')
+  s.mode.provider=nil;s.mode.screen='› '
+  s.request('AF02','later');s.queue.tick()
+  T.eq(table.concat(s.writes,','),'stuck,later');T.eq(s.queue.status()[1].status,'uncertain');T.eq(s.queue.status()[2].status,'delivered')
+  s.queue.tick();s.queue.tick();T.eq(table.concat(s.writes,','),'stuck,later','no automatic retype')
+  local notes=resolve_notes(s);T.eq(#notes,1,'one notice per uncertain record')
+  T.ok(notes[1]:find('remuda butler input-queue resolve '..id..' not_sent|delivered',1,true))
+  -- Restart/replay: a fresh adapter over the same ledger does not notify again.
+  local again=dofile('packages/butler/owner_input.lua');again.tick();again.tick();T.eq(#resolve_notes(s),1)
+  assert(again.resolve(id,'not_sent',OWNER));again.tick();again.tick()
+  T.eq(table.concat(s.writes,','),'stuck,later','resolving never types the old item');T.eq(again.status()[1].status,'failed')
+ end)
+end)
+T.test('uncertain head keeps later input blocked unless the composer is positively empty',function()
+ for index,screen in ipairs({'› leftover partial','synthetic unparseable footer'})do
+  subject('dirty-'..index,function(s)
+   s.request('AG01','stuck');s.mode.provider='unverified';s.queue.tick();s.mode.provider=nil
+   s.mode.screen=screen;s.request('AG02','later');s.queue.tick()
+   T.eq(table.concat(s.writes,','),'stuck','later item not typed');T.eq(s.queue.status()[2].status,'queued')
+   T.ok(tostring(s.queue.status()[2].reason):find('^uncertain_ahead_'),tostring(s.queue.status()[2].reason))
+  end)
+ end
+end)

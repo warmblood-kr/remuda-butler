@@ -170,15 +170,42 @@ function M.open(path)
   end
   function q:heads()
     return transaction(function(state)
-      local out,seen={},{}
+      -- Per stream, the first non-final record that is not `uncertain` is the head.
+      -- Earlier `uncertain` records never retype and never block it; the copy is
+      -- flagged so the adapter must verify a clean composer before typing.
+      local out,done,after={},{},{}
       for _,r in ipairs(state.records)do
         local key=stream(r)
-        if not FINAL[r.status] and not seen[key] then
-          seen[key]=true
-          if r.status=='queued' and (not r.retry_at or r.retry_at<=os.time()) then out[#out+1]=r end
+        if not FINAL[r.status] and not done[key] then
+          if r.status=='uncertain' then after[key]=true
+          else
+            done[key]=true
+            if r.status=='queued' and (not r.retry_at or r.retry_at<=os.time()) then
+              if after[key] then
+                local copy={};for k,v in pairs(r)do copy[k]=v end
+                copy.past_uncertain=true;out[#out+1]=copy
+              else out[#out+1]=r end
+            end
+          end
         end
       end
       return out,false
+    end)
+  end
+  function q:unnotified()
+    return transaction(function(state)
+      local out={}
+      for _,r in ipairs(state.records)do
+        if r.status=='uncertain' and not r.notified_at then out[#out+1]=receipt(r) end
+      end
+      return out,false
+    end)
+  end
+  function q:mark_notified(id)
+    return transaction(function(state)
+      local r=find(state,id);if not r then return nil,false,'not_found' end
+      if r.notified_at then return true,false end
+      r.notified_at=os.time();return true,true
     end)
   end
   function q:defer(id,reason)
@@ -189,12 +216,13 @@ function M.open(path)
       r.reason=type(reason)=='string' and #reason<=64 and reason:match('^[%w_]+$') and reason or 'admission_unknown';return receipt(r),true
     end)
   end
-  function q:begin(id)
+  function q:begin(id,past_uncertain)
     return transaction(function(state)
       local r=find(state,id);if not r or r.status~='queued' then return nil,false,'state_changed' end
       for _,earlier in ipairs(state.records)do
         if earlier.id==r.id then break end
-        if stream(earlier)==stream(r) and not FINAL[earlier.status] then return nil,false,'head_blocked' end
+        if stream(earlier)==stream(r) and not FINAL[earlier.status]
+            and not(past_uncertain==true and earlier.status=='uncertain') then return nil,false,'head_blocked' end
       end
       r.status,r.dispatch_at,r.reason='dispatch_intent',os.time(),nil
       return receipt(r),true

@@ -242,9 +242,9 @@ function approval.granted_by(event_id, grant_id, class, scope, holder)
 end
 
 -- A plain notice in the owner's room (no request, no mention); nil and why when the relay is not running.
-function approval.notify(text)
+function approval.notify(text, done, opts)
   if not attached or type(attached.post) ~= "function" then return nil, "Matrix relay is not running" end
-  return attached.post(text, nil, function() end, {})
+  return attached.post(text, nil, type(done) == "function" and done or function() end, type(opts) == "table" and opts or {})
 end
 
 -- Named per-second hooks run by sweep(); a name is replaced, never added, so a live reload leaves one.

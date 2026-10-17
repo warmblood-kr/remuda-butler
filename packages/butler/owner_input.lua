@@ -33,6 +33,15 @@ function M.binding(session)
   end
   return nil,'session_not_live'
 end
+-- Strict composer proof for passing an `uncertain` item: only a positively parsed
+-- EMPTY composer qualifies (the generic policy also admits "renderer_unknown").
+local function composer_clean(r)
+  local ok,allowed,why=pcall(remuda._butler_approved_text_policy,r.session)
+  if not ok then return false,'input_policy_error' end
+  if allowed~=true then return false,type(why)=='string' and why:match('^[%w_]+$') and why or 'input_policy_denied' end
+  if why~='composer_empty' then return false,'composer_unverified' end
+  return true
+end
 local function same_target(r)
   local target,why=M.binding(r.session)
   if not target then return false,why end
@@ -41,13 +50,16 @@ local function same_target(r)
   end
   return true
 end
-local function admissible(r,owned_composer)
+local function admissible(r,owned_composer,strict)
   local cfg=remuda._butler_matrix_live_config or{}
   if not(cfg.allowed_senders and cfg.allowed_senders[r.owner]==true) then return false,'owner_not_allowed'end
   if r.route=='prepared' and cfg.approve_text~=true then return false,'approve_text_off'end
   if r.route=='owner_line' and cfg.typed_lines~=true then return false,'typed_lines_off'end
   local ok,allowed,why=pcall(remuda._butler_approved_text_policy,r.session,nil,owned_composer)
   if not ok or allowed~=true then return false,ok and why or 'input_policy_error'end
+  if strict==true then
+    local clean,reason=composer_clean(r);if not clean then return false,reason end
+  end
   return same_target(r) -- Actual identity after policy/capture can yield.
 end
 -- Sampled ownership evidence for the existing separate Return, never a claim
@@ -175,12 +187,17 @@ local function deliver(r)
     if why=='session_changed'then return store:quarantine(r.id)end
     return store:defer(r.id,why)
   end
+  local past=r.past_uncertain==true
+  if past then -- Fail closed: an uncertain earlier item may have left partial text.
+    local clean,why=composer_clean(r)
+    if not clean then return store:defer(r.id,'uncertain_ahead_'..why) end
+  end
   local marked=false
   local own_return=r.route=='owner_line'and return_proof(r)or nil
-  local hooks={expected_instance=r.instance_id,recheck=function()return admissible(r)end,identity=function()return same_target(r)end}
+  local hooks={expected_instance=r.instance_id,recheck=function()return admissible(r,nil,past)end,identity=function()return same_target(r)end}
   hooks.before=function()
-    if admissible(r)~=true then return false end
-    local marker=store:begin(r.id);if not marker then return false end
+    if admissible(r,nil,past)~=true then return false end
+    local marker=store:begin(r.id,past);if not marker then return false end
     marked=true
     if r.route=='prepared' then
       local rec=approval.for_id(r.approval_id)
@@ -219,6 +236,31 @@ local function deliver(r)
   end
   return store:finish(r.id,'delivered',r.route=='owner_line'and'submitted+RET'or'submitted')
 end
+-- One owner notice per uncertain record. `notified_at` is stored in the durable
+-- ledger only after the relay confirms the post, so restarts and resyncs do not
+-- repeat it; a crash between post and mark can repeat it once (at-least-once).
+local notifying,notify_retry={}, {}
+local function plain(v)return(tostring(v):gsub('[%c]',' '))end
+local function notify_uncertain()
+  local rows=store:unnotified();if not rows then return end
+  for _,r in ipairs(rows)do
+    if not notifying[r.id] and(notify_retry[r.id]or 0)<=os.time()then
+      local text='Input queue item '..plain(r.id)..' for session '..plain(r.session)
+        ..' is uncertain ('..plain(r.reason or'unknown')..'). It may have been partly typed and will NOT be retried automatically. '
+        ..'Later input continues once the session composer is verified empty. When you know the outcome run: '
+        ..'remuda butler input-queue resolve '..plain(r.id)..' not_sent|delivered'
+      notifying[r.id]=true
+      local id=r.id
+      local ok,handle=pcall(approval.notify,text,function(result)
+        notifying[id]=nil
+        if type(result)=='table' and not result.error and type(result.event_id)=='string' and result.event_id~='' then
+          store:mark_notified(id)
+        else notify_retry[id]=os.time()+30 end
+      end,{mention=true})
+      if not ok or not handle then notifying[id]=nil;notify_retry[id]=os.time()+30 end
+    end
+  end
+end
 local ticking=false
 function M.tick()
   if ticking or not store then return end
@@ -234,6 +276,7 @@ function M.tick()
     end
   end
   pcall(sync_approvals)
+  pcall(notify_uncertain)
   ticking=false
 end
 function M.status()if not store then return nil,unavailable()end;return store:list()end
