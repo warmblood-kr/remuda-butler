@@ -122,6 +122,7 @@ function M.open(path)
       local state,err=load();if not state then return nil,err end
       local value,dirty,err=fn(state)
       if dirty then
+        if #state.records==0 then state.records=json.array({}) end -- empty tables are ambiguous to encode
         local body=json.encode(state)
         if #body>FILE then return nil,'storage_too_large' end
         local written=fs.write_atomic(path,body,{private=true})
@@ -272,13 +273,14 @@ function M.open(path)
   -- Ledgers written before notices existed have no `notified_at`; stamp their
   -- uncertain records once so an upgrade does not mention the owner per old item.
   -- Runs before recovery: a dispatch_intent record recovered at this open must still be announced.
-  transaction(function(state)
-    if state.notice_baseline then return nil,false end
+  local baselined,bwhy=transaction(function(state)
+    if state.notice_baseline then return true,false end
     for _,r in ipairs(state.records)do
       if r.status=='uncertain' and not r.notified_at then r.notified_at=os.time() end
     end
-    state.notice_baseline=true;return nil,true
+    state.notice_baseline=true;return true,true
   end)
+  if not baselined then return nil,bwhy end
   local recovered,why=transaction(function(state)
     local changed=false
     for _,r in ipairs(state.records)do
