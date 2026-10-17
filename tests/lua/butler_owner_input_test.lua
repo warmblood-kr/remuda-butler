@@ -235,3 +235,54 @@ T.test('human reset at every posttext capture blocks separate Return',function()
   end
  end
 end)
+T.test('open, denied and expired approvals never enter the queue or block plain input',function()
+ subject('pending-outside-queue',function(s)
+  local binding=assert(s.queue.binding('codex'))
+  for _,id in ipairs({'AE01','AE02','AE03'})do
+   local text='unapproved '..id
+   s.state.approvals[id]={id=id,kind='approve_text',status='open',event_id='$request-'..id,nonce='nonce-'..id,
+    expires_at=(os.time()+30)*1000,created_ms=os.time()*1000,
+    data={request_id=id,registered_text=text,bytes=#text,session='codex',session_id=binding.agent_id,
+     session_marker=binding.session_marker,core_instance=binding.instance_id,session_binding_version=2}}
+  end
+  assert(s.approval.answer('$request-AE02','deny',OWNER,'$deny'))
+  s.state.approvals.AE03.expires_at=1;s.approval.sweep(os.time()*1000+5000)
+  T.eq(s.state.approvals.AE01.status,'open');T.eq(s.state.approvals.AE02.status,'denied');T.eq(s.state.approvals.AE03.status,'expired')
+  T.eq(#s.queue.status(),0,'no approval request is a queue record until approved')
+  local line=s.event('L1','plain');local receipt=assert(s.queue.accept_line('codex','plain',line,'!home:fixture',true))
+  s.queue.tick();T.eq(table.concat(s.writes,','),'plain');T.eq(#s.queue.status(),1);T.eq(receipt.status,'queued')
+  assert(s.approval.answer('$request-AE01','approve',OWNER,'$ok'))
+  T.eq(#s.queue.status(),2,'approval enqueues exactly once');T.eq(s.approval.answer("$request-AE01","approve",OWNER,"$ok2"),nil)
+  T.eq(#s.queue.status(),2,'double approval is idempotent');s.queue.tick()
+  T.eq(table.concat(s.writes,','),'plain,unapproved AE01')
+ end)
+end)
+local function resolve_notes(s)
+ local out={};for _,n in ipairs(s.notes)do if n:find('input-queue resolve',1,true)then out[#out+1]=n end end;return out
+end
+T.test('later input passes an uncertain head on a verified empty composer; head is never retyped',function()
+ subject('pass-uncertain',function(s)
+  s.request('AF01','stuck');s.mode.provider='unverified';s.queue.tick()
+  local id=s.queue.status()[1].id;T.eq(s.queue.status()[1].status,'uncertain');T.eq(table.concat(s.writes,','),'stuck')
+  s.mode.provider=nil;s.mode.screen='› '
+  s.request('AF02','later');s.queue.tick()
+  T.eq(table.concat(s.writes,','),'stuck,later');T.eq(s.queue.status()[1].status,'uncertain');T.eq(s.queue.status()[2].status,'delivered')
+  s.queue.tick();s.queue.tick();T.eq(table.concat(s.writes,','),'stuck,later','no automatic retype')
+  local notes=resolve_notes(s);T.eq(#notes,1,'one notice per uncertain record')
+  T.ok(notes[1]:find('remuda butler input-queue resolve '..id..' not_sent|delivered',1,true))
+  -- Restart/replay: a fresh adapter over the same ledger does not notify again.
+  local again=dofile('packages/butler/owner_input.lua');again.tick();again.tick();T.eq(#resolve_notes(s),1)
+  assert(again.resolve(id,'not_sent',OWNER));again.tick();again.tick()
+  T.eq(table.concat(s.writes,','),'stuck,later','resolving never types the old item');T.eq(again.status()[1].status,'failed')
+ end)
+end)
+T.test('uncertain head keeps later input blocked unless the composer is positively empty',function()
+ for index,screen in ipairs({'› leftover partial','synthetic unparseable footer'})do
+  subject('dirty-'..index,function(s)
+   s.request('AG01','stuck');s.mode.provider='unverified';s.queue.tick();s.mode.provider=nil
+   s.mode.screen=screen;s.request('AG02','later');s.queue.tick()
+   T.eq(table.concat(s.writes,','),'stuck','later item not typed');T.eq(s.queue.status()[2].status,'queued')
+   T.ok(tostring(s.queue.status()[2].reason):find('^uncertain_ahead_'),tostring(s.queue.status()[2].reason))
+  end)
+ end
+end)

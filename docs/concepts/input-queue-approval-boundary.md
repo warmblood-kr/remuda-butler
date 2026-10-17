@@ -1,0 +1,15 @@
+# Input queue vs approvals; uncertain heads
+
+Approval-pending requests are NOT in the input queue (main 55861db). The queue (`input_queue.lua`, `input-queue.json`) is fed only by `owner_input.lua`: `accept_prepared` (line 98, needs `rec.status=='approved'`) and `accept_line` (line 131, live owner `!` line). Open/denied/expired `approve_text` requests live in the relay approval store (`approval.request`, status `open`), which survives restarts; deny/expire only reply. guard_action approvals never touch the queue. Approval enqueues exactly once (stable `iq-` id from event_id+nonce; second approve is "Already answered"; replayed accept returns the existing receipt), also across restart. The terminal cannot approve approve_text. Nothing here is in Remuda core except the bound-input provider.
+
+## Uncertain heads (owner choice c)
+
+An item goes `uncertain` after an ambiguous post-intent result (late/unverified/false/throw, marker failure, restart during dispatch). It may have partly typed. It is never auto-retried and stays listed until `input-queue resolve ID not_sent|delivered`.
+
+Rule: per stream, an `uncertain` record no longer blocks later `queued` records. `q:heads()` skips uncertain records and returns the first other non-final record if it is `queued` and due, flagged `past_uncertain`. `dispatch_intent`, `quarantined` or a not-yet-due deferred record ahead still block, so ordering among non-uncertain records is unchanged. `q:begin(id)` still returns `head_blocked` unless the adapter passes `past_uncertain`.
+
+Composer guard (owner_input.lua `composer_clean`): a flagged item is typed only if `_butler_approved_text_policy` returns allowed with reason `composer_empty`, i.e. a fresh screen capture parses to a positively EMPTY composer, with the usual human-idle, workflow and modal gates. It is checked before dispatch intent, again after the marker (hooks.recheck), and at the final identity fence. Anything else (`composer_nonempty`, `renderer_unknown`/unparseable, no capture, policy error) defers with reason `uncertain_ahead_<why>` and normal backoff: fail closed. Limits: screen scraping only; text the uncertain item typed and submitted leaves the composer empty and cannot be seen; no native input-generation token exists, so human typing after the last sample is not excluded.
+
+`not_sent` marks the record `failed` (final); it is not re-queued, so resolving never types old text after newer items went through. `delivered` marks it delivered. Re-send, if wanted, is a new owner action.
+
+Notification: `owner_input.notify_uncertain` (each tick) posts one mention notice through `approval.notify` (the relay's Matrix post to the owner room) for each uncertain record without `notified_at`, with the session, reason and the exact resolve command (no payload). `notified_at` is written to the ledger only after the relay confirms the post, so restarts and resyncs do not repeat it; failed posts retry after 30s; a crash between post and mark can repeat the notice once.
