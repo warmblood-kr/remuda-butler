@@ -154,11 +154,22 @@ function remuda._butler_prompt_is_empty(kind, screen)
   return "NON-EMPTY", text
 end
 
--- The one delivery policy: may Butler type into SESSION now? Every pane needs
--- a known empty prompt. An attached pane also needs the human to pause
--- (human_idle >= remuda._butler_notice_human_idle, default 10s) or, on a core
--- without human_idle, a screen unchanged for NOTICE_STABLE_SECONDS. Anything
--- unrecognised defers.
+-- Heuristic for a screen with no composer glyph that is really a dialog:
+-- numbered choices or a confirm/cancel hint. Not exhaustive; unlisted dialogs
+-- are the residual risk of admitting UNPARSEABLE on an idle client.
+local function looks_like_dialog(screen)
+  local lower = screen:lower()
+  for _, marker in ipairs({ "(y/n)", "[y/n]", "esc to cancel", "enter to confirm", "press enter",
+      "do you want", "do you trust", "allow " }) do
+    if lower:find(marker, 1, true) then return true end
+  end
+  return ("\n" .. screen):find("\n%s*[❯›>]?%s*%d+[%.%)]%s") ~= nil
+end
+
+-- Notice admission preserves the live-session and human-pause guards. An
+-- explicitly idle client may receive input into an EMPTY or UNPARSEABLE
+-- composer; a parseable NON-EMPTY draft, a dialog-looking screen or a failed
+-- capture is refused, since type_text inserts at the cursor. Busy clients still require EMPTY.
 function remuda._butler_notify_policy(session, now)
   now = now or os.time()
   local row
@@ -167,9 +178,6 @@ function remuda._butler_notify_policy(session, now)
   end
   if not row or not row.alive then return false end
   local attached = row.attached
-  -- Do not gate on session.is_busy: it can reflect background agents while
-  -- this pane's prompt is idle. Require a known empty composer below, and an
-  -- attached human's idle pause above, before any notice is typed.
   local seen = bus.notice_screens[session] or {}
   bus.notice_screens[session] = seen
   local screen
@@ -187,6 +195,18 @@ function remuda._butler_notify_policy(session, now)
       return false
     end
     if now - seen.since < NOTICE_STABLE_SECONDS then return false end
+  end
+  -- Use the shared exception classifier before either admission path. Its
+  -- session identity, current-instance, audit and modal restrictions still apply.
+  local dialogs = remuda.butler and remuda.butler.dialogs
+  if dialogs and type(dialogs.check) == "function" then
+    local checked, allowed = pcall(dialogs.check, session)
+    if not checked or not allowed then return false end
+  end
+  local idle = false
+  if type(remuda.session) == "function" then
+    local checked, state = pcall(remuda.session, session)
+    idle = checked and type(state) == "table" and state.is_busy == false
   end
   local full_screen, prompt_screen = screen, screen
   if remuda.capture_styled then
@@ -212,6 +232,8 @@ function remuda._butler_notify_policy(session, now)
     captured, full_screen = pcall(remuda.capture, session)
     if not captured then return false end
   end
+  -- An unseen composer may hold a draft: fail closed on a malformed capture.
+  if type(full_screen) ~= "string" then return false end
   prompt_screen = prompt_screen or full_screen
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
@@ -229,15 +251,21 @@ function remuda._butler_notify_policy(session, now)
     local full_decision, full_text = remuda._butler_prompt_is_empty(kind, full_screen)
     if full_decision == "EMPTY" then decision, text = full_decision, full_text end
   end
+  -- An explicitly idle client also admits UNPARSEABLE, except where the cursor
+  -- row says it is off the prompt (styled core) or the screen looks like a dialog.
+  local admit_unparseable = idle and prompt_screen == full_screen and not looks_like_dialog(full_screen)
+  if decision == "UNPARSEABLE" and idle and not admit_unparseable then decision = "DIALOG" end
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
-    if decision ~= "EMPTY" then diagnostic("deferred", "prompt_policy", session) end
+    if decision ~= "EMPTY" and not (decision == "UNPARSEABLE" and admit_unparseable) then
+      diagnostic("deferred", "prompt_policy", session)
+    end
     _butler_session_trace("notice_prompt", "message_ids="
       .. table.concat(bus.notices[session] and bus.notices[session].message_order or {}, ",")
       .. " session=" .. session .. " kind=" .. kind .. " decision=" .. decision
-      .. " composer_bytes=" .. tostring(#text))
+      .. " composer_bytes=" .. tostring(#text) .. (idle and " idle=true" or ""))
   end
-  return decision == "EMPTY"
+  return decision == "EMPTY" or (decision == "UNPARSEABLE" and admit_unparseable)
 end
 
 -- The composer decision the policy makes, for callers that hold a raw screen (first-task
@@ -1040,7 +1068,7 @@ local function deliver_notice(session)
     if notice_now() - recovering.started_at >= NOTICE_RECOVERY_TIMEOUT_S then
       if remuda._butler_notify_policy(session) then
         if not notice_fallback_or_fail(session, recovering, pending,
-            "recovery-timeout; prompt-empty; falling-back-to-normal-delivery") then return false end
+            "recovery-timeout; policy-allows; falling-back-to-normal-delivery") then return false end
         recovering = nil
       else
         return notice_recovery_error(session, recovering, "recovery timed out after 20 seconds")
