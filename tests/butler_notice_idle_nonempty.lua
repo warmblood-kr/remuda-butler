@@ -112,3 +112,28 @@ assert(not remuda._butler_notify_policy("lead"), "idle capture failure defers")
 remuda.capture = function() return {} end
 assert(not remuda._butler_notify_policy("lead"), "idle malformed capture defers")
 print("ok - idle nonempty notice admission and expired fallback")
+-- Idle Claude with a dim ghost suggestion is an EMPTY composer: the idle branch must
+-- reach the styled (#137) cursor-row path (real fixture from tests/butler_composer_ghost.lua).
+local ghost = "────\n❯ remuda butler inbox\n────\n  ⏵⏵ auto mode on"
+bus.agents.lead.kind = "claude"
+remuda.capture = function() return ghost end
+remuda.capture_styled = function()
+  return { cursor = { row = 2 }, rows = { {}, { { text = "❯ " }, { text = "remuda butler inbox", dim = true } } } }
+end
+assert(remuda._butler_prompt_is_empty("claude", ghost) == "NON-EMPTY")
+assert(remuda._butler_notify_policy("lead"), "idle dim ghost suggestion must admit notices")
+-- The same text as a real (non-dim) draft stays refused.
+remuda.capture_styled = function()
+  return { cursor = { row = 2 }, rows = { {}, { { text = "❯ remuda butler inbox" } } } }
+end
+assert(not remuda._butler_notify_policy("lead"), "idle real draft stays refused with capture_styled")
+remuda.capture_styled = nil
+-- An unlisted dialog with no composer glyph is not typed into on idle.
+for _, dialog in ipairs({ "Do you want to proceed?\n 1. Yes\n 2. No", "Run this command? (y/n)",
+    "Pick one\n  1. Alpha\n  2. Beta" }) do
+  remuda.capture = function() return dialog end
+  assert(not remuda._butler_notify_policy("lead"), "idle unknown dialog refused: " .. dialog)
+end
+remuda.capture = function() return "unrecognized garbled renderer" end
+assert(remuda._butler_notify_policy("lead"), "glyphless non-dialog screen still admitted")
+print("ok - idle ghost suggestion admitted, unknown dialogs refused")

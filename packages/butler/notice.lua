@@ -154,10 +154,22 @@ function remuda._butler_prompt_is_empty(kind, screen)
   return "NON-EMPTY", text
 end
 
+-- Heuristic for a screen with no composer glyph that is really a dialog:
+-- numbered choices or a confirm/cancel hint. Not exhaustive; unlisted dialogs
+-- are the residual risk of admitting UNPARSEABLE on an idle client.
+local function looks_like_dialog(screen)
+  local lower = screen:lower()
+  for _, marker in ipairs({ "(y/n)", "[y/n]", "esc to cancel", "enter to confirm", "press enter",
+      "do you want", "do you trust", "allow " }) do
+    if lower:find(marker, 1, true) then return true end
+  end
+  return ("\n" .. screen):find("\n%s*[❯›>]?%s*%d+[%.%)]%s") ~= nil
+end
+
 -- Notice admission preserves the live-session and human-pause guards. An
 -- explicitly idle client may receive input into an EMPTY or UNPARSEABLE
--- composer; a parseable NON-EMPTY draft or a failed capture is refused, since
--- type_text inserts at the cursor. Busy clients still require EMPTY.
+-- composer; a parseable NON-EMPTY draft, a dialog-looking screen or a failed
+-- capture is refused, since type_text inserts at the cursor. Busy clients still require EMPTY.
 function remuda._butler_notify_policy(session, now)
   now = now or os.time()
   local row
@@ -196,21 +208,6 @@ function remuda._butler_notify_policy(session, now)
     local checked, state = pcall(remuda.session, session)
     idle = checked and type(state) == "table" and state.is_busy == false
   end
-  if idle then
-    -- Do not clear, probe or reinterpret stale composer text as a busy turn.
-    -- Keep the startup detector for callers without the shared dialog module.
-    local captured, current = pcall(remuda.capture, session)
-    local agent = bus.agents[session]
-    local startup = remuda._butler_agent_startup[agent and agent.kind or ""] or {}
-    -- An unseen composer may hold a draft: fail closed.
-    if not captured or type(current) ~= "string" then return false end
-    if known_startup_modal(startup, current) then return false end
-    -- type_text inserts at the cursor: never merge into a parseable draft.
-    if remuda._butler_prompt_is_empty(agent and agent.kind or "", current) == "NON-EMPTY" then
-      return false
-    end
-    return true
-  end
   local full_screen, prompt_screen = screen, screen
   if remuda.capture_styled then
     -- A core with remuda#137 marks dim text: parse only the cursor row, and
@@ -235,6 +232,8 @@ function remuda._butler_notify_policy(session, now)
     captured, full_screen = pcall(remuda.capture, session)
     if not captured then return false end
   end
+  -- An unseen composer may hold a draft: fail closed on a malformed capture.
+  if type(full_screen) ~= "string" then return false end
   prompt_screen = prompt_screen or full_screen
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
@@ -252,15 +251,21 @@ function remuda._butler_notify_policy(session, now)
     local full_decision, full_text = remuda._butler_prompt_is_empty(kind, full_screen)
     if full_decision == "EMPTY" then decision, text = full_decision, full_text end
   end
+  -- An explicitly idle client also admits UNPARSEABLE, except where the cursor
+  -- row says it is off the prompt (styled core) or the screen looks like a dialog.
+  local admit_unparseable = idle and prompt_screen == full_screen and not looks_like_dialog(full_screen)
+  if decision == "UNPARSEABLE" and idle and not admit_unparseable then decision = "DIALOG" end
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
-    if decision ~= "EMPTY" then diagnostic("deferred", "prompt_policy", session) end
+    if decision ~= "EMPTY" and not (decision == "UNPARSEABLE" and admit_unparseable) then
+      diagnostic("deferred", "prompt_policy", session)
+    end
     _butler_session_trace("notice_prompt", "message_ids="
       .. table.concat(bus.notices[session] and bus.notices[session].message_order or {}, ",")
       .. " session=" .. session .. " kind=" .. kind .. " decision=" .. decision
-      .. " composer_bytes=" .. tostring(#text))
+      .. " composer_bytes=" .. tostring(#text) .. (idle and " idle=true" or ""))
   end
-  return decision == "EMPTY"
+  return decision == "EMPTY" or (decision == "UNPARSEABLE" and admit_unparseable)
 end
 
 -- The composer decision the policy makes, for callers that hold a raw screen (first-task

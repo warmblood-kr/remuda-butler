@@ -1455,7 +1455,7 @@ fn five_relay_mails_wait_until_a_busy_pane_is_free_and_coalesce() {
 /// #29: one case per branch of `remuda._butler_notify_policy`, with `ls` and
 /// `capture` stubbed and the clock passed in.
 #[test]
-fn notify_policy_preserves_legacy_empty_prompt_when_client_is_not_idle() {
+fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
     let dir = scratch("notice-policy");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
@@ -1470,7 +1470,7 @@ fn notify_policy_preserves_legacy_empty_prompt_when_client_is_not_idle() {
             local row, screen = {{ name = 'p1', alive = true, attached = true }}, ''
             remuda.ls = function() return {{ row }} end
             remuda.capture = function() return screen end
-            remuda.session = function() return {{ is_busy = true }} end
+            remuda.session = function() return {{ is_busy = false }} end
             local policy, t = remuda._butler_notify_policy, 0
             local function settled(text) t = t + 100; screen = text; policy('p1', t); return policy('p1', t + 3) end
             local r = {{}}
@@ -1505,7 +1505,7 @@ fn notify_policy_preserves_legacy_empty_prompt_when_client_is_not_idle() {
     );
     let log = std::fs::read_to_string(&trace).unwrap_or_default();
     assert!(log.contains("notice_prompt\tmessage_ids= session=p1 kind= decision=NON-EMPTY composer_bytes=2"), "{log}");
-    assert!(log.contains("notice_prompt\tmessage_ids= session=p1 kind= decision=UNPARSEABLE composer_bytes=0"), "{log}");
+    assert!(log.contains("notice_prompt\tmessage_ids= session=p1 kind= decision=DIALOG composer_bytes=0"), "{log}");
 }
 
 #[test]
@@ -2417,7 +2417,7 @@ fn notify_policy_uses_human_idle_and_dim_spans_when_the_core_has_them() {
         r#"local real_ls, real_capture, real_styled, real_session = remuda.ls, remuda.capture, remuda.capture_styled, remuda.session
         local row, spans = { name = 'p1', alive = true, attached = true }, {}
         remuda.ls = function() return { row } end
-        remuda.session = function() return { is_busy = true } end
+        remuda.session = function() return { is_busy = false } end
         remuda.capture = function() error('the new-core path must not need plain capture') end
         remuda.capture_styled = function()
           return { rows = { { { text = 'history', dim = false } }, spans }, cursor = { row = 2, col = 3, visible = true } }
