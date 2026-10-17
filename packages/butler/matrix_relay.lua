@@ -363,24 +363,38 @@ local function approval_answer_fields(ev)
   return targets, verdict, explicit_id, text_verdict, content.msgtype
 end
 
+-- Whole-token scan: needle must not touch an mxid character on either side;
+-- open_left skips the left check for needles that start inside a URL.
+local function has_token(text, needle, open_left)
+  local at = 1
+  while true do
+    local first, last = text:find(needle, at, true)
+    if not first then return false end
+    local before = first > 1 and text:sub(first - 1, first - 1) or nil
+    local after = text:sub(last + 1, last + 1)
+    local boundary = "[%w._=/%-:@]"
+    if (open_left or not before or not before:match(boundary)) and (after == "" or not after:match(boundary)) then
+      return true
+    end
+    at = first + 1
+  end
+end
+
+-- Element's autocomplete pill carries the mxid only in formatted_body, as a
+-- matrix.to link (plain or percent-encoded), when m.mentions is absent.
+local function pill_mentions(formatted, mxid)
+  if type(formatted) ~= "string" then return false end
+  local encoded = ("matrix.to/#/" .. mxid):gsub("@", "%%40"):gsub(":", "%%3a"):lower()
+  return has_token(formatted, "matrix.to/#/" .. mxid, true) or has_token(formatted:lower(), encoded, true)
+end
+
 local function mentions(content, body, mxid)
   local mentions = content and content["m.mentions"]
   if type(mentions) == "table" and type(mentions.user_ids) == "table" then
     for _, user in ipairs(mentions.user_ids) do if user == mxid then return true end end
   end
-  if type(body) ~= "string" then return false end
-  local at = 1
-  while true do
-    local first, last = body:find(mxid, at, true)
-    if not first then return false end
-    local before = first > 1 and body:sub(first - 1, first - 1) or nil
-    local after = body:sub(last + 1, last + 1)
-    local boundary = "[%w._=/%-:@]"
-    if (not before or not before:match(boundary)) and (after == "" or not after:match(boundary)) then
-      return true
-    end
-    at = first + 1
-  end
+  if type(body) == "string" and has_token(body, mxid) then return true end
+  return pill_mentions(content and content.formatted_body, mxid)
 end
 
 -- Notification permission is room state, not message text or owner trust.

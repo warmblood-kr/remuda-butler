@@ -5996,6 +5996,28 @@ rx_tests = {
     end)
   end },
   { "test_rx_mention_follows_thread", test_rx_mention_follows_thread },
+  { "test_rx_pill_mention_without_m_mentions", function()
+    local dir, path = rx_fixture()
+    rx_with_dir(dir, function()
+      local relay, client, delivered = rx_relay(path)
+      -- Element autocomplete pill: body has only the display name, no m.mentions.
+      local function pill(id, href)
+        local ev = rx_msg(id, OWNER, "bot \240\159\146\149: hello")
+        ev.content.format = "org.matrix.custom.html"
+        ev.content.formatted_body = '<a href="https://matrix.to/#/' .. href .. '">@bot:example.org</a>: hello'
+        return ev
+      end
+      rx_sync(client, NEW, { pill("$pill-plain", "@bot:example.org") })
+      assert(rx_find(delivered, "$pill-plain"), "a matrix.to pill mentions the butler")
+      rx_sync(client, NEW, { pill("$pill-enc", "%40bot%3Aexample.org") })
+      assert(rx_find(delivered, "$pill-enc"), "a percent-encoded pill mentions the butler")
+      rx_sync(client, NEW, { pill("$pill-other", "@bot:example.org.evil") })
+      assert(not rx_find(delivered, "$pill-other"), "a longer mxid is not this butler")
+      rx_sync(client, NEW, { pill("$pill-x", "@notbot:example.org") })
+      assert(not rx_find(delivered, "$pill-x"), "another user's pill is not a mention")
+      relay:stop()
+    end)
+  end },
   { "test_rx_main_timeline_reply_is_root", test_rx_main_timeline_reply_is_root },
   { "test_rx_in_thread_reply_unfollowed_not_delivered", test_rx_in_thread_reply_unfollowed_not_delivered },
   { "test_rx_follow_guard_refuses_and_warns_no_trim", test_rx_follow_guard_refuses_and_warns_no_trim },
