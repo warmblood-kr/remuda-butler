@@ -253,24 +253,46 @@ the verb or its positional arguments. `--json` selects machine-readable
 output. Verbs that accept `--room ROOM` require the configured HOME,
 ALL-BUTLERS, or a joined room.
 
+`remuda butler matrix --help` (also `matrix` or `matrix help`) prints the verbs
+in groups; `remuda butler matrix <verb> --help` shows one verb's arguments and
+options. `remuda butler help` only points there.
+
 ```text
-remuda butler matrix [--json] status
-remuda butler matrix [--json] rooms
-remuda butler matrix [--json] [--room ROOM] [-n N] history
-remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
-remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
-remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
-remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
-remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
-remuda butler matrix [--json] [-o PATH] download MXC
-remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
-remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
-remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
-remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
-remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
-remuda butler matrix [--json] join ROOM
-remuda butler matrix [--json] leave ROOM
-remuda butler matrix [--json] quarantine [--id EVENT_ID]
+Usage: remuda butler matrix [--json] [--room ROOM] <verb> [ARGS]
+Run `remuda butler matrix <verb> --help` for one verb's arguments and options.
+
+Read:
+  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+
+Threads and notifications:
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
+
+Write:
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+
+Rooms and moderation (operator):
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
+  remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Setup (operator):
+  remuda butler matrix setup [OPTIONS]
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
+Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.
 ```
 
 `thread` takes an event ID or the ID of a Matrix mail (`01M...`). A mail ID
@@ -311,7 +333,8 @@ session PATH must also lie inside the session's working directory; with no
 require typed lines to be on; turning typed lines off also turns shell lines
 off. `remuda butler doctor` reports the current values as `Typed lines: on|off`
 and `Shell lines: on|off`. Both switches are off by default. When a switch is
-off, matching messages stay on the ordinary mail path.
+off, matching messages stay on the ordinary mail path. A line that is
+typed is also delivered to the inbox as ordinary mail, so typing is additive.
 These CLI gates do not defend against a hostile same-user agent that clears
 its identity (see Butler #264). The real protection is that both switches
 default off.

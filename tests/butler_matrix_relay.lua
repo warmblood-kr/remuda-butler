@@ -42,6 +42,7 @@ dofile("packages/butler/guard_policy.lua")
 dofile("packages/butler/guard_grants.lua")
 dofile("packages/butler/guard_approval.lua")
 dofile("packages/butler/matrix_delivery_policy.lua")
+dofile("packages/butler/matrix_mentions.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function remove_dir(dir)
@@ -171,8 +172,8 @@ local function test_typed_line_switches_and_non_candidates()
       if tostring(request.path):find("/send/m.reaction/", 1, true) then success_reactions = success_reactions + 1 end
     end
     assert(success_reactions == 1, "a successfully typed line should get one success reaction")
-    assert(#delivered == 1 and delivered[1].event_id == "$ordinary",
-      "messages without a leading bang must continue through the mail path")
+    assert(#delivered == 2 and delivered[1].event_id == "$ordinary" and delivered[2].event_id == "$on",
+      "ordinary messages and typed owner lines both continue through the mail path")
     relay:stop()
     cleanup_fixture(dir, config_path)
 
@@ -189,8 +190,8 @@ local function test_typed_line_switches_and_non_candidates()
     } } } })
     assert(#typed == 2 and typed[2].session == "butler" and typed[2].text == "ls",
       "with shell lines off, !! must not type while a plain ! line still types")
-    assert(#delivered == 1 and delivered[1].event_id == "$shell-off",
-      "a shell line refused by its switch should remain ordinary mail")
+    assert(#delivered == 2 and delivered[1].event_id == "$shell-off" and delivered[2].event_id == "$plain-on",
+      "a shell line refused by its switch stays ordinary mail and a typed plain line is also mailed")
     for _, request in ipairs(client.requests) do
       assert(not tostring(request.path):find("/send/m.room.message/", 1, true),
         "a shell line refused by its switch must not get a refusal thread line")
@@ -377,6 +378,45 @@ local function test_typed_line_refusals_are_rate_limited()
   end)
 end
 
+function test_bang_passthrough_types_and_still_mails()
+  with_typed_line_stubs(function(typed, keys)
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client, delivered = scripted_client(), {}
+    local relay = relay_module.new({ config_path = config_path, matrix = client,
+      deliver = function(event) delivered[#delivered + 1] = event return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    local function from(id, sender, body)
+      local event = typed_line_event(id, body)
+      event.sender = sender
+      return event
+    end
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = {
+        from("$bang-owner", "@alice:example.org", "!echo hi there"),
+        from("$bang-stranger", "@mallory:example.org", "!rm -rf /"),
+        from("$bang-butler", "@bot:example.org", "!from butler"),
+        from("$bang-agent", "@agent-x:example.org", "!from agent"),
+        from("$bang-only", "@alice:example.org", "!"),
+        from("$bang-blank", "@alice:example.org", "!   "),
+      } } },
+    } } } })
+    assert(#typed == 1 and typed[1].session == "butler" and typed[1].text == "echo hi there",
+      "only the owner line with text after the bang is typed, verbatim")
+    assert(#keys == 1 and keys[1].key == "RET", "the typed owner line submits Return once")
+    local ids = {}
+    for _, event in ipairs(delivered) do ids[event.event_id] = (ids[event.event_id] or 0) + 1 end
+    assert(ids["$bang-owner"] == 1, "the typed owner line is also delivered to the inbox exactly once")
+    assert(ids["$bang-stranger"] == 1, "a non-owner bang line keeps ordinary inbox delivery and is not typed")
+    assert(ids["$bang-only"] == 1 and ids["$bang-blank"] == 1,
+      "empty bang lines are not typed and keep ordinary inbox delivery")
+    assert(not ids["$bang-butler"], "events sent by Butler itself are never typed or relayed")
+    assert(#typed == 1, "agent senders are never typed")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+  end)
+end
+
 local function test_typed_line_gate_error_is_contained_and_processed()
   with_typed_line_stubs(function(typed)
     local old_gate = remuda.butler.typed_lines.gate
@@ -399,8 +439,8 @@ local function test_typed_line_gate_error_is_contained_and_processed()
     } } } })
     assert(gate_calls == 1 and #typed == 0,
       "a gate exception should be contained without typing or aborting the batch")
-    assert(#delivered == 1 and delivered[1].event_id == "$after-gate-error",
-      "the ordinary event after a gate exception should still reach mail")
+    assert(#delivered == 2 and delivered[1].event_id == "$gate-error" and delivered[2].event_id == "$after-gate-error",
+      "a gate exception types nothing but both events still reach mail")
     client:complete(3, { json = { next_batch = "s2", rooms = { join = {
       ["!room:example.org"] = { timeline = { events = { failed } } },
     } } } })
@@ -847,6 +887,9 @@ local function test_matrix_download_explicit_output_without_home()
 end
 
 local function test_state_restart_corruption_and_processed_cap()
+  -- A restart re-reads mention permission state, filtered to create and power
+  -- levels in the configured room so a large room cannot overflow the response cap.
+  local RESTART_STATE = "&full_state=true&filter=%7B%22room%22%3A%7B%22state%22%3A%7B%22types%22%3A%5B%22m.room.create%22%2C%22m.room.power_levels%22%5D%2C%22rooms%22%3A%5B%22%21room%3Aexample.org%22%5D%7D%7D%7D"
   local dir, config_path = fixture()
   local client = scripted_client()
   local state_path = config_path .. ".since"
@@ -865,7 +908,7 @@ local function test_state_restart_corruption_and_processed_cap()
   assert(relay:state().pending["$pending"].references == nil,
     "invalid saved references should be discarded when pending state loads")
   relay:start()
-  assert(client.requests[1].path == "/_matrix/client/v3/sync?since=persisted&timeout=30000",
+  assert(client.requests[1].path == "/_matrix/client/v3/sync?since=persisted&timeout=30000" .. RESTART_STATE,
     "restart must resume the stored cursor without running a baseline")
   relay:stop()
 
@@ -873,7 +916,7 @@ local function test_state_restart_corruption_and_processed_cap()
   local legacy = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
   assert(legacy:state().since == "legacy-cursor", "old cursor-only state must remain readable")
   legacy:start()
-  assert(client.requests[2].path == "/_matrix/client/v3/sync?since=legacy-cursor&timeout=30000")
+  assert(client.requests[2].path == "/_matrix/client/v3/sync?since=legacy-cursor&timeout=30000" .. RESTART_STATE)
   legacy:stop()
 
   local bad = assert(io.open(state_path, "wb")); bad:write("{broken"); bad:close()
@@ -900,6 +943,8 @@ local function test_state_restart_corruption_and_processed_cap()
 end
 
 local function test_pending_delivery_retries_safely_after_restart()
+  -- Same filtered restart snapshot as test_state_restart_corruption_and_processed_cap.
+  local RESTART_STATE = "&full_state=true&filter=%7B%22room%22%3A%7B%22state%22%3A%7B%22types%22%3A%5B%22m.room.create%22%2C%22m.room.power_levels%22%5D%2C%22rooms%22%3A%5B%22%21room%3Aexample.org%22%5D%7D%7D%7D"
   local dir, config_path = fixture()
   local first_client, second_client = scripted_client(), scripted_client()
   local successes = 0
@@ -925,7 +970,7 @@ local function test_pending_delivery_retries_safely_after_restart()
   assert(successes == 1, "restart must retry the pending envelope")
   assert(restarted:state().pending["$pending-restart"] == nil)
   assert(restarted:state().processed["$pending-restart"])
-  assert(second_client.requests[1].path == "/_matrix/client/v3/sync?since=s1&timeout=30000")
+  assert(second_client.requests[1].path == "/_matrix/client/v3/sync?since=s1&timeout=30000" .. RESTART_STATE)
   second_client:complete(1, { json = { next_batch = "s2", rooms = { join = {
     ["!room:example.org"] = { timeline = { events = {
       { type = "m.room.message", event_id = "$pending-restart", sender = "@alice:example.org",
@@ -5585,6 +5630,150 @@ end
 -- once; each waiting mail goes out when ITS fetch answers or fails.
 
 rx_tests = {
+  { "test_rx_structured_room_mentions_and_permission_state", function()
+    local dir, path = rx_fixture()
+    rx_with_dir(dir, function()
+      local relay, client, delivered = rx_relay(path)
+      local cursor = 0
+      local function power(level, threshold)
+        return { type = "m.room.power_levels", state_key = "", sender = OWNER,
+          content = { users = { [OWNER] = level }, notifications = { room = threshold } } }
+      end
+      local function mention(id, metadata, body)
+        local event = rx_msg(id, OWNER, body or "announcement")
+        event.content["m.mentions"] = metadata == nil and { room = true } or metadata
+        return event
+      end
+      local function sync(events, states, room, limited, kind)
+        cursor = cursor + 1
+        client:sync({ json = { next_batch = "roommention" .. cursor, rooms = {
+          [kind or "join"] = { [room or NEW] = {
+            state = states and { events = states } or nil,
+            timeline = { events = events, limited = limited } } } } } })
+        rx_context(client, true)
+      end
+      sync({ mention("$unknown") })
+      assert(not rx_find(delivered, "$unknown"), "unknown state fails closed")
+      sync({ mention("$positive") }, { power(50, 50) })
+      assert(rx_find(delivered, "$positive"), "structured room mention needs no literal text")
+      assert(not rx_followed(relay, NEW, "$positive"), "room mentions never auto-follow")
+      sync({ mention("$before"), power(0, 50), mention("$after"),
+        power(50, 50), mention("$restored") })
+      assert(rx_find(delivered, "$before") and not rx_find(delivered, "$after")
+        and rx_find(delivered, "$restored"), "power changes apply at the message point")
+      sync({ mention("$gap") }, { power(0, 50) }, NEW, true)
+      assert(not rx_find(delivered, "$gap"), "limited timeline applies state delta first")
+      sync({ mention("$gap-restored") }, { power(50, 50) }, NEW, true)
+      assert(rx_find(delivered, "$gap-restored"), "known delta permits limited timeline mention")
+      for index, metadata in ipairs({ { room = false }, { room = "true" }, { room = 1 }, "true", {} }) do
+        sync({ mention("$malformed" .. index, metadata, "@room @roommate #alias:example.org") })
+        assert(not rx_find(delivered, "$malformed" .. index), "only boolean true is a room mention")
+      end
+      local html = mention("$html", {}, "#alias:example.org")
+      html.content.format, html.content.formatted_body = "org.matrix.custom.html",
+        "<a href='https://matrix.to/#/#alias:example.org'>@room</a>"
+      sync({ html, rx_msg("$substring", OWNER, "@roommate"), rx_msg("$legacy", OWNER, "@room") })
+      assert(not rx_find(delivered, "$html") and not rx_find(delivered, "$substring")
+        and not rx_find(delivered, "$legacy"), "text and room links never imply structured broadcast")
+      sync({ mention("$badpower") }, { power("50", 50) })
+      assert(not rx_find(delivered, "$badpower"), "malformed power state fails closed")
+      sync({ mention("$foreign") }, { power(100, 50) }, "!foreign:example.org")
+      sync({ mention("$invited") }, { power(100, 50) }, NEW, false, "invite")
+      sync({ mention("$postinvite") })
+      assert(not rx_find(delivered, "$foreign") and not rx_find(delivered, "$invited")
+        and not rx_find(delivered, "$postinvite"), "only configured joined rooms grant permission")
+      sync({ mention("$rejoined") }, { power(50, 50) })
+      sync({}, nil, NEW, false, "leave")
+      sync({ mention("$afterleave") })
+      assert(rx_find(delivered, "$rejoined") and not rx_find(delivered, "$afterleave"),
+        "leave clears permission before rejoin")
+      sync({ mention("$none") }, { power(50, 50) })
+      relay:set_notification_mode(NEW, "none")
+      sync({ mention("$none-suppressed") })
+      assert(not rx_find(delivered, "$none-suppressed"), "none mode suppresses room mentions")
+      relay:set_notification_mode(NEW, "mentions-followed")
+      sync({ rx_msg("$direct-unchanged", OWNER, "@bot:example.org hello"),
+        rx_msg("$follow-unchanged", OWNER, "reply", rx_thread("$direct-unchanged")) })
+      sync({ rx_msg("$home-unchanged", OWNER, "plain") }, nil, HOME)
+      assert(rx_find(delivered, "$direct-unchanged") and rx_find(delivered, "$follow-unchanged")
+        and rx_find(delivered, "$home-unchanged"), "direct, followed and HOME delivery unchanged")
+      relay:stop()
+      relay, client, delivered = rx_relay(path)
+      assert(client.requests[1].path:find("full_state=true&filter=", 1, true)
+        and client.requests[1].path:find("m.room.power_levels", 1, true),
+        "restart requests a full state snapshot filtered to permission state")
+      sync({ mention("$restart-unknown") })
+      assert(not rx_find(delivered, "$restart-unknown"), "restart never trusts persisted privilege")
+      sync({ mention("$restart-known") }, { power(50, 50) })
+      assert(rx_find(delivered, "$restart-known"), "fresh permission state enables notification")
+      relay:stop()
+      relay:start()
+      assert(client.requests[#client.requests].path:find("full_state=true&filter=", 1, true),
+        "stop/start also clears cached permission and fetches full state")
+      sync({ mention("$same-instance-restart") })
+      assert(not rx_find(delivered, "$same-instance-restart"), "stop/start cannot retain permission")
+      relay:stop()
+      client, delivered = invite_client(), {}
+      relay = relay_module.new({ config_path = path, matrix = client,
+        deliver = function(event) delivered[#delivered + 1] = event return { id = "default" } end })
+      relay:start()
+      local create = { type = "m.room.create", state_key = "", sender = OWNER,
+        content = { creator = OWNER, room_version = "10" } }
+      sync({ mention("$default-creator") }, { create })
+      assert(rx_find(delivered, "$default-creator"), "complete state without power levels gives creator 100")
+      local stranger = mention("$default-stranger")
+      stranger.sender = STRANGER
+      sync({ stranger })
+      assert(not rx_find(delivered, "$default-stranger"), "noncreator default 0 cannot notify room")
+      sync({ mention("$old-creator-zero") }, { power(0, 50) })
+      assert(not rx_find(delivered, "$old-creator-zero"), "old creator obeys explicit power levels")
+      create.content = { room_version = "12" }
+      sync({ mention("$v12-creator") }, { create, power(0, 50) })
+      assert(rx_find(delivered, "$v12-creator"), "v12 creator has infinite power")
+      -- Decode real JSON: the core preserves the distinction between [] and {}.
+      local invalid_power = {
+        '[]', 'null',
+        '{"notifications":[],"users_default":50}',
+        '{"users":[],"users_default":50}',
+        '{"notifications":null,"users_default":50}',
+        '{"users":null,"users_default":50}',
+        '{"users_default":null}',
+        '{"users_default":1e20}',
+        '{"users_default":9007199254740992}',
+        '{"users_default":-9007199254740992}',
+        '{"notifications":{"room":-9007199254740992},"users_default":50}',
+        '{"notifications":{"room":9007199254740992},"users_default":50}',
+        '{"users":{"' .. OWNER .. '":1e20}}',
+      }
+      for index, raw in ipairs(invalid_power) do
+        local event = power(50, 50)
+        event.content = remuda.json.decode(raw)
+        sync({ mention("$json-invalid" .. index) }, { event })
+        assert(not rx_find(delivered, "$json-invalid" .. index), "malformed decoded power fails closed: " .. raw)
+      end
+      local valid_power = {
+        '{"notifications":{},"users":{},"users_default":50}',
+        '{"notifications":{"room":9007199254740991},"users_default":9007199254740991}',
+        '{"notifications":{"room":-9007199254740991},"users_default":-9007199254740991}',
+      }
+      for index, raw in ipairs(valid_power) do
+        local event = power(50, 50)
+        event.content = remuda.json.decode(raw)
+        sync({ mention("$json-valid" .. index) }, { event })
+        assert(rx_find(delivered, "$json-valid" .. index), "valid decoded objects and integer bounds work")
+      end
+      local missing = power(100, 50)
+      missing.content = nil
+      sync({ mention("$missing-power-content") }, { missing })
+      assert(not rx_find(delivered, "$missing-power-content"), "malformed power is not absent power")
+      sync({}, nil, NEW, false, "leave")
+      create.content = { creator = OWNER, room_version = "10" }
+      sync({ mention("$rejoin-default") }, { create })
+      assert(rx_find(delivered, "$rejoin-default"), "rejoin full state restores absent-power defaults")
+      relay:stop()
+    end)
+  end },
+
   { "test_typed_line_switches_and_non_candidates", test_typed_line_switches_and_non_candidates },
   { "test_typed_line_replay_after_restart_and_history_are_not_typed", test_typed_line_replay_after_restart_and_history_are_not_typed },
   { "test_typed_line_target_routing", test_typed_line_target_routing },
@@ -5742,6 +5931,7 @@ rx_tests = {
       remuda._butler_bus = old_bus
     end)
   end },
+  { "test_bang_passthrough_types_and_still_mails", test_bang_passthrough_types_and_still_mails },
   { "test_typed_line_gate_error_is_contained_and_processed", test_typed_line_gate_error_is_contained_and_processed },
   { "test_typed_line_persist_failure_fails_closed", test_typed_line_persist_failure_fails_closed },
   { "test_typed_line_return_failure_warns_text_may_remain", test_typed_line_return_failure_warns_text_may_remain },
@@ -5806,6 +5996,37 @@ rx_tests = {
     end)
   end },
   { "test_rx_mention_follows_thread", test_rx_mention_follows_thread },
+  { "test_rx_pill_mention_without_m_mentions", function()
+    local dir, path = rx_fixture()
+    rx_with_dir(dir, function()
+      local relay, client, delivered = rx_relay(path)
+      -- Element autocomplete pill: body has only the display name, no m.mentions.
+      local function pill(id, href)
+        local ev = rx_msg(id, OWNER, "bot \240\159\146\149: hello")
+        ev.content.format = "org.matrix.custom.html"
+        ev.content.formatted_body = '<a href="https://matrix.to/#/' .. href .. '">@bot:example.org</a>: hello'
+        return ev
+      end
+      rx_sync(client, NEW, { pill("$pill-plain", "@bot:example.org") })
+      assert(rx_find(delivered, "$pill-plain"), "a matrix.to pill mentions the butler")
+      rx_sync(client, NEW, { pill("$pill-enc", "%40bot%3Aexample.org") })
+      assert(rx_find(delivered, "$pill-enc"), "a percent-encoded pill mentions the butler")
+      rx_sync(client, NEW, { pill("$pill-other", "@bot:example.org.evil") })
+      assert(not rx_find(delivered, "$pill-other"), "a longer mxid is not this butler")
+      local reply = pill("$pill-reply", "@bot:example.org")
+      reply.content.formatted_body = "<mx-reply><blockquote>" .. reply.content.formatted_body
+        .. "</blockquote></mx-reply>plain reply"
+      rx_sync(client, NEW, { reply })
+      assert(not rx_find(delivered, "$pill-reply"), "a pill quoted in an mx-reply fallback is not a mention")
+      local text = pill("$pill-text", "@bot:example.org")
+      text.content.formatted_body = "see <code>https://matrix.to/#/@bot:example.org</code> and matrix.to/#/@bot:example.org"
+      rx_sync(client, NEW, { text })
+      assert(not rx_find(delivered, "$pill-text"), "a bare or code matrix.to URL is not an href pill")
+      rx_sync(client, NEW, { pill("$pill-x", "@notbot:example.org") })
+      assert(not rx_find(delivered, "$pill-x"), "another user's pill is not a mention")
+      relay:stop()
+    end)
+  end },
   { "test_rx_main_timeline_reply_is_root", test_rx_main_timeline_reply_is_root },
   { "test_rx_in_thread_reply_unfollowed_not_delivered", test_rx_in_thread_reply_unfollowed_not_delivered },
   { "test_rx_follow_guard_refuses_and_warns_no_trim", test_rx_follow_guard_refuses_and_warns_no_trim },
@@ -6927,6 +7148,61 @@ local function rx_check(name, test)
   local ok, err = pcall(test)
   if not ok then rx_failures[#rx_failures + 1] = name .. ": " .. tostring(err) end
 end
+
+rx_check("confirmed mentions through relay", function()
+  local dir, config_path = fixture()
+  local client, delivered, held_for_restart = scripted_client(), {}, false
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function(event)
+      if event.event_id == "$mention-pills" and not held_for_restart then
+        held_for_restart = true
+        error("hold for restart")
+      end
+      delivered[#delivered + 1] = event
+      return true
+    end,
+  })
+  assert(relay:start())
+  client:complete(1, { json = { next_batch = "s0" } })
+  client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$mention-pills", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "Hello Alice and Alice",
+          format = "org.matrix.custom.html",
+          formatted_body = "Hello <a href='https://matrix.to/#/@alice:example.org'>Alice</a> and "
+            .. '<a href="https://matrix.to/#/@ally:example.org">Alice</a>',
+          ["m.mentions"] = { user_ids = { "@alice:example.org", "@ally:example.org" } } } },
+      { type = "m.room.message", event_id = "$mention-plain", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "Alice" } },
+      { type = "m.room.message", event_id = "$mention-media", sender = "@alice:example.org",
+        content = { msgtype = "m.file", body = "file.txt", filename = "file.txt",
+          url = "mxc://example.org/file" } },
+    } } },
+  } } } })
+  local first_attempts = {}
+  for _, event in ipairs(delivered) do first_attempts[event.event_id] = event end
+  assert(not first_attempts["$mention-pills"], "mention delivery should remain pending for restart")
+  relay:stop()
+  local resumed_client = scripted_client()
+  relay = relay_module.new({ config_path = config_path, matrix = resumed_client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end,
+  })
+  assert(relay:start())
+  local by_id = {}
+  for _, event in ipairs(delivered) do by_id[event.event_id] = event end
+  assert(by_id["$mention-pills"] and by_id["$mention-pills"].body == "Hello @Alice and @Alice",
+    "confirmed pills should normalize at the relay delivery boundary")
+  assert(by_id["$mention-pills"].normalized_mentions[1] == "@alice:example.org"
+      and by_id["$mention-pills"].normalized_mentions[2] == "@ally:example.org",
+    "same-display-name pills should retain their distinct MXIDs in occurrence order")
+  assert(by_id["$mention-plain"] and by_id["$mention-plain"].body == "Alice"
+      and by_id["$mention-plain"].normalized_mentions == nil,
+    "plain display-name text must not be rewritten or marked as a mention")
+  assert(by_id["$mention-media"] and by_id["$mention-media"].normalized_mentions == nil,
+    "media events must not receive mention metadata")
+  relay:stop()
+  cleanup_fixture(dir, config_path)
+end)
 
 rx_check("test_baseline_resume_filters_and_envelope", test_baseline_resume_filters_and_envelope)
 rx_check("test_allowlisted_media_types_and_sender_filter", test_allowlisted_media_types_and_sender_filter)
@@ -8629,3 +8905,8 @@ do
   assert(ok,err)
 end
 print('ok: Matrix durable owner plaintext admission contract')
+
+-- Keep the isolated mail persistence fixture after all relay tests: it loads
+-- mail.lua with a temporary bus/config and should not affect their globals.
+dofile("packages/butler/matrix_mentions.lua")
+dofile("tests/fixtures/matrix-mention-normalization.lua")

@@ -32,12 +32,65 @@ select CLI identity. Caller attribution is advisory, not an isolation boundary.
 `forward` re-delivers a message you received, keeping its sender, with a note.
 `reply <message-id> --attach PATH` posts a file into that Matrix message's thread.
 ]]
--- Help lists every `butler.command` entry's usage in order, so it names only
--- the verbs that are installed.
+-- Help groups the installed `butler.command` entries into sections, each in
+-- contribution order, so it names only the verbs that are installed. An entry's
+-- own `group` (a section id) wins over this table; an entry in no section is
+-- listed under "Other commands". A section's `summary` replaces its verbs' full
+-- usage with a pointer to the verb's own help (matrix has its own grouped list).
+local USAGE_SECTIONS = {
+  { id = "mail", title = "Mail", verbs = { "send", "send-to-leader", "inbox", "reply", "forward" } },
+  { id = "sessions", title = "Sessions and teams",
+    verbs = { "sessions", "agents", "launch", "topic", "close", "compact" } },
+  { id = "approvals", title = "Approvals", verbs = { "approvals", "approve", "deny", "approve-text" } },
+  { id = "matrix", title = "Matrix", verbs = { "matrix" },
+    summary = "  remuda butler matrix [--json] [--room ROOM] <verb> [ARGS]\n"
+      .. "  remuda butler matrix setup [OPTIONS]\n"
+      .. "  Run `remuda butler matrix --help` for its verbs: read, threads, write, rooms and setup." },
+  { id = "schedule", title = "Schedule", verbs = { "schedule" } },
+  { id = "health", title = "Health and accounts", verbs = { "doctor", "status", "quota" } },
+  { id = "switches", title = "Switches and input",
+    verbs = { "typed-lines", "shell-lines", "status-commands", "guard", "input-queue" } },
+}
 local function butler_usage()
-  local lines = {}
-  for _, item in ipairs(contributions("butler.command")) do lines[#lines + 1] = item.entry.usage end
-  return "remuda butler — coordination for managed agents\n\n" .. table.concat(lines, "\n") .. "\n\n" .. USAGE_NOTES
+  local section_of, by_id, order = {}, {}, {}
+  for _, section in ipairs(USAGE_SECTIONS) do
+    by_id[section.id] = { section = section, lines = {} }
+    order[#order + 1] = by_id[section.id]
+    for _, verb in ipairs(section.verbs) do section_of[verb] = section.id end
+  end
+  local other = { section = { title = "Other commands" }, lines = {} }
+  for _, item in ipairs(contributions("butler.command")) do
+    local entry = item.entry
+    local bucket = by_id[entry.group or section_of[entry.verb]]
+    if not bucket then
+      -- A group id that names no section is a registry bug; help still lists
+      -- the verb (under "Other commands") but the typo is logged, not hidden.
+      if entry.group ~= nil then
+        local text = "butler: command '" .. tostring(entry.verb) .. "' names unknown help group '"
+          .. tostring(entry.group) .. "'; listing it under Other commands"
+        if type(remuda.log) == "function" then pcall(remuda.log, "warn", text)
+        else pcall(io.stderr.write, io.stderr, text .. "\n") end
+      end
+      bucket = other
+    end
+    if not bucket.section.summary then
+      local usage = entry.usage
+      if type(usage) == "function" then usage = usage() end
+      bucket.lines[#bucket.lines + 1] = usage
+    end
+    bucket.used = true
+  end
+  order[#order + 1] = other
+  local blocks = {}
+  for _, bucket in ipairs(order) do
+    if bucket.used then
+      local body = bucket.section.summary or table.concat(bucket.lines, "\n")
+      blocks[#blocks + 1] = bucket.section.title .. ":\n" .. body
+    end
+  end
+  return "remuda butler — coordination for managed agents\n"
+    .. "Run `remuda butler <verb> --help` for one command's arguments and options.\n\n"
+    .. table.concat(blocks, "\n\n") .. "\n\nNotes:\n" .. USAGE_NOTES
 end
 local HELP_CLI_SPEC = {
   name = "remuda butler",
@@ -373,6 +426,15 @@ local GUARD_CLI_SPEC = {
     grants = { about = "List or control guard grants. Example: remuda butler guard grants", args = { { name = "STATE", help = "on, off, or status", required = false } }, next = "remuda butler guard --help" },
   },
 }
+-- `remuda butler VERB --help` for verbs that take sub-verbs: the subverb parsers
+-- reject a bare --help as an unknown verb, so answer it with a summary first.
+local function wants_verb_help(args)
+  return #args == 2 and (args[2] == "--help" or args[2] == "-h")
+end
+local function verb_help(verb, about, next_command)
+  return cli_parser({ name = "remuda butler", verbs = { [verb] = { about = about, next = next_command } } },
+    { verb, "--help" }).text
+end
 local GUARD_SUMMARY_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
@@ -424,12 +486,18 @@ command(17, "status-commands", "  remuda butler status-commands on|off", functio
   return typed_lines_cli.cli(args, current_agent(caller))
 end)
 command(19, "approve-text", "  remuda butler approve-text request SESSION - | on|off", function(args, caller)
+  if wants_verb_help(args) then
+    return verb_help("approve-text", "Prepared text for owner approval. Forms: request SESSION - (text on stdin); on; off. Example: remuda butler approve-text request worker -", "remuda butler approve-text request --help")
+  end
   -- The verb receives the whole argv; approve_text.cli takes what follows the verb.
   local rest = {}
   for i = 2, #args do rest[#rest + 1] = args[i] end
   return approve_text.cli(rest, current_agent(caller), caller and caller.stdin)
 end)
 command(22, "input-queue", "  remuda butler input-queue status [ID] | cancel ID | resolve ID not_sent|delivered", function(args, caller)
+  if wants_verb_help(args) then
+    return verb_help("input-queue", "Durable input queue receipts. Forms: status [ID]; cancel ID; resolve ID not_sent|delivered. Example: remuda butler input-queue status", "remuda butler input-queue status --help")
+  end
   local rest = {}; for i=2,#args do rest[#rest+1]=args[i] end
   local feature = remuda.butler.input_queue_cli
   if not feature then return remuda.fail("Durable input queue unavailable.",1) end
@@ -438,6 +506,9 @@ end)
 command(18, "schedule", "  remuda butler schedule list\n"
   .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]\n'
   .. "  remuda butler schedule rm <name>", function(args, caller)
+  if wants_verb_help(args) then
+    return verb_help("schedule", "Recurring Butler messages. Forms: list; add NAME \"M H * * *\" TEXT|- [--to SESSION]; rm NAME. Example: remuda butler schedule list", "remuda butler schedule add --help")
+  end
   local principal = resolve_principal(caller)
   if principal.tag ~= "member" and principal.tag ~= "operator" then
     return remuda.fail("Butler cannot identify this caller. Next: run from a registered Butler session or upgrade Remuda core.", 1)
@@ -537,6 +608,9 @@ local TOPIC_DELEGATE_CLI_SPEC = {
 }
 command(30, "topic", "  remuda butler topic new <name> [--template T] [--agent A] [--model M]\n"
   .. "  remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] [--writable DIR]... [--sandbox full] <task...>", function(args, caller)
+  if wants_verb_help(args) then
+    return verb_help("topic", "Create a topic or delegate a task to a child agent. Forms: new NAME [options]; delegate NAME [options] TASK... Example: remuda butler topic delegate worker --agent codex 'check the build'", "remuda butler topic delegate --help")
+  end
   if args[2] == "new" then
     local argv = {}
     for index = 2, #args do argv[#argv + 1] = args[index] end
@@ -856,6 +930,7 @@ end
 remuda.extension_command("butler", function(args, caller)
   if #args == 0 then return help_cli({ "help" }) end
   if args[1] == "help" then return help_cli(args) end
+  if (args[1] == "-h" or args[1] == "--help") and #args == 1 then return butler_usage() end
   if args[1] == "-h" or args[1] == "--help" then return help_cli({ "help", "--help" }) end
   if args[1] == "statusline" then return statusline(args, caller) end
   if args[1] == "status-hook" then return remuda.butler.status_hook.run(args, caller) end

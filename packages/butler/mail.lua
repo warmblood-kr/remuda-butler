@@ -144,6 +144,8 @@ local function envelope_json(message, object)
   if message.matrix then
     local media = {}
     for i, url in ipairs(message.matrix.media or {}) do media[i] = config.json_quote(url) end
+    local mentions = {}
+    for i, user_id in ipairs(message.matrix.mentions or {}) do mentions[i] = config.json_quote(user_id) end
     matrix = ',"matrix":{"sender":' .. config.json_quote(message.matrix.sender)
       .. ',"room_id":' .. config.json_quote(message.matrix.room_id)
       .. (message.matrix.room and ',"room":' .. config.json_quote(message.matrix.room) or "")
@@ -153,6 +155,7 @@ local function envelope_json(message, object)
       .. (message.matrix.in_reply_to and ',"in_reply_to":' .. config.json_quote(message.matrix.in_reply_to) or "")
       .. (message.matrix.room_kind and ',"room_kind":' .. config.json_quote(message.matrix.room_kind) or "")
       .. (message.matrix.mxc and ',"mxc":' .. config.json_quote(message.matrix.mxc) or "")
+      .. (message.matrix.mentions and ',"mentions":[' .. table.concat(mentions, ",") .. ']' or "")
       .. ',"media":[' .. table.concat(media, ",") .. ']}'
   end
   return '{"id":' .. config.json_quote(message.id) .. ',"from":' .. address_json(message.from)
@@ -226,11 +229,23 @@ local function load_message(disk, id)
       in_reply_to = matrix:match('"in_reply_to":"(.-)"'),
       room_kind = matrix:match('"room_kind":"(.-)"'),
       mxc = matrix:match('"mxc":"(.-)"'),
-      media = {},
+      media = {}, mentions = {},
     }
     local media = matrix:match('"media":(%b[])')
     if media then
       for url in media:gmatch('"(.-)"') do message.matrix.media[#message.matrix.media + 1] = url end
+    end
+    if type(remuda.json) == "table" and type(remuda.json.decode) == "function" then
+      local decoded_ok, decoded = pcall(remuda.json.decode, envelope)
+      local decoded_mentions = decoded_ok and type(decoded) == "table"
+        and type(decoded.matrix) == "table" and decoded.matrix.mentions or nil
+      if type(decoded_mentions) == "table" then
+        for _, user_id in ipairs(decoded_mentions) do
+          if type(user_id) == "string" and #user_id <= 255 then
+            message.matrix.mentions[#message.matrix.mentions + 1] = user_id
+          end
+        end
+      end
     end
   end
   bus.messages[id] = message
@@ -406,7 +421,7 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
       room = matrix.room or matrix.room_kind, thread_id = matrix.thread_id,
       thread_root = matrix.thread_root, in_reply_to = matrix.in_reply_to,
       room_kind = matrix.room_kind,
-      mxc = matrix.mxc, media = matrix.media or {},
+      mxc = matrix.mxc, media = matrix.media or {}, mentions = matrix.mentions or {},
     } or nil }
   local disk = paths(recipient_id)
   if disk then

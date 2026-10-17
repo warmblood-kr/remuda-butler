@@ -463,21 +463,9 @@ the normal way for a member to communicate.
       { id = "deny", order = 92, verb = "deny", usage = "  remuda butler deny <ID>",
         run = function(_, args, caller) return host._butler_command_run("deny", args, caller) end },
       { id = "matrix", order = 100, verb = "matrix",
-        usage = [[  remuda butler matrix [--json] status
-  remuda butler matrix [--json] rooms
-  remuda butler matrix [--json] [--room ROOM] [-n N] history
-  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
-  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
-  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
-  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
-  remuda butler matrix [--json] [-o PATH] download MXC
-  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
-  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
-  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
-  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
-  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
-  remuda butler matrix [--json] join ROOM (operator)
-  remuda butler matrix [--json] leave ROOM (operator)]],
+        -- One source of truth: matrix_cli's own grouped help (commands.lua
+        -- lists the pointer instead, via its Matrix section summary).
+        usage = function() return host.butler.matrix.cli_usage() end,
         run = function(_, args, caller) return host._butler_command_run("matrix", args, caller) end },
     },
   },
