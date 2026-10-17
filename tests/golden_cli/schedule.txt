@@ -8,20 +8,36 @@ actions:
 state: (no file)
 
 ### remuda butler "schedule" "--help"
-exit: 1
+exit: 0
 stdout:
+Recurring Butler messages. Forms: list; add NAME "M H * * *" TEXT|- [--to SESSION]; rm NAME. Example: remuda butler schedule list
+
+Usage: remuda butler schedule
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler schedule add --help
 
 stderr:
-unknown verb. Usage: remuda butler schedule <add | list | rm>
+
 actions:
 state: (no file)
 
 ### remuda butler "schedule" "-h"
-exit: 1
+exit: 0
 stdout:
+Recurring Butler messages. Forms: list; add NAME "M H * * *" TEXT|- [--to SESSION]; rm NAME. Example: remuda butler schedule list
+
+Usage: remuda butler schedule
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler schedule add --help
 
 stderr:
-unknown verb. Usage: remuda butler schedule <add | list | rm>
+
 actions:
 state: (no file)
 
@@ -482,10 +498,17 @@ actions:
 state: (no file)
 
 ### [agent] remuda butler "schedule" "--help"
-exit: 1
+exit: 0
 stdout:
+Recurring Butler messages. Forms: list; add NAME "M H * * *" TEXT|- [--to SESSION]; rm NAME. Example: remuda butler schedule list
 
+Usage: remuda butler schedule
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler schedule add --help
 stderr:
-unknown verb. Usage: remuda butler schedule <add | list | rm>
+
 actions:
 state: (no file)
