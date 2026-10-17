@@ -6013,6 +6013,15 @@ rx_tests = {
       assert(rx_find(delivered, "$pill-enc"), "a percent-encoded pill mentions the butler")
       rx_sync(client, NEW, { pill("$pill-other", "@bot:example.org.evil") })
       assert(not rx_find(delivered, "$pill-other"), "a longer mxid is not this butler")
+      local reply = pill("$pill-reply", "@bot:example.org")
+      reply.content.formatted_body = "<mx-reply><blockquote>" .. reply.content.formatted_body
+        .. "</blockquote></mx-reply>plain reply"
+      rx_sync(client, NEW, { reply })
+      assert(not rx_find(delivered, "$pill-reply"), "a pill quoted in an mx-reply fallback is not a mention")
+      local text = pill("$pill-text", "@bot:example.org")
+      text.content.formatted_body = "see <code>https://matrix.to/#/@bot:example.org</code> and matrix.to/#/@bot:example.org"
+      rx_sync(client, NEW, { text })
+      assert(not rx_find(delivered, "$pill-text"), "a bare or code matrix.to URL is not an href pill")
       rx_sync(client, NEW, { pill("$pill-x", "@notbot:example.org") })
       assert(not rx_find(delivered, "$pill-x"), "another user's pill is not a mention")
       relay:stop()

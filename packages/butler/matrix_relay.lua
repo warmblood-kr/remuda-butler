@@ -363,9 +363,8 @@ local function approval_answer_fields(ev)
   return targets, verdict, explicit_id, text_verdict, content.msgtype
 end
 
--- Whole-token scan: needle must not touch an mxid character on either side;
--- open_left skips the left check for needles that start inside a URL.
-local function has_token(text, needle, open_left)
+-- Whole-token scan: needle must not touch an mxid character on either side.
+local function has_token(text, needle)
   local at = 1
   while true do
     local first, last = text:find(needle, at, true)
@@ -373,19 +372,34 @@ local function has_token(text, needle, open_left)
     local before = first > 1 and text:sub(first - 1, first - 1) or nil
     local after = text:sub(last + 1, last + 1)
     local boundary = "[%w._=/%-:@]"
-    if (open_left or not before or not before:match(boundary)) and (after == "" or not after:match(boundary)) then
+    if (not before or not before:match(boundary)) and (after == "" or not after:match(boundary)) then
       return true
     end
     at = first + 1
   end
 end
 
--- Element's autocomplete pill carries the mxid only in formatted_body, as a
--- matrix.to link (plain or percent-encoded), when m.mentions is absent.
+-- Element's autocomplete pill carries the mxid only in formatted_body, as an
+-- href to matrix.to (plain or percent-encoded), when m.mentions is absent.
+-- The <mx-reply> fallback quotes the parent message, so it never counts.
 local function pill_mentions(formatted, mxid)
   if type(formatted) ~= "string" then return false end
-  local encoded = ("matrix.to/#/" .. mxid):gsub("@", "%%40"):gsub(":", "%%3a"):lower()
-  return has_token(formatted, "matrix.to/#/" .. mxid, true) or has_token(formatted:lower(), encoded, true)
+  formatted = formatted:gsub("<mx%-reply>.-</mx%-reply>", "")
+  local encoded = mxid:gsub("@", "%%40"):gsub(":", "%%3a"):lower()
+  local lowered = formatted:lower()
+  for _, form in ipairs({ { formatted, mxid }, { lowered, encoded } }) do
+    for _, quote in ipairs({ '"', "'" }) do
+      local head = "href=" .. quote .. "https://matrix.to/#/" .. form[2]
+      local at = 1
+      while true do
+        local first, last = form[1]:find(head, at, true)
+        if not first then break end
+        if form[1]:sub(last + 1, last + 1):match("^[\"'?]$") then return true end
+        at = first + 1
+      end
+    end
+  end
+  return false
 end
 
 local function mentions(content, body, mxid)
