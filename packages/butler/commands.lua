@@ -32,12 +32,50 @@ select CLI identity. Caller attribution is advisory, not an isolation boundary.
 `forward` re-delivers a message you received, keeping its sender, with a note.
 `reply <message-id> --attach PATH` posts a file into that Matrix message's thread.
 ]]
--- Help lists every `butler.command` entry's usage in order, so it names only
--- the verbs that are installed.
+-- Help groups the installed `butler.command` entries into sections, each in
+-- contribution order, so it names only the verbs that are installed. An entry's
+-- own `group` (a section id) wins over this table; an entry in no section is
+-- listed under "Other commands". A section's `summary` replaces its verbs' full
+-- usage with a pointer to the verb's own help (matrix has its own grouped list).
+local USAGE_SECTIONS = {
+  { id = "mail", title = "Mail", verbs = { "send", "send-to-leader", "inbox", "reply", "forward" } },
+  { id = "sessions", title = "Sessions and teams",
+    verbs = { "sessions", "agents", "launch", "topic", "close", "compact" } },
+  { id = "approvals", title = "Approvals", verbs = { "approvals", "approve", "deny", "approve-text" } },
+  { id = "matrix", title = "Matrix", verbs = { "matrix" },
+    summary = "  remuda butler matrix [--json] [--room ROOM] <verb> [ARGS]\n"
+      .. "  remuda butler matrix setup [OPTIONS]\n"
+      .. "  Run `remuda butler matrix --help` for its verbs: read, threads, write, rooms and setup." },
+  { id = "schedule", title = "Schedule", verbs = { "schedule" } },
+  { id = "health", title = "Health and accounts", verbs = { "doctor", "status", "quota" } },
+  { id = "switches", title = "Switches and input",
+    verbs = { "typed-lines", "shell-lines", "status-commands", "guard", "input-queue" } },
+}
 local function butler_usage()
-  local lines = {}
-  for _, item in ipairs(contributions("butler.command")) do lines[#lines + 1] = item.entry.usage end
-  return "remuda butler — coordination for managed agents\n\n" .. table.concat(lines, "\n") .. "\n\n" .. USAGE_NOTES
+  local section_of, by_id, order = {}, {}, {}
+  for _, section in ipairs(USAGE_SECTIONS) do
+    by_id[section.id] = { section = section, lines = {} }
+    order[#order + 1] = by_id[section.id]
+    for _, verb in ipairs(section.verbs) do section_of[verb] = section.id end
+  end
+  local other = { section = { title = "Other commands" }, lines = {} }
+  for _, item in ipairs(contributions("butler.command")) do
+    local entry = item.entry
+    local bucket = by_id[entry.group or section_of[entry.verb]] or other
+    if not bucket.section.summary then bucket.lines[#bucket.lines + 1] = entry.usage end
+    bucket.used = true
+  end
+  order[#order + 1] = other
+  local blocks = {}
+  for _, bucket in ipairs(order) do
+    if bucket.used then
+      local body = bucket.section.summary or table.concat(bucket.lines, "\n")
+      blocks[#blocks + 1] = bucket.section.title .. ":\n" .. body
+    end
+  end
+  return "remuda butler — coordination for managed agents\n"
+    .. "Run `remuda butler <verb> --help` for one command's arguments and options.\n\n"
+    .. table.concat(blocks, "\n\n") .. "\n\nNotes:\n" .. USAGE_NOTES
 end
 local HELP_CLI_SPEC = {
   name = "remuda butler",
@@ -856,6 +894,7 @@ end
 remuda.extension_command("butler", function(args, caller)
   if #args == 0 then return help_cli({ "help" }) end
   if args[1] == "help" then return help_cli(args) end
+  if (args[1] == "-h" or args[1] == "--help") and #args == 1 then return butler_usage() end
   if args[1] == "-h" or args[1] == "--help" then return help_cli({ "help", "--help" }) end
   if args[1] == "statusline" then return statusline(args, caller) end
   if args[1] == "status-hook" then return remuda.butler.status_hook.run(args, caller) end
