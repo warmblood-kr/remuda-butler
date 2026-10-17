@@ -277,6 +277,15 @@ function M.open(path)
     return true,changed
   end)
   if not recovered then return nil,why end
+  -- Ledgers written before notices existed have no `notified_at`; stamp their
+  -- uncertain records once so an upgrade does not mention the owner per old item.
+  transaction(function(state)
+    if state.notice_baseline then return nil,false end
+    for _,r in ipairs(state.records)do
+      if r.status=='uncertain' and not r.notified_at then r.notified_at=os.time() end
+    end
+    state.notice_baseline=true;return nil,true
+  end)
   return q
 end
 remuda._butler_input_queue_module = M
