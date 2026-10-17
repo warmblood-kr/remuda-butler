@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Fixed
+- A top-level message that mentions Butler only through Element's autocomplete pill (a `matrix.to` link to its mxid in `formatted_body`, plain or percent-encoded, with no `m.mentions`) now counts as a mention under `mentions-followed`, instead of being dropped.
 - Codex compaction now uses the current session model/effort directly, avoiding temporary Luna pickers and model drift. Known picker validation recognizes current description columns and extended reasoning rows.
 - Pending mail notices wait through model pickers without spending delivery retries, then resume after resolution.
 
