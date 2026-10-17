@@ -106,6 +106,12 @@ T.test('upgrade stamps pre-existing uncertain records as notified once',function
  assert(q2:accept(request('l2')));assert(q2:begin('l2',true));assert(q2:finish('l2','uncertain','late'))
  T.eq(#q2:unnotified(),1,'new uncertain record still notified');T.eq(q2:unnotified()[1].id,'l2')
 end)
+T.test('in-flight record recovered at the first open after upgrade is announced',function()
+ local q=open('legacy2');assert(q:accept(request('f1')));assert(q:begin('f1')) -- dispatch_intent in flight
+ local f=assert(io.open(path('legacy2'),'rb'));local st=remuda.json.decode(f:read('a'));f:close()
+ st.notice_baseline=nil;f=assert(io.open(path('legacy2'),'wb'));f:write(remuda.json.encode(st));f:close()
+ local q2=open('legacy2');T.eq(#q2:unnotified(),1,'recovered in-flight record announced');T.eq(q2:unnotified()[1].id,'f1')
+end)
 T.test('uncertain notification is durable and unnotified list is exact',function()
  local q=open('notified');assert(q:accept(request('n1')));assert(q:begin('n1'));assert(q:finish('n1','uncertain','late'))
  T.eq(#q:unnotified(),1);assert(q:mark_notified('n1'));assert(q:mark_notified('n1'))
