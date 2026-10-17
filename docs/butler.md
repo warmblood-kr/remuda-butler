@@ -311,7 +311,8 @@ session PATH must also lie inside the session's working directory; with no
 require typed lines to be on; turning typed lines off also turns shell lines
 off. `remuda butler doctor` reports the current values as `Typed lines: on|off`
 and `Shell lines: on|off`. Both switches are off by default. When a switch is
-off, matching messages stay on the ordinary mail path.
+off, matching messages stay on the ordinary mail path. A line that is
+typed is also delivered to the inbox as ordinary mail, so typing is additive.
 These CLI gates do not defend against a hostile same-user agent that clears
 its identity (see Butler #264). The real protection is that both switches
 default off.

@@ -172,8 +172,8 @@ local function test_typed_line_switches_and_non_candidates()
       if tostring(request.path):find("/send/m.reaction/", 1, true) then success_reactions = success_reactions + 1 end
     end
     assert(success_reactions == 1, "a successfully typed line should get one success reaction")
-    assert(#delivered == 1 and delivered[1].event_id == "$ordinary",
-      "messages without a leading bang must continue through the mail path")
+    assert(#delivered == 2 and delivered[1].event_id == "$ordinary" and delivered[2].event_id == "$on",
+      "ordinary messages and typed owner lines both continue through the mail path")
     relay:stop()
     cleanup_fixture(dir, config_path)
 
@@ -190,8 +190,8 @@ local function test_typed_line_switches_and_non_candidates()
     } } } })
     assert(#typed == 2 and typed[2].session == "butler" and typed[2].text == "ls",
       "with shell lines off, !! must not type while a plain ! line still types")
-    assert(#delivered == 1 and delivered[1].event_id == "$shell-off",
-      "a shell line refused by its switch should remain ordinary mail")
+    assert(#delivered == 2 and delivered[1].event_id == "$shell-off" and delivered[2].event_id == "$plain-on",
+      "a shell line refused by its switch stays ordinary mail and a typed plain line is also mailed")
     for _, request in ipairs(client.requests) do
       assert(not tostring(request.path):find("/send/m.room.message/", 1, true),
         "a shell line refused by its switch must not get a refusal thread line")
@@ -378,6 +378,45 @@ local function test_typed_line_refusals_are_rate_limited()
   end)
 end
 
+function test_bang_passthrough_types_and_still_mails()
+  with_typed_line_stubs(function(typed, keys)
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client, delivered = scripted_client(), {}
+    local relay = relay_module.new({ config_path = config_path, matrix = client,
+      deliver = function(event) delivered[#delivered + 1] = event return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    local function from(id, sender, body)
+      local event = typed_line_event(id, body)
+      event.sender = sender
+      return event
+    end
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = {
+        from("$bang-owner", "@alice:example.org", "!echo hi there"),
+        from("$bang-stranger", "@mallory:example.org", "!rm -rf /"),
+        from("$bang-butler", "@bot:example.org", "!from butler"),
+        from("$bang-agent", "@agent-x:example.org", "!from agent"),
+        from("$bang-only", "@alice:example.org", "!"),
+        from("$bang-blank", "@alice:example.org", "!   "),
+      } } },
+    } } } })
+    assert(#typed == 1 and typed[1].session == "butler" and typed[1].text == "echo hi there",
+      "only the owner line with text after the bang is typed, verbatim")
+    assert(#keys == 1 and keys[1].key == "RET", "the typed owner line submits Return once")
+    local ids = {}
+    for _, event in ipairs(delivered) do ids[event.event_id] = (ids[event.event_id] or 0) + 1 end
+    assert(ids["$bang-owner"] == 1, "the typed owner line is also delivered to the inbox exactly once")
+    assert(ids["$bang-stranger"] == 1, "a non-owner bang line keeps ordinary inbox delivery and is not typed")
+    assert(ids["$bang-only"] == 1 and ids["$bang-blank"] == 1,
+      "empty bang lines are not typed and keep ordinary inbox delivery")
+    assert(not ids["$bang-butler"], "events sent by Butler itself are never typed or relayed")
+    assert(#typed == 1, "agent senders are never typed")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+  end)
+end
+
 local function test_typed_line_gate_error_is_contained_and_processed()
   with_typed_line_stubs(function(typed)
     local old_gate = remuda.butler.typed_lines.gate
@@ -400,8 +439,8 @@ local function test_typed_line_gate_error_is_contained_and_processed()
     } } } })
     assert(gate_calls == 1 and #typed == 0,
       "a gate exception should be contained without typing or aborting the batch")
-    assert(#delivered == 1 and delivered[1].event_id == "$after-gate-error",
-      "the ordinary event after a gate exception should still reach mail")
+    assert(#delivered == 2 and delivered[1].event_id == "$gate-error" and delivered[2].event_id == "$after-gate-error",
+      "a gate exception types nothing but both events still reach mail")
     client:complete(3, { json = { next_batch = "s2", rooms = { join = {
       ["!room:example.org"] = { timeline = { events = { failed } } },
     } } } })
@@ -5892,6 +5931,7 @@ rx_tests = {
       remuda._butler_bus = old_bus
     end)
   end },
+  { "test_bang_passthrough_types_and_still_mails", test_bang_passthrough_types_and_still_mails },
   { "test_typed_line_gate_error_is_contained_and_processed", test_typed_line_gate_error_is_contained_and_processed },
   { "test_typed_line_persist_failure_fails_closed", test_typed_line_persist_failure_fails_closed },
   { "test_typed_line_return_failure_warns_text_may_remain", test_typed_line_return_failure_warns_text_may_remain },
