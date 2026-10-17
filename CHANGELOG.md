@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Fixed
+- Upgrading no longer posts one owner mention per historical `uncertain` input-queue item: pre-existing uncertain records are stamped as notified once when the ledger is first opened. The input-queue boundary doc now says where the clean-composer check really runs.
 - A durable input-queue item that ended `uncertain` no longer blocks later items in its session stream. Later items are typed only after a fresh positive check that the session composer is empty (an unparseable or non-empty composer, human activity, or any non-uncertain blocker such as `dispatch_intent` or `quarantined` keeps them waiting). The uncertain item is never retried; Butler posts one owner notice per record with `remuda butler input-queue resolve ID not_sent|delivered`, and `not_sent` only marks it failed (it is not re-queued). Sender, owner and approval gates are unchanged.
 - A top-level message that mentions Butler only through Element's autocomplete pill (a `matrix.to` link to its mxid in `formatted_body`, plain or percent-encoded, with no `m.mentions`) now counts as a mention under `mentions-followed`, instead of being dropped.
 - Codex compaction now uses the current session model/effort directly, avoiding temporary Luna pickers and model drift. Known picker validation recognizes current description columns and extended reasoning rows.
