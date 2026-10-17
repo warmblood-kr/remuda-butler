@@ -98,6 +98,29 @@ T.test("usage errors keep exit 2 and the grouped usage", function()
   T.eq(matrix_unknown.code, 2, "matrix --bogus exit")
 end)
 
+-- The top-level hint promises `remuda butler <verb> --help` for every listed verb.
+T.test("every listed verb answers --help with its own help", function()
+  start_butler()
+  local seen, verbs = {}, {}
+  for line in (butler("help").stdout .. "\n"):gmatch("([^\n]*)\n") do
+    local verb = line:match("^  remuda butler ([%l][%w%-]*)")
+    if verb and not seen[verb] then seen[verb] = true; verbs[#verbs + 1] = verb end
+  end
+  T.expect(#verbs >= 25, "parsed too few verbs from help: " .. table.concat(verbs, ","))
+  local report, bad = {}, {}
+  for _, verb in ipairs(verbs) do
+    local result = butler(verb, "--help")
+    report[#report + 1] = verb .. "=" .. result.code
+    if result.code ~= 0 or not result.stdout:find("remuda butler " .. verb, 1, true)
+      or result.stdout:find("coordination for managed agents", 1, true) then
+      bad[#bad + 1] = verb .. " (exit " .. result.code .. ")"
+    end
+  end
+  T.eq(table.concat(bad, ", "), "", "verbs whose --help is not their own help")
+  print("checked --help: " .. table.concat(report, " "))
+end)
+
+
 T.test("contributed verbs join their declared group, else Other commands", function()
   start_butler()
   T.eval([[
@@ -113,3 +136,24 @@ T.test("contributed verbs join their declared group, else Other commands", funct
   T.expect(text:find("\n\nOther commands:\n  remuda butler extra-verb\n\nNotes:", 1, true),
     "an ungrouped contribution lands under Other commands: " .. text)
 end)
+
+T.test("an unknown help group is logged and the verb is listed under Other commands", function()
+  start_butler()
+  T.eval([[
+    remuda._butler_logged = {}
+    remuda._butler_real_log = remuda._butler_real_log or remuda.log
+    remuda.log = function(level, text) remuda._butler_logged[#remuda._butler_logged + 1] = level .. ": " .. text end
+    remuda._butler_contribute("butler.command", "typo-verb", { verb = "typo-verb", order = 210, group = "mial",
+      usage = "  remuda butler typo-verb", run = function(args) return "typo" end })
+    return "ok"
+  ]])
+  local text = butler("help")
+  T.eq(text.code, 0, "help still succeeds")
+  T.expect(text.stdout:find("\n\nOther commands:\n[^\n]*\n?[^\n]*remuda butler typo%-verb"),
+    "unknown group falls back to Other commands: " .. text.stdout)
+  local logged = T.eval("return table.concat(remuda._butler_logged, '\\n')")
+  T.expect(logged:find("warn: butler: command 'typo-verb' names unknown help group 'mial'", 1, true),
+    "unknown group is logged: " .. logged)
+  T.eval("remuda.log = remuda._butler_real_log; return 'ok'")
+end)
+
