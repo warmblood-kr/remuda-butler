@@ -1,26 +1,40 @@
 -- One command router for the public Matrix CLI vocabulary.
 local matrix = assert(remuda.butler and remuda.butler.matrix, "Matrix request word is unavailable")
 
-local USAGE = [[  remuda butler matrix [--json] status
+-- Grouped by kind with a blank line between groups; `matrix`, `matrix help` and
+-- `matrix --help` print it, and `remuda butler help` points here instead of listing it.
+local USAGE = [[Usage: remuda butler matrix [--json] [--room ROOM] <verb> [ARGS]
+Run `remuda butler matrix <verb> --help` for one verb's arguments and options.
+
+Read:
+  remuda butler matrix [--json] status
   remuda butler matrix [--json] rooms
   remuda butler matrix [--json] rooms --public [TERM]
   remuda butler matrix [--json] [--room ROOM] [-n N] history
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+
+Threads and notifications:
   remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
-  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
-  remuda butler matrix [--json] [-o PATH] download MXC
+
+Write:
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
   remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+
+Rooms and moderation (operator):
   remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
   remuda butler matrix [--json] leave ROOM (operator)
   remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
-  remuda butler matrix setup [OPTIONS]
   remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Setup (operator):
+  remuda butler matrix setup [OPTIONS]
 
 Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
 Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.]]
@@ -855,7 +869,8 @@ function matrix.cli(args, agent, stdin_body, file_body)
       local unknown = unknown_matrix_verb(args)
       if unknown then return unknown end
     end
-    if report and report.text and (#args == 1 or args[2] == "help") then return USAGE end
+    if report and report.text and (#args == 1 or args[2] == "help"
+      or (#args == 2 and (args[2] == "--help" or args[2] == "-h"))) then return USAGE end
     if report and report.text then
       local text = report.text:gsub("\nNext: [^\n]*$", "\nNext: remuda butler matrix --help")
       return matrix_cli_failure(text, report.code)

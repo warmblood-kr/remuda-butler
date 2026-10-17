@@ -324,26 +324,38 @@ actions:
 ### remuda butler "matrix" "help"
 exit: 0
 stdout:
+Usage: remuda butler matrix [--json] [--room ROOM] <verb> [ARGS]
+Run `remuda butler matrix <verb> --help` for one verb's arguments and options.
+
+Read:
   remuda butler matrix [--json] status
   remuda butler matrix [--json] rooms
   remuda butler matrix [--json] rooms --public [TERM]
   remuda butler matrix [--json] [--room ROOM] [-n N] history
   remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+
+Threads and notifications:
   remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
   remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
-  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
-  remuda butler matrix [--json] [-o PATH] download MXC
+
+Write:
   remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
   remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
   remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
   remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+
+Rooms and moderation (operator):
   remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
   remuda butler matrix [--json] leave ROOM (operator)
   remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
-  remuda butler matrix setup [OPTIONS]
   remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Setup (operator):
+  remuda butler matrix setup [OPTIONS]
 
 Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
 Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.
@@ -353,10 +365,44 @@ actions:
 (none)
 
 ### remuda butler "matrix" "--help"
-exit: 2
+exit: 0
 stdout:
+Usage: remuda butler matrix [--json] [--room ROOM] <verb> [ARGS]
+Run `remuda butler matrix <verb> --help` for one verb's arguments and options.
 
+Read:
+  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+
+Threads and notifications:
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
+
+Write:
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+
+Rooms and moderation (operator):
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
+  remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Setup (operator):
+  remuda butler matrix setup [OPTIONS]
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
+Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.
 stderr:
-unknown verb. Usage: remuda butler matrix <download | event | follow | get | history | join | leave | mark-all | notifications | quarantine | react | redact | reply | rooms | send | status | thread | unfollow | upload>
+
 actions:
 (none)
