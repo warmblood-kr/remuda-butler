@@ -235,3 +235,25 @@ T.test('human reset at every posttext capture blocks separate Return',function()
   end
  end
 end)
+T.test('open, denied and expired approvals never enter the queue or block plain input',function()
+ subject('pending-outside-queue',function(s)
+  local binding=assert(s.queue.binding('codex'))
+  for _,id in ipairs({'AE01','AE02','AE03'})do
+   local text='unapproved '..id
+   s.state.approvals[id]={id=id,kind='approve_text',status='open',event_id='$request-'..id,nonce='nonce-'..id,
+    expires_at=(os.time()+30)*1000,created_ms=os.time()*1000,
+    data={request_id=id,registered_text=text,bytes=#text,session='codex',session_id=binding.agent_id,
+     session_marker=binding.session_marker,core_instance=binding.instance_id,session_binding_version=2}}
+  end
+  assert(s.approval.answer('$request-AE02','deny',OWNER,'$deny'))
+  s.state.approvals.AE03.expires_at=1;s.approval.sweep(os.time()*1000+5000)
+  T.eq(s.state.approvals.AE01.status,'open');T.eq(s.state.approvals.AE02.status,'denied');T.eq(s.state.approvals.AE03.status,'expired')
+  T.eq(#s.queue.status(),0,'no approval request is a queue record until approved')
+  local line=s.event('L1','plain');local receipt=assert(s.queue.accept_line('codex','plain',line,'!home:fixture',true))
+  s.queue.tick();T.eq(table.concat(s.writes,','),'plain');T.eq(#s.queue.status(),1);T.eq(receipt.status,'queued')
+  assert(s.approval.answer('$request-AE01','approve',OWNER,'$ok'))
+  T.eq(#s.queue.status(),2,'approval enqueues exactly once');T.eq(s.approval.answer("$request-AE01","approve",OWNER,"$ok2"),nil)
+  T.eq(#s.queue.status(),2,'double approval is idempotent');s.queue.tick()
+  T.eq(table.concat(s.writes,','),'plain,unapproved AE01')
+ end)
+end)
