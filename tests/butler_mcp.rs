@@ -656,7 +656,8 @@ fn relay_deposit_produces_one_mail_notice() {
         r#"
         local real_ls, real_capture, real_capture_styled, real_session =
           remuda.ls, remuda.capture, remuda.capture_styled, remuda.session
-        local row = { name = 'butler', alive = true, attached = false }
+        local row = { name = 'butler', alive = true, attached = false,
+          instance_id = remuda._butler_bus.agents.butler.instance_id }
         remuda.ls = function() return { row } end
         remuda.capture = function() return '> ' end
         remuda.capture_styled = nil
@@ -1504,7 +1505,7 @@ fn notify_policy_types_only_into_a_detached_or_quiet_empty_prompt() {
     );
     let log = std::fs::read_to_string(&trace).unwrap_or_default();
     assert!(log.contains("notice_prompt\tmessage_ids= session=p1 kind= decision=NON-EMPTY composer_bytes=2"), "{log}");
-    assert!(log.contains("notice_prompt\tmessage_ids= session=p1 kind= decision=UNPARSEABLE composer_bytes=0"), "{log}");
+    assert!(log.contains("notice_prompt\tmessage_ids= session=p1 kind= decision=DIALOG composer_bytes=0"), "{log}");
 }
 
 #[test]
@@ -1513,7 +1514,8 @@ fn codex_trace_row_followed_by_user_draft_is_not_empty_or_typed_over() {
     let got = eval(
         &path,
         r#"
-        local row = { name = 'm1', alive = true, attached = false }
+        local row = { name = 'm1', alive = true, attached = false,
+          instance_id = remuda._butler_bus.agents.m1.instance_id }
         local screen = '› 2026-10-01T12:00:00Z ERROR foo::bar: why?\nWhat is the status?'
         remuda.ls = function() return { row } end
         remuda.capture = function() return screen end
@@ -2544,8 +2546,8 @@ fn dismissed_claude_model_modal_is_rechecked_and_notice_is_delivered() {
         &path,
         &format!(
             r#"
-        local state = {{ now = 0, screen = '❯ 1. Yes, switch to Opus 5.5\n──', events = {{}} }}
-        local row = {{ name = 'm1', alive = true, attached = false }}
+        local state = {{ now = 0, screen = 'Switch model?\n❯ 1. Yes, switch to Opus 5.5\n  2. No', events = {{}} }}
+        local row = {{ name = 'm1', alive = true, attached = false, instance_id = remuda._butler_bus.agents.m1.instance_id }}
         remuda._notice_test_state = state
         remuda._butler_session_trace_path = {trace:?}
         remuda._butler_bus.agents.m1.kind = 'claude'
@@ -2573,6 +2575,10 @@ fn dismissed_claude_model_modal_is_rechecked_and_notice_is_delivered() {
     eval(
         &path,
         "local state = remuda._notice_test_state; state.now = 2; remuda._butler_deliver_notices()",
+    );
+    assert_eq!(
+        eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n'):find('type ', 1, true) == nil"),
+        "true", "known model modal must block typing before dismissal"
     );
     // Replay the captured post-modal composer: the trace line from the model
     // chooser is gone and Claude now shows its empty prompt.
@@ -2617,7 +2623,8 @@ fn codex_router_trace_on_prompt_row_is_not_preserved_as_a_user_draft() {
           screen = '› 2026-09-30T14:23:28Z ERROR codex_core::tools::router: error=failed to refresh available mode\n? for shortcuts',
           events = {}, typed = nil,
         }
-        local row = { name = 'm1', alive = true, attached = false }
+        local row = { name = 'm1', alive = true, attached = false,
+          instance_id = remuda._butler_bus.agents.m1.instance_id }
         remuda._notice_test_state = state
         remuda._butler_bus.agents.m1.kind = 'codex'
         remuda._butler_notice_clock = function() return state.now end
@@ -2667,7 +2674,7 @@ fn attached_notice_recovery_progresses_or_times_out_with_a_reason() {
         &format!(
             r#"
         local state = {{ now = 0, screen = '❯ ', events = {{}} }}
-        local row = {{ name = 'm1', alive = true, attached = true, human_idle = 20 }}
+        local row = {{ name = 'm1', alive = true, attached = true, human_idle = 20, instance_id = remuda._butler_bus.agents.m1.instance_id }}
         remuda._notice_test_state = state
         remuda._butler_session_trace_path = {trace:?}
         remuda._butler_bus.agents.m1.kind = 'codex'
