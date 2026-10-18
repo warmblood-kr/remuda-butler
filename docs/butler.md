@@ -214,6 +214,39 @@ Each load is traced as `guidance_layers` in the session trace, for example
 personal=sha256:9f8e7d6c5b4a local=missing`, and `remuda butler doctor`
 shows the root Butler's last load on its `Guidance layers:` line.
 
+## Butler memory (shared by Claude and Codex)
+
+Each Butler has a memory directory owned by Butler, not by the agent:
+`~/.local/share/remuda/butler/memory/NAME/` (`NAME` is `butler` for the
+root, the member's name otherwise). The directory follows `XDG_DATA_HOME`, and
+`REMUDA_BUTLER_MEMORY_HOME` overrides the parent. It holds plain Markdown: an
+index `MEMORY.md` with one line per note (`- [Title](file.md) — one-line
+hook`) and one file per note. Butler creates the directory with an empty
+index the first time the Butler starts and never rewrites the index.
+
+The memory is keyed by the Butler's name, not by its agent or working
+directory. So a member relaunched under the same name, or switched from
+Claude to Codex, keeps its memory. Every agent is pointed at the same
+directory:
+
+- **Every agent**: `REMUDA_BUTLER_MEMORY_DIR` in its environment, and a managed
+  `memory` block in its `AGENTS.md` (next to `guidance-layers`). The block gives
+  the path and the rules and shows `MEMORY.md` as it was when the session
+  started (up to 8 KiB). The block is refreshed at the same times as the
+  guidance layers. A new member's welcome mail carries it too.
+- **Claude**: the per-launch settings set `autoMemoryDirectory` to the store,
+  so Claude's own auto memory reads and writes it. They also add the store to
+  `permissions.additionalDirectories` and allow `Read`/`Edit` there. The same
+  settings tell Claude to read `AGENTS.md` even where a `CLAUDE.md` exists
+  (`instructionFiles: claude-md-and-agents-md`), so Butler's blocks reach
+  Claude in any project.
+- **Codex**: the store is added to the sandbox's writable roots, on a core
+  whose `_codex_tui` accepts `-c` (on an older core Codex can read the block
+  but not write the store).
+
+Task notes for one working directory still belong in its `docs/`. Never put
+secrets in the memory store: it is plain text.
+
 ## Schedules
 
 A schedule sends a fixed text to a session at wall-clock times and survives
