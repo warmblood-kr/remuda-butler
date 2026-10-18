@@ -60,3 +60,17 @@ Matrix is the human-facing adapter: never call the homeserver REST API or curl d
 - `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).
 - `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.
 - `redact EVENT_ID [--reason TEXT]`: remove your message.
+
+<!-- BEGIN remuda-butler:managed id=guidance-layers -->
+## Guidance layers
+
+Butler loaded these guidance layers in this order when this session started.
+A later layer adds to or overrides an earlier one. Edit the files named here,
+not this block: Butler rewrites it on every session start.
+
+- framework: built in, version sha256:a394937732e8
+- cluster: not available (cluster file storage, warmblood-kr/remuda#742, is not ready)
+- team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
+- personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)
+- local: not loaded (no file at <T>/config/remuda/butler/guidance/local.md)
+<!-- END remuda-butler:managed id=guidance-layers -->

@@ -146,6 +146,9 @@ local function render(probe_results, platform)
       and probe_results.matrix_configured ~= true then
     lines[#lines + 1] = "Next: remuda butler matrix setup"
   end
+  -- #535: the guidance layers the root Butler loaded at its last start.
+  local loaded = (remuda._butler_guidance_reports or {}).butler
+  if type(loaded) == "table" and loaded.summary then lines[#lines + 1] = "Guidance layers: " .. loaded.summary end
   -- Read-only: which members are checked by instance (legacy-visible ones keep name-only checks).
   local principal = remuda._butler_caller_principal
   if principal and principal.legacy_core() then lines[#lines + 1] = "legacy-core: instance binding not enforced" end

@@ -167,6 +167,46 @@ are damaged or doubled, a symlinked `AGENTS.md`, and a file mixing LF and CRLF
 line endings are left unchanged, and the trace names them. A file holding only an earlier Butler text is replaced by the
 marked form; any other unmarked file keeps its text and gets the block appended.
 
+## Your own guidance layers
+
+Rules of your own (local paths, team conventions, preferences) go in plain
+Markdown files outside Butler, not in Butler's code. Butler reads them in this
+order, and a later layer adds to or overrides an earlier one:
+
+1. **framework**: Butler's own text (built in).
+2. **cluster**: shared by every node of a cluster. Not available yet: it
+   waits for the cluster file storage (warmblood-kr/remuda#742).
+3. **team**: `~/.config/remuda/butler/guidance/team.md`. To share it, make it a
+   symlink into a team repository.
+4. **personal**: `~/.config/remuda/butler/guidance/personal.md`. Keep it in
+   your dotfiles.
+5. **local**: `~/.config/remuda/butler/guidance/local.md`. Rules for this
+   machine only, like Emacs `custom.el`; keep it out of a shared dotfiles
+   repository.
+
+The directory follows `XDG_CONFIG_HOME`; `REMUDA_BUTLER_GUIDANCE_DIR`
+overrides it. A missing or empty file means "not loaded", and nothing fails.
+A file over 8 KiB, or one that cannot be read, is not loaded and is reported.
+
+Butler writes the layers into the agent's `AGENTS.md` as the managed block
+`guidance-layers`: a list of every layer with its status and version (the
+first 12 hex digits of the file's sha256), then the text of each loaded layer.
+A new member's welcome mail carries the same text. Edit the files, not the
+block: Butler rewrites it.
+
+Butler reads the files again when a session starts (a new launch, a relaunch,
+or a daemon restart that starts the root again) and just before it compacts a
+session, so the agent reloads the same rules after compaction or a rollout.
+It does not re-read them on every reconcile tick. For a member, Butler
+writes the block only in a directory it made itself. In your own project
+directory it refreshes the block only if Butler wrote it there before, and
+otherwise leaves your `AGENTS.md` alone.
+
+Each load is traced as `guidance_layers` in the session trace, for example
+`butler framework=sha256:1a2b3c4d5e6f cluster=unavailable team=missing
+personal=sha256:9f8e7d6c5b4a local=missing`, and `remuda butler doctor`
+shows the root Butler's last load on its `Guidance layers:` line.
+
 ## Schedules
 
 A schedule sends a fixed text to a session at wall-clock times and survives

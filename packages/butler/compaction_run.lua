@@ -922,6 +922,8 @@ function remuda._butler_compaction_execute(session_name, force)
   end
 
   local function compact()
+    -- #535: the agent reloads AGENTS.md after compacting; refresh its guidance layers first.
+    if remuda._butler_refresh_guidance then pcall(remuda._butler_refresh_guidance, agent) end
     local sent = send_command("/compact")
     if not sent then return end
     -- type_text could not confirm the command and the pane is idle: it was not

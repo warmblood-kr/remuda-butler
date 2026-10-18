@@ -32,6 +32,8 @@ local setup_telemetry = chooser.setup_telemetry
 local team_member_guidance = chooser.team_member_guidance
 local team_member_prompt = chooser.team_member_prompt
 local write_agent_guidance = chooser.write_agent_guidance
+local member_layers_block = chooser.member_layers_block
+local write_guidance_layers = chooser.write_guidance_layers
 local option_number = chooser.option_number
 local codex_update_version = chooser.codex_update_version
 local skip_option_number = chooser.skip_option_number
@@ -157,7 +159,14 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   local trust_checked, trust_ok = pcall(function() return chooser.trust_eligible(launch_cwd, trust_env()) end)
   local trust_eligible = trust_checked and trust_ok == true
   local trust_real_cwd = trust_eligible and config.realpath(launch_cwd) or nil
-  if cwd and parent and auto_trust then write_agent_guidance(cwd, team_member_guidance(parent)) end
+  -- #535: every start, relaunch included, reads the user guidance layers again.
+  local layers_block = member_layers_block(name, parent or "butler")
+  if cwd and parent and auto_trust then
+    write_agent_guidance(cwd, team_member_guidance(parent))
+    write_guidance_layers(cwd, layers_block)
+  elseif cwd then
+    write_guidance_layers(cwd, layers_block, true)
+  end
   local token = next_token(name)
   local telemetry_by_kind = {}
   local models = {}
@@ -272,7 +281,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   -- A failed welcome write must not prevent the agent from starting.
   if not relaunch_identity then
     pcall(queue_message, mail_address(parent or "butler"), mail_address(actual),
-      team_member_guidance(parent or "butler") .. sandbox_lib.guidance_line(profile), "Welcome to Butler")
+      team_member_guidance(parent or "butler") .. sandbox_lib.guidance_line(profile)
+        .. (layers_block and ("\n" .. layers_block.body) or ""), "Welcome to Butler")
     -- First sight of a new member: nothing to replay or re-show (notice.lua).
     bus.unread_seeded[actual] = "launched"
   end
