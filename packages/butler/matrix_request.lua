@@ -272,7 +272,7 @@ local function read_config(path)
           opts[key] = false
         else
           -- An unreadable status switch turns the commands off, never on.
-          if key == "status_commands" or key == "approve_text" then opts[key] = false end
+          if key == "status_commands" or key == "approve_text" or key == "typed_lines" or key == "shell_lines" then opts[key] = false end
           warn_invalid_config_line(path, i, key, value)
         end
       else
@@ -364,10 +364,10 @@ local function read_config(path)
     deny_room_aliases = deny_room_aliases, deny_servers = deny_servers,
     self_mxid = lines[3], allowed_senders = allowed,
     butler_senders = butler_senders,
-    typed_lines = opts.typed_lines == true,
-    shell_lines = opts.shell_lines == true,
+    typed_lines = opts.typed_lines ~= false, -- on unless the config says false (or is unreadable)
+    shell_lines = opts.shell_lines ~= false, -- on unless the config says false (or is unreadable)
     status_commands = opts.status_commands == nil or opts.status_commands == true,
-    approve_text = opts.approve_text == true,
+    approve_text = opts.approve_text ~= false, -- on unless the config says false (or is unreadable)
     untrusted_per_room_hour = untrusted_per_room_hour,
     posts_per_hour = posts_per_hour,
     b2b_max_turns = b2b_max_turns,

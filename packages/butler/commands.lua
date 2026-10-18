@@ -439,12 +439,12 @@ local GUARD_SUMMARY_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
     guard = {
-      about = "Guard audit is off by default. Forms: on|off|status; approvals on|off|status; deny on|off|status; grants [on|off|status]; stats; verify. Example: remuda butler guard approvals status",
+      about = "Guard audit and guard approvals are on by default; deny and grants are off. Forms: on|off|status; approvals on|off|status; deny on|off|status; grants [on|off|status]; stats; verify. Example: remuda butler guard approvals status",
       next = "remuda butler guard approvals status",
     },
   },
 }
-command(21, "guard", "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify  (off by default)", function(args, caller)
+command(21, "guard", "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify  (guard and approvals on by default; deny and grants off)", function(args, caller)
   local argv = {}
   for index, word in ipairs(args) do if index > 1 then argv[#argv + 1] = word end end
   -- The no-argument form is a stdin hook protocol, not an interactive verb.
