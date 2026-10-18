@@ -39,3 +39,17 @@ Caller attribution is advisory within one user account, not an isolation boundar
 `remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 <!-- END remuda-butler:managed id=butler -->
+
+<!-- BEGIN remuda-butler:managed id=guidance-layers -->
+## Guidance layers
+
+Butler loaded these guidance layers in this order when this session started.
+A later layer adds to or overrides an earlier one. Edit the files named here,
+not this block: Butler rewrites it on every session start.
+
+- framework: built in, version sha256:cde212b1ae78
+- cluster: not available (cluster file storage, warmblood-kr/remuda#742, is not ready)
+- team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
+- personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)
+- local: not loaded (no file at <T>/config/remuda/butler/guidance/local.md)
+<!-- END remuda-butler:managed id=guidance-layers -->

@@ -554,6 +554,25 @@ local function write_agent_guidance(root, text, replace)
   -- differs the atomic writer replaces the link with a plain file.
   assert(remuda._butler_permissions.write_if_changed(path, text, config.fs))
 end
+-- The user guidance layers for a member (#535), or nil when they cannot be
+-- loaded: a launch never fails over guidance.
+local function member_layers_block(name, parent)
+  if not remuda._butler_guidance_block then return nil end
+  local ok, block = pcall(remuda._butler_guidance_block, name, team_member_guidance(parent))
+  return ok and block or nil
+end
+-- Writes the layers block into ROOT/AGENTS.md. With `only_if_present` it
+-- refreshes a block Butler wrote earlier and leaves any other AGENTS.md (a
+-- user's own project) untouched.
+local function write_guidance_layers(root, block, only_if_present)
+  if not (root and block) then return end
+  local path = root .. "/AGENTS.md"
+  if only_if_present then
+    local text = config.fs.read(path)
+    if not (text and text:find("<!-- BEGIN remuda-butler:managed id=" .. block.id .. " -->", 1, true)) then return end
+  end
+  pcall(remuda._butler_guidance_blocks.sync, path, { block }, config.fs)
+end
 local _butler_session_trace -- defined below; the task poke fires later
 local function option_number(screen, matches)
   -- Parse the visible chooser ourselves. Core versions that strip a UTF-8
@@ -826,6 +845,8 @@ remuda._butler_chooser = {
   team_member_guidance = team_member_guidance,
   team_member_prompt = team_member_prompt,
   write_agent_guidance = write_agent_guidance,
+  member_layers_block = member_layers_block,
+  write_guidance_layers = write_guidance_layers,
   option_number = option_number,
   codex_update_version = codex_update_version,
   skip_option_number = skip_option_number,

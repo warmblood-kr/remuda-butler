@@ -127,6 +127,7 @@ remuda.exec("butler/matrix")
 -- live in permissions.lua; these are the file helpers it is handed.
 remuda.exec("butler/permissions")
 remuda.exec("butler/guidance_blocks")
+remuda.exec("butler/guidance_layers")
 local permissions = remuda._butler_permissions
 -- Core's remuda.fs.realpath and is_symlink where it has them; on an older core
 -- the posix shell helpers, and no answer (so a refusal) on Windows.
@@ -1222,16 +1223,70 @@ local guidance_fs = setmetatable({
     return butler_fs.write(path, text)
   end,
 }, { __index = butler_fs })
-local function write_root_guidance(root, body)
+-- User guidance layers (#535): read fresh each time a session starts or is
+-- about to compact, never on a reconcile tick. The last load per agent is
+-- kept for `doctor` and traced, so a restart shows the same layers and versions.
+local guidance_layers = remuda._butler_guidance_layers
+remuda._butler_guidance_reports = remuda._butler_guidance_reports or {}
+-- Reads at most one byte past the layer cap. nil, "unreadable" when the file
+-- exists but cannot be opened; nil alone when it is absent.
+-- ponytail: io.open blocks on a named FIFO, as in commands.lua; the guidance
+-- directory is the user's own config, like topics.lua.
+local function read_layer(path)
+  local file, _, code = io.open(path, "rb")
+  if not file then return nil, code ~= 2 and "unreadable" or nil end
+  local ok, text = pcall(file.read, file, guidance_layers.LAYER_MAX + 1)
+  file:close()
+  if not ok then return nil, "unreadable" end
+  return text or ""
+end
+-- The guidance-layers block for an agent whose framework text is `framework`.
+function remuda._butler_guidance_block(name, framework)
+  local approval = remuda.butler and remuda.butler.guard_approval
+  local layers = guidance_layers.sanitize(guidance_layers.load({
+    framework = framework,
+    dir = guidance_layers.dir(os.getenv, paths.default_config_home()),
+    read = read_layer,
+    hash = approval and approval.sha256 or function() error("sha256 unavailable") end,
+  }))
+  local summary = guidance_layers.summary(layers)
+  remuda._butler_guidance_reports[name] = { summary = summary, layers = layers, at = os.time() }
+  _butler_session_trace("guidance_layers", one_line(tostring(name) .. " " .. summary))
+  local home_ok, home = pcall(system.home)
+  return { id = guidance_layers.BLOCK_ID, body = guidance_layers.render(layers, home_ok and home or nil),
+    max = guidance_layers.BLOCK_MAX }
+end
+local GUIDANCE_EVENTS = { damaged = "guidance_markers_damaged", duplicated = "guidance_markers_damaged",
+  symlink = "guidance_symlink_refused", ["mixed-eol"] = "guidance_mixed_eol", dropped = "guidance_block_dropped" }
+-- The tick path rewrites the last loaded block; `reload` reads the layers again.
+local root_layers_block
+local function write_root_guidance(root, body, reload)
   local path = root .. "/AGENTS.md"
-  local _, report, err = remuda._butler_guidance_blocks.sync(path, { { id = "butler", body = body } }, guidance_fs)
-  local outcome = err and "guidance_not_written" or report[1].outcome
-  local event = ({ damaged = "guidance_markers_damaged", duplicated = "guidance_markers_damaged",
-    symlink = "guidance_symlink_refused", ["mixed-eol"] = "guidance_mixed_eol", dropped = "guidance_block_dropped" })[outcome]
-  if err then event = outcome end
-  if event and not guidance_traced[event .. path] then
-    guidance_traced[event .. path] = true
-    _butler_session_trace(event, one_line(err or path))
+  if reload or not root_layers_block then
+    local ok, block = pcall(remuda._butler_guidance_block, "butler", body)
+    if ok then root_layers_block = block
+    else _butler_session_trace("guidance_layers_not_loaded", one_line(block)) end
+  end
+  local blocks = { { id = "butler", body = body } }
+  if root_layers_block then blocks[2] = root_layers_block end
+  local _, report, err = remuda._butler_guidance_blocks.sync(path, blocks, guidance_fs)
+  for _, item in ipairs(err and { { outcome = "guidance_not_written" } } or report) do
+    local event = err and item.outcome or GUIDANCE_EVENTS[item.outcome]
+    if event and not guidance_traced[event .. path] then
+      guidance_traced[event .. path] = true
+      _butler_session_trace(event, one_line(err or path))
+    end
+  end
+end
+-- Before a compaction (#535): the agent reloads AGENTS.md afterwards, so read
+-- the layers again. A member's file is refreshed only where Butler wrote the block.
+function remuda._butler_refresh_guidance(agent)
+  if type(agent) ~= "table" then return end
+  if agent == bus.agents.butler then
+    if butler_session_cwd then write_root_guidance(butler_session_cwd, BUTLER_GUIDANCE, true) end
+  elseif agent.cwd then
+    chooser.write_guidance_layers(agent.cwd,
+      chooser.member_layers_block(agent.alias or agent.session_name, agent.parent or "butler"), true)
   end
 end
 local RECONCILE_RETRY_INITIAL_MS, RECONCILE_RETRY_MAX_MS = 2000, 60000
@@ -1252,12 +1307,14 @@ end
 remuda._butler_reconcile_retry = reconcile_retry
 local function launch_butler()
   local requested_name = butler_name or remuda._butler_initial_name
+  local stale_session = session_exists(requested_name)
+  local adopting = remuda._butler_selected_agent and stale_session
   if butler_session_cwd then
     remuda.mkdir(butler_session_cwd)
-    write_root_guidance(butler_session_cwd, BUTLER_GUIDANCE)
+    -- A start (not the tick that only adopts a live root) reads the layers again.
+    write_root_guidance(butler_session_cwd, BUTLER_GUIDANCE, not adopting and not remuda._butler_launching)
   end
-  local stale_session = session_exists(requested_name)
-  if remuda._butler_selected_agent and stale_session then
+  if adopting then
     butler_name = requested_name
     remuda._butler_name = butler_name
     -- Adopted without a chooser run: keep the bound id only if the token record and the live row agree with it.
