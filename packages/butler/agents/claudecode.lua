@@ -62,14 +62,15 @@ telemetry.claude = {
 builders.claude = function(spec)
   -- The per-launch settings file carries the guard hooks (PreToolUse and
   -- PermissionRequest) when guard policy is on. A launch that needs them but
-  -- could not persist the file is refused (fail closed): the chooser records
-  -- a spawn_error for this candidate and never starts Claude without them.
-  -- With guard policy off the failure only drops the defaults and status
+  -- could not persist the file is refused (fail closed) only when the owner
+  -- EXPLICITLY turned guard on: the chooser records a spawn_error for this
+  -- candidate and never starts Claude without them. With guard off, or on
+  -- only by default, the failure only drops the defaults and status
   -- telemetry; the launch continues without --settings (traced).
   local settings_error = spec.telemetry and spec.telemetry.settings_error
   if settings_error then
     local policy = remuda.butler and remuda.butler.guard_policy
-    local ok, guard_on = pcall(function() return policy and policy.enabled() end)
+    local ok, guard_on = pcall(function() return policy and policy.explicitly_on() end)
     if not ok or guard_on then
       error("Claude settings file could not be written (" .. tostring(settings_error)
         .. "); refusing to start Claude without its guard hooks", 0)

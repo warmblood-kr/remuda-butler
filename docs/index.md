@@ -156,7 +156,7 @@ The owner can narrow grants from Matrix with whole-message lines in the HOME roo
 
 ### Guard approvals
 
-`remuda butler guard approvals on|off|status` is a second switch, off by
+`remuda butler guard approvals on|off|status` is a second switch, on by
 default and independent of `guard on|off`; routing runs only while both are on,
 for Claude members launched after the switch. The `PermissionRequest` hook of
 such a member registers each permission prompt as an approval request (id,

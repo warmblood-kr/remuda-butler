@@ -35,6 +35,16 @@ function M.enabled()
   return text == "on"
 end
 
+-- True only when the owner wrote "on": the default-on state (no marker) is not an explicit request.
+function M.explicitly_on()
+  local path = switch_path()
+  local f = path and io.open(path, "r")
+  if not f then return false end
+  local text = f:read("*l")
+  f:close()
+  return text == "on"
+end
+
 function M.set(on)
   local path = switch_path()
   if not path then return nil, "Butler data directory is unknown" end

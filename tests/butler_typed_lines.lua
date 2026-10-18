@@ -32,6 +32,7 @@ local cases = {
   { name = "only one space is stripped", event = event("!  cmd"), ok = true, line = " cmd", form = "!" },
   { name = "thread reply doubled prefix", event = event("! ! cmd", { content = { msgtype = "m.text", body = "! ! cmd",
     ["m.relates_to"] = { rel_type = "m.thread", event_id = "$root" } } }), ok = true, line = "! cmd", form = "!" },
+  { name = "shell form with a space keeps it", event = event("!! x"), ok = true, line = "! x", form = "!!" },
   { name = "shell form leaves one bang",event = event("!!ls"), ok = true, line = "!ls", form = "!!" },
   { name = "leading slash is allowed", event = event("!/status"), ok = true, line = "/status", form = "!" },
   { name = "owner allowlist required", event = event("!hello", { sender = "@other:example.org" }), ok = false },

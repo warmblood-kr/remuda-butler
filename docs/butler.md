@@ -336,8 +336,8 @@ and `Shell lines: on|off`. Both switches are on by default (once Matrix is set u
 off, matching messages stay on the ordinary mail path. A line that is
 typed is also delivered to the inbox as ordinary mail, so typing is additive.
 These CLI gates do not defend against a hostile same-user agent that clears
-its identity (see Butler #264). The real protection is that both switches
-default off.
+its identity (see Butler #264). The real protection is the owner allowlist,
+the live-sync and rate checks below, and the explicit off switches.
 
 An enabled line must come from an allowlisted owner in a live Matrix sync, be
 no more than five minutes old, contain one line of at most 2000 bytes, and fit
