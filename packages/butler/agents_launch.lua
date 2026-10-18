@@ -554,24 +554,41 @@ local function write_agent_guidance(root, text, replace)
   -- differs the atomic writer replaces the link with a plain file.
   assert(remuda._butler_permissions.write_if_changed(path, text, config.fs))
 end
--- The user guidance layers for a member (#535), or nil when they cannot be
--- loaded: a launch never fails over guidance.
-local function member_layers_block(name, parent)
-  if not remuda._butler_guidance_block then return nil end
-  local ok, block = pcall(remuda._butler_guidance_block, name, team_member_guidance(parent))
-  return ok and block or nil
+-- A member's managed blocks (#535): the user guidance layers, then its
+-- Butler-owned memory. A block that cannot be made is left out: a launch never
+-- fails over guidance.
+local function member_guidance_blocks(name, parent)
+  local blocks = {}
+  if remuda._butler_guidance_block then
+    local ok, block = pcall(remuda._butler_guidance_block, name, team_member_guidance(parent))
+    if ok and block then blocks[#blocks + 1] = block end
+  end
+  if remuda._butler_memory_block then
+    local ok, block = pcall(remuda._butler_memory_block, name)
+    if ok and block then blocks[#blocks + 1] = block end
+  end
+  return blocks
 end
--- Writes the layers block into ROOT/AGENTS.md. With `only_if_present` it
--- refreshes a block Butler wrote earlier and leaves any other AGENTS.md (a
--- user's own project) untouched.
-local function write_guidance_layers(root, block, only_if_present)
-  if not (root and block) then return end
+-- The blocks' text for the welcome mail.
+local function guidance_text(blocks)
+  local out = {}
+  for _, block in ipairs(blocks or {}) do out[#out + 1] = "\n" .. block.body end
+  return table.concat(out)
+end
+-- Writes the blocks into ROOT/AGENTS.md. With `only_if_present` it refreshes
+-- them only where Butler wrote one of them before, and leaves any other
+-- AGENTS.md (a user's own project) untouched.
+local function write_guidance_layers(root, blocks, only_if_present)
+  if not (root and blocks and #blocks > 0) then return end
   local path = root .. "/AGENTS.md"
   if only_if_present then
-    local text = config.fs.read(path)
-    if not (text and text:find("<!-- BEGIN remuda-butler:managed id=" .. block.id .. " -->", 1, true)) then return end
+    local text, ours = config.fs.read(path), false
+    for _, block in ipairs(blocks) do
+      if text and text:find("<!-- BEGIN remuda-butler:managed id=" .. block.id .. " -->", 1, true) then ours = true end
+    end
+    if not ours then return end
   end
-  pcall(remuda._butler_guidance_blocks.sync, path, { block }, config.fs)
+  pcall(remuda._butler_guidance_blocks.sync, path, blocks, config.fs)
 end
 local _butler_session_trace -- defined below; the task poke fires later
 local function option_number(screen, matches)
@@ -845,7 +862,8 @@ remuda._butler_chooser = {
   team_member_guidance = team_member_guidance,
   team_member_prompt = team_member_prompt,
   write_agent_guidance = write_agent_guidance,
-  member_layers_block = member_layers_block,
+  member_guidance_blocks = member_guidance_blocks,
+  guidance_text = guidance_text,
   write_guidance_layers = write_guidance_layers,
   option_number = option_number,
   codex_update_version = codex_update_version,

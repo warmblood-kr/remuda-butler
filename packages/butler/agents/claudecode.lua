@@ -23,7 +23,7 @@ telemetry.claude = {
       status_dirs[spec.name] = dir
       if previous then pcall(remuda.remove_dir_all, previous) end
     end
-    local settings_path, why = support.status_settings(status_path, spec.name)
+    local settings_path, why = support.status_settings(status_path, spec.name, spec.memory_dir)
     if not settings_path and _butler_session_trace then _butler_session_trace("settings_not_written", tostring(why)) end
     return { status_path = status_path, settings_path = settings_path, settings_error = why }
   end,

@@ -128,6 +128,7 @@ remuda.exec("butler/matrix")
 remuda.exec("butler/permissions")
 remuda.exec("butler/guidance_blocks")
 remuda.exec("butler/guidance_layers")
+remuda.exec("butler/memory_store")
 local permissions = remuda._butler_permissions
 -- Core's remuda.fs.realpath and is_symlink where it has them; on an older core
 -- the posix shell helpers, and no answer (so a refusal) on Windows.
@@ -257,7 +258,7 @@ end
 local settings_dirs = {}
 -- Returns the settings file path, or nil plus a reason; never a path that was
 -- not completely written (no plain-write fallback).
-local function status_settings(path, key)
+local function status_settings(path, key, memory_dir)
   local dir, why = new_private_dir()
   if not dir then return nil, why end
   local settings_path = dir .. "/settings.json"
@@ -285,7 +286,20 @@ local function status_settings(path, key)
   -- from repo root, subdirectory and worktree. Other scopes are not measured.
   local allow = {}
   for _, rule in ipairs(coordination_config.CLAUDE_RULES) do allow[#allow + 1] = json_quote(rule) end
-  local text = '{"permissions":{"allow":[' .. table.concat(allow, ",") .. ']},"statusLine":{"type":"command","command":'
+  -- #535 Claude adapter: Claude's auto memory lives in the Butler-owned store,
+  -- with file access to it, and Claude reads AGENTS.md (Butler's guidance and
+  -- memory blocks) even where a CLAUDE.md exists. Measured on claude 2.1.302.
+  local memory = remuda._butler_memory_store.claude_settings(memory_dir, json_quote)
+  local permissions_extra, top_extra = "", ""
+  if memory then
+    for _, rule in ipairs(memory.allow) do allow[#allow + 1] = rule end
+    permissions_extra = "," .. memory.permissions
+    top_extra = memory.top .. ","
+  end
+  top_extra = top_extra .. '"pluginConfigs":{"cc-plugin-agents-md@builtin":{"options":{"instructionFiles":'
+    .. '"claude-md-and-agents-md"}}},'
+  local text = '{' .. top_extra .. '"permissions":{"allow":[' .. table.concat(allow, ",") .. ']' .. permissions_extra
+    .. '},"statusLine":{"type":"command","command":'
     .. json_quote("remuda -s " .. shell_quote(server) .. " --stdin butler statusline " .. shell_quote(path))
     .. '},"hooks":{' .. guard_hooks .. '"UserPromptSubmit":[' .. hook .. '],"Stop":[' .. hook .. '],"Notification":[' .. hook .. ']}}'
   -- Checked private atomic write (0600) into the exclusive directory. Failure
@@ -1258,19 +1272,50 @@ function remuda._butler_guidance_block(name, framework)
   return { id = guidance_layers.BLOCK_ID, body = guidance_layers.render(layers, home_ok and home or nil),
     max = guidance_layers.BLOCK_MAX }
 end
+-- Agent-neutral memory (#535 phase 3): one Butler-owned directory per Butler
+-- name, created with a seed MEMORY.md on first use. nil when it cannot be made.
+local memory_store = remuda._butler_memory_store
+function remuda._butler_memory_dir(name)
+  local dir = memory_store.dir(memory_store.root(os.getenv, data_home), name)
+  if not dir then return nil end
+  if not pcall(system.mkdir_p, dir) then return nil end
+  local index = dir .. "/" .. memory_store.INDEX
+  local present, why = read_layer(index)
+  if present == nil and why == nil then
+    local wrote = pcall(butler_fs.write, index, memory_store.INDEX_SEED)
+    if not wrote then return nil end
+  end
+  -- The real path: Codex's sandbox and Claude's allow rules match resolved paths.
+  local resolved_ok, resolved = pcall(realpath, dir)
+  return resolved_ok and type(resolved) == "string" and resolved or dir
+end
+-- Codex adapter: the store as an extra writable root, only where this core can
+-- pass `-c` to Codex (otherwise a writable root would stop the launch).
+function remuda._butler_codex_memory_writable(writable, dir)
+  if not dir or not (remuda._butler_codex_config_ok and remuda._butler_codex_config_ok()) then return writable end
+  return memory_store.codex_writable(writable, dir)
+end
+-- The `memory` block for AGENTS.md, or nil.
+function remuda._butler_memory_block(name)
+  local dir = remuda._butler_memory_dir(name)
+  return dir and memory_store.block(dir, name, read_layer) or nil
+end
 local GUIDANCE_EVENTS = { damaged = "guidance_markers_damaged", duplicated = "guidance_markers_damaged",
   symlink = "guidance_symlink_refused", ["mixed-eol"] = "guidance_mixed_eol", dropped = "guidance_block_dropped" }
 -- The tick path rewrites the last loaded block; `reload` reads the layers again.
-local root_layers_block
+local root_layers_block, root_memory_block
 local function write_root_guidance(root, body, reload)
   local path = root .. "/AGENTS.md"
   if reload or not root_layers_block then
     local ok, block = pcall(remuda._butler_guidance_block, "butler", body)
     if ok then root_layers_block = block
     else _butler_session_trace("guidance_layers_not_loaded", one_line(block)) end
+    local memory_ok, memory_block = pcall(remuda._butler_memory_block, "butler")
+    root_memory_block = memory_ok and memory_block or nil
   end
   local blocks = { { id = "butler", body = body } }
-  if root_layers_block then blocks[2] = root_layers_block end
+  if root_layers_block then blocks[#blocks + 1] = root_layers_block end
+  if root_memory_block then blocks[#blocks + 1] = root_memory_block end
   local _, report, err = remuda._butler_guidance_blocks.sync(path, blocks, guidance_fs)
   for _, item in ipairs(err and { { outcome = "guidance_not_written" } } or report) do
     local event = err and item.outcome or GUIDANCE_EVENTS[item.outcome]
@@ -1288,7 +1333,7 @@ function remuda._butler_refresh_guidance(agent)
     if butler_session_cwd then write_root_guidance(butler_session_cwd, BUTLER_GUIDANCE, true) end
   elseif agent.cwd then
     chooser.write_guidance_layers(agent.cwd,
-      chooser.member_layers_block(agent.alias or agent.session_name, agent.parent or "butler"), true)
+      chooser.member_guidance_blocks(agent.alias or agent.session_name, agent.parent or "butler"), true)
   end
 end
 local RECONCILE_RETRY_INITIAL_MS, RECONCILE_RETRY_MAX_MS = 2000, 60000
@@ -1346,16 +1391,20 @@ local function launch_butler()
     spec = function(candidate_kind)
       pcall(ensure_root_permissions, candidate_kind)
       remuda._butler_ensure_coordination(butler_session_cwd, candidate_kind, "root")
-      local telemetry = setup_telemetry(candidate_kind, { name = requested_name, status_path = status_path })
+      local memory_dir = remuda._butler_memory_dir("butler")
+      local telemetry = setup_telemetry(candidate_kind, { name = requested_name, status_path = status_path,
+        memory_dir = memory_dir })
       telemetry_by_kind[candidate_kind] = telemetry
       rotate_root_capability()
       return { name = requested_name, token = butler_token, mcp_config_path = mcp_config_path,
-        settings_path = telemetry.settings_path, telemetry = telemetry, system_prompt = SYSTEM_PROMPT }
+        settings_path = telemetry.settings_path, telemetry = telemetry, system_prompt = SYSTEM_PROMPT,
+        writable = candidate_kind == "codex" and remuda._butler_codex_memory_writable(nil, memory_dir) or nil }
     end,
     env = function(candidate_kind)
       return { REMUDA_BUTLER_SESSION_NAME = requested_name, REMUDA_BUTLER_AGENT_ID = root_identity.id,
         REMUDA_BUTLER_AGENT_ALIAS = "butler", REMUDA_BUTLER_LEADER_ID = "",
-        REMUDA_BUTLER_AGENT_KIND = candidate_kind, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1" }
+        REMUDA_BUTLER_AGENT_KIND = candidate_kind, CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1",
+        REMUDA_BUTLER_MEMORY_DIR = remuda._butler_memory_dir("butler") or "" }
     end,
   }
   local function finish(selected, kind, attempts, instance_id)
