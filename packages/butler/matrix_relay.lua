@@ -1111,6 +1111,21 @@ function relay.new(options)
     return true
   end
 
+  -- Known Butler/owner mxids only; ambiguous or unknown names stay plain text.
+  function instance:resolve_mention(localpart, server)
+    local found
+    local function consider(mxid)
+      local l, s = mxid:match("^@([^:]+):(.+)$")
+      if l == localpart and (not server or s == server) then
+        if found and found ~= mxid then found = false elseif found == nil then found = mxid end
+      end
+    end
+    if cfg.self_mxid then consider(cfg.self_mxid) end
+    for mxid in pairs(cfg.butler_senders or {}) do consider(mxid) end
+    for mxid in pairs(cfg.allowed_senders or {}) do consider(mxid) end
+    return found or nil
+  end
+
   local function own_event_for(event_id)
     for room_id, events in pairs(state.own_events) do
       if cfg.rooms[room_id] ~= nil then
