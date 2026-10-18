@@ -1248,6 +1248,8 @@ function remuda._butler_guidance_block(name, framework)
     dir = guidance_layers.dir(os.getenv, paths.default_config_home()),
     read = read_layer,
     hash = approval and approval.sha256 or function() error("sha256 unavailable") end,
+    -- #741: nil on a core without the cluster file store (reported as not available).
+    cluster = guidance_layers.cluster_from_vfs(remuda.vfs),
   }))
   local summary = guidance_layers.summary(layers)
   remuda._butler_guidance_reports[name] = { summary = summary, layers = layers, at = os.time() }
