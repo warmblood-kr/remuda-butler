@@ -306,6 +306,58 @@ local function test_shell_line_uses_selected_kind_for_root()
   end)
 end
 
+function test_typed_line_bang_forms_reach_the_write_boundary_exactly()
+  -- Owner "! ! text" must reach the writer as exactly "! text" (no leading space) on both delivery paths.
+  local cases = {
+    { "! ! text", "! text" }, { "! !text", "!text" }, { "! text", "text" }, { "!text", "text" },
+    { "!! text", "! text" }, { "!!text", "!text" },
+  }
+  local function run_cases(label, capture, plain_only)
+    for index, case in ipairs(cases) do
+     if not (plain_only and case[1]:sub(1, 2) == "!!") then -- shell lines never enter the owner queue
+      local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+      local client = scripted_client()
+      local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+      relay:start()
+      client:complete(1, { json = { next_batch = "s0" } })
+      client:complete(2, { json = { next_batch = "s1", rooms = { join = { ["!room:example.org"] = { timeline = { events = {
+        typed_line_event("$bang-form-" .. index, case[1]) } } } } } } })
+      local got = capture()
+      assert(got[#got] == case[2], label .. ": " .. string.format("%q", case[1]) .. " must write "
+        .. string.format("%q", case[2]) .. " but wrote " .. string.format("%q", tostring(got[#got])))
+      relay:stop()
+      cleanup_fixture(dir, config_path)
+     end
+    end
+  end
+  local old_bus = remuda._butler_bus
+  remuda._butler_bus = { agents = { butler = { session_name = "butler", kind = "claude" } } }
+  with_typed_line_stubs(function(typed)
+    run_cases("fallback type_text", function()
+      local texts = {}
+      for _, entry in ipairs(typed) do texts[#texts + 1] = entry.text end
+      return texts
+    end)
+  end)
+  local old_butler = remuda.butler
+  local queued = {}
+  remuda.butler = { owner_input = { accept_line = function(session, text)
+    queued[#queued + 1] = text
+    return { id = "iq-" .. #queued, status = "queued" }
+  end } }
+  local ok, err = pcall(function()
+    with_typed_line_stubs(function(typed)
+      run_cases("durable queue", function() return queued end, true)
+      for _, entry in ipairs(typed) do
+        error("queued forms must not also type directly: " .. entry.text, 0)
+      end
+    end)
+  end)
+  remuda.butler = old_butler
+  remuda._butler_bus = old_bus
+  if not ok then error(err, 0) end
+end
+
 function test_typed_line_target_routing()
   with_typed_line_stubs(function(typed)
     local old_bus, old_selected = remuda._butler_bus, remuda._butler_selected_agent
@@ -5789,6 +5841,7 @@ rx_tests = {
 
   { "test_typed_line_switches_and_non_candidates", test_typed_line_switches_and_non_candidates },
   { "test_typed_line_replay_after_restart_and_history_are_not_typed", test_typed_line_replay_after_restart_and_history_are_not_typed },
+  { "test_typed_line_bang_forms_reach_the_write_boundary_exactly", test_typed_line_bang_forms_reach_the_write_boundary_exactly },
   { "test_typed_line_target_routing", test_typed_line_target_routing },
   { "test_shell_line_uses_selected_kind_for_root", test_shell_line_uses_selected_kind_for_root },
   { "test_typed_line_refusals_are_rate_limited", test_typed_line_refusals_are_rate_limited },
