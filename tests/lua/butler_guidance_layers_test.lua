@@ -86,7 +86,7 @@ end)
 -- AGENTS.md, a tick does not re-read them, and a start or compaction does.
 T.test("root and member AGENTS.md carry the layers and refresh on start", function()
   local dir = assert(os.getenv("XDG_CONFIG_HOME")) .. "/remuda/butler/guidance"
-  assert(os.execute("mkdir -p '" .. dir .. "'"))
+  T.eval(string.format("remuda.mkdir(%q); return \"ok\"", dir))
   local function put(name, text)
     local f = assert(io.open(dir .. "/" .. name, "w")); f:write(text); f:close()
   end
@@ -147,7 +147,7 @@ T.test("root and member AGENTS.md carry the layers and refresh on start", functi
 
   -- A member's own project AGENTS.md without Butler's block is never touched.
   local project = assert(os.getenv("REMUDA_LUA_SCRATCH")) .. "/project"
-  assert(os.execute("mkdir -p '" .. project .. "'"))
+  T.eval(string.format("remuda.mkdir(%q); return \"ok\"", project))
   local pf = assert(io.open(project .. "/AGENTS.md", "w")); pf:write("my project\n"); pf:close()
   T.eq(T.eval([[
     remuda._butler_launch_impl.launch_agent("claude", "in-project", ]] .. string.format("%q", project) .. [[, nil, "butler")
