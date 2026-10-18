@@ -48,7 +48,7 @@ A later layer adds to or overrides an earlier one. Edit the files named here,
 not this block: Butler rewrites it on every session start.
 
 - framework: built in, version sha256:cde212b1ae78
-- cluster: not available (cluster file storage, warmblood-kr/remuda#742, is not ready)
+- cluster: not available (this Remuda core has no cluster file store; update Remuda)
 - team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
 - personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)
 - local: not loaded (no file at <T>/config/remuda/butler/guidance/local.md)

@@ -174,8 +174,15 @@ Markdown files outside Butler, not in Butler's code. Butler reads them in this
 order, and a later layer adds to or overrides an earlier one:
 
 1. **framework**: Butler's own text (built in).
-2. **cluster**: shared by every node of a cluster. Not available yet: it
-   waits for the cluster file storage (warmblood-kr/remuda#742).
+2. **cluster**: shared by every node of a cluster. It is the cluster file
+   `remuda:///butler/guidance/cluster.md` in Remuda's cluster file store
+   (warmblood-kr/remuda#742). Publish it once from any node with
+   `remuda vfs put cluster.md remuda:///butler/guidance/cluster.md`; every node
+   that has synced reads the same version. Butler reads only this node's copy and
+   never waits on the network. The layer is "not available" on a Remuda core
+   without the store, and on a node with no cluster identity. A version this
+   node knows of but has not copied yet is reported, not loaded. Its version is
+   `vN/sha256:` plus 12 hex digits, so each node shows which version it applied.
 3. **team**: `~/.config/remuda/butler/guidance/team.md`. To share it, make it a
    symlink into a team repository.
 4. **personal**: `~/.config/remuda/butler/guidance/personal.md`. Keep it in

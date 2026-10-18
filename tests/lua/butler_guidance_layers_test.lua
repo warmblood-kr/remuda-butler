@@ -51,7 +51,7 @@ T.test("render lists every layer, then the loaded text in order", function()
     { dir = "/home/u/.config/g" })
   local body = layers_lib.render(layers, "/home/u")
   T.ok(body:find("- framework: built in, version sha256:", 1, true), body)
-  T.ok(body:find("- cluster: not available (cluster file storage", 1, true), body)
+  T.ok(body:find("- cluster: not available (this Remuda core has no cluster file store", 1, true), body)
   T.ok(body:find("- team: loaded from ~/.config/g/team.md, version sha256:", 1, true), body)
   T.ok(body:find("- personal: not loaded (no file at ~/.config/g/personal.md)", 1, true), body)
   T.ok(body:find("### team guidance\n\nT1\nT2\n\n### local guidance\n\nL\n$"), body)
@@ -64,6 +64,57 @@ T.test("a layer holding a managed marker is withheld, not the whole block", func
     max = layers_lib.BLOCK_MAX } })
   T.eq(report[1].outcome, "written")
   T.ok(text:find("- team: not loaded", 1, true), text)
+end)
+
+T.test("the cluster layer reads the cluster file store and reports each answer", function()
+  local URI = layers_lib.CLUSTER_URI
+  T.eq(URI, "remuda:///butler/guidance/cluster.md")
+  local sha = string.rep("ab", 32)
+  local function store(stat, read)
+    return { stat = function(uri) assert(uri == URI); return stat() end,
+      read = function(uri) assert(uri == URI); return read() end }
+  end
+  local function entry(over)
+    local e = { version = 3, sha256 = sha, size = 12, ["local"] = true, synced_at = 1700000000 }
+    for k, v in pairs(over or {}) do e[k] = v end
+    return function() return e end
+  end
+  local text = function() return "Shared rule.\n" end
+  T.eq(layers_lib.cluster_from_vfs(nil), nil, "no store on this core")
+  T.eq(layers_lib.cluster_from_vfs({ stat = function() end }), nil, "incomplete store")
+  local c = layers_lib.cluster_from_vfs(store(entry(), text))
+  T.eq(c.status, "loaded"); T.eq(c.text, "Shared rule.\n"); T.eq(c.source, URI)
+  T.eq(c.version, "v3/sha256:abababababab")
+  c = layers_lib.cluster_from_vfs(store(entry({ synced_at = false }), text))
+  T.eq(c.status, "loaded")
+  c = layers_lib.cluster_from_vfs(store(function() local e = entry()(); e.synced_at = nil; return e end, text))
+  T.ok(c.source:find("has not synced with another node yet", 1, true), c.source)
+  local function code(c_) return function() return nil, c_ .. ": detail" end end
+  c = layers_lib.cluster_from_vfs(store(code("no_cluster"), text))
+  T.eq(c.status, "unavailable"); T.ok(c.source:find("not in a cluster", 1, true), c.source)
+  c = layers_lib.cluster_from_vfs(store(code("not_found"), text))
+  T.eq(c.status, "missing"); T.eq(c.source, URI)
+  c = layers_lib.cluster_from_vfs(store(code("wrong_cluster"), text))
+  T.eq(c.source, "cannot be read from the cluster file store (wrong_cluster)")
+  c = layers_lib.cluster_from_vfs(store(entry({ ["local"] = false }), text))
+  T.eq(c.status, "unavailable"); T.eq(c.source, "version v3/sha256:abababababab is not copied to this node yet")
+  c = layers_lib.cluster_from_vfs(store(entry({ size = layers_lib.LAYER_MAX + 1 }), function() error("must not read") end))
+  T.eq(c.status, "too-large")
+  c = layers_lib.cluster_from_vfs(store(entry(), code("corrupt")))
+  T.eq(c.source, "cannot be read from the cluster file store (corrupt)")
+  c = layers_lib.cluster_from_vfs(store(entry(), function() return " \n" end))
+  T.eq(c.status, "empty")
+  c = layers_lib.cluster_from_vfs(store(function() error("usage") end, text))
+  T.eq(c.source, "cannot be read from the cluster file store (error)")
+  -- Each answer renders a line, and the summary keeps one token per layer.
+  for _, answer in ipairs({ store(entry(), text), store(code("not_found"), text), store(entry({ ["local"] = false }), text) }) do
+    local layers = load_with({}, { cluster = layers_lib.cluster_from_vfs(answer) })
+    T.ok(layers_lib.render(layers):find("\n%- cluster: "), "cluster line")
+    local count = 0
+    for _ in layers_lib.summary(layers):gmatch("%S+") do count = count + 1 end
+    T.eq(count, 5, layers_lib.summary(layers))
+  end
+  T.eq(load_with({})[2].source, layers_lib.CLUSTER_WAITING)
 end)
 
 T.test("the guidance directory honours its override", function()
@@ -162,4 +213,24 @@ T.test("root and member AGENTS.md carry the layers and refresh on start", functi
   T.ok(member:find("Personal rule v3.", 1, true) and member:find("# Butler team member", 1, true), member)
   T.eval('remuda._butler_refresh_guidance(remuda._butler_bus.agents["in-project"]); return "ok"')
   T.eq(read(project .. "/AGENTS.md"), "my project\n")
+end)
+
+-- #741 end to end: with a cluster file store, the cluster layer sits between
+-- the framework and the user layers, and its version is shown.
+T.test("the cluster layer reaches AGENTS.md from the cluster file store", function()
+  T.eq(T.eval([[
+    remuda.vfs = {
+      stat = function() return { version = 4, sha256 = string.rep("cd", 32), size = 20, ["local"] = true, synced_at = 1 } end,
+      read = function() return "Cluster rule: one.\n" end,
+    }
+    remuda._butler_refresh_guidance(remuda._butler_bus.agents.butler)
+    remuda.vfs = nil
+    return "ok"
+  ]]), "ok")
+  local f = assert(io.open(T.eval('return remuda._butler_paths.butler_session_cwd') .. "/AGENTS.md", "rb"))
+  local root = f:read("a"); f:close()
+  T.ok(root:find("- cluster: loaded from remuda:///butler/guidance/cluster.md, version v4/sha256:cdcdcdcdcdcd", 1, true), root)
+  local cluster_at, team_at = root:find("Cluster rule: one.", 1, true), root:find("Team rule: run the tests first.", 1, true)
+  T.ok(cluster_at and team_at and cluster_at < team_at, "cluster text comes before team text")
+  T.ok(T.eval('return remuda._butler_guidance_reports.butler.summary'):find(" cluster=v4/sha256:cdcdcdcdcdcd ", 1, true))
 end)
