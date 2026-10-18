@@ -31,3 +31,13 @@ Synthetic tests cover idle garbled/nonempty/unparseable input for both agent
 kinds, four queued notices and expired probe fallback, human/modal/instance/live
 restrictions and unavailable/malformed capture. Existing real classifier tests
 preserve known picker recovery. No running target session was modified.
+
+Leader failure trace, 2026-10-17: the owner's Matrix mail reached the leader's
+inbox at once, but its notice waited through 20/60/300/900-second backoff and
+was dropped at the retry limit. Two false positives: the retry probe and the
+failed-write recheck read the raw screen, so Claude's dim ghost suggestion was
+NON-EMPTY (they now use the same styled-aware decision as the policy); and the
+known-modal check matched the leader's own report quoting the Teach title. For
+notices only, a Claude modal whose last match is followed by transcript rows
+(⏺, ✻, ⎿) is a quote, not a live modal. First-task delivery keeps the
+fail-closed matcher. Test: tests/butler_notice_ghost_and_quoted_modal.lua.
