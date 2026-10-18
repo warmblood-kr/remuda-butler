@@ -84,6 +84,15 @@ T.test("switch defaults on; an explicit or unreadable off records nothing", func
   T.expect(has(approvals, "guard approvals: on"), "approvals default not on: " .. approvals, "ok - guard approvals default on")
   T.eval([[remuda._t_hook('{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}')]])
   T.expect(has(T.eval("return remuda._t_lines()"), '"tool":"Bash"'), "default-on hook recorded nothing", "ok - default records")
+  -- explicitly_on() is true only for a written "on", never for the default
+  T.expect(T.eval("return tostring(remuda.butler.guard_policy.explicitly_on())") == "false", "default counted as explicit",
+    "ok - default is not explicitly on")
+  T.eval("remuda.butler.guard_policy.set(true)")
+  T.expect(T.eval("return tostring(remuda.butler.guard_policy.explicitly_on())") == "true", "written on not explicit",
+    "ok - written on is explicitly on")
+  T.eval("remuda.butler.guard_policy.set(false)")
+  T.expect(T.eval("return tostring(remuda.butler.guard_policy.explicitly_on())") == "false", "written off counted explicit",
+    "ok - written off is not explicitly on")
   -- garbage in a marker file counts as off, as does a written "off"
   T.eval("remuda._t_dir('g-garbage')")
   T.eval("local f = io.open(remuda._butler_guard_dir .. '/guard-observe', 'w'); f:write('banana\\n'); f:close(); "
