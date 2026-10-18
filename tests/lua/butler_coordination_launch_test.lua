@@ -141,6 +141,7 @@ local GUARD_ON = [[
   local real_policy = remuda.butler.guard_policy
   remuda.butler.guard_policy = setmetatable({
     enabled = function() return true end,
+    explicitly_on = function() return true end,
     approvals_enabled = function() return true end,
     deny_enabled = function() return true end,
   }, { __index = real_policy })
@@ -163,14 +164,14 @@ T.test("settings persistence failure: Claude argv builder refuses (no argv witho
   ]]), "refused")
 end)
 
-T.test("settings persistence failure with guard policy off degrades without --settings, traced", function()
+T.test("settings persistence failure with guard on only by default degrades without --settings, traced", function()
   T.eq(T.eval([[
     local real_atomic = remuda.fs.write_atomic
     remuda.fs.write_atomic = function() return nil, "injected persistence failure" end
     local telemetry = remuda._butler_telemetry_adapters.claude.setup({ name = "bf-off" })
     remuda.fs.write_atomic = real_atomic
     local policy = remuda.butler.guard_policy
-    assert(not policy.enabled(), "fixture expects guard policy off by default")
+    assert(policy.enabled() and not policy.explicitly_on(), "fixture expects guard on by default, never explicitly")
     local ok, argv = pcall(remuda._wcc_real_claude_builder or remuda._butler_agent_builders.claude,
       { name = "bf-off", token = "t", model = "opus", cwd = os.getenv("XDG_DATA_HOME"),
         settings_path = telemetry.settings_path, telemetry = telemetry })

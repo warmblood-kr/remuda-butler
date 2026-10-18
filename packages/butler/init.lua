@@ -419,7 +419,7 @@ the normal way for a member to communicate.
         run = function(_, args, caller) return host._butler_command_run("sessions", args, caller) end },
       { id = "status", order = 12, verb = "status", usage = "  remuda butler status  (0=up, 75=launching, 1=failed)",
         run = function(_, args, caller) return host._butler_command_run("status", args, caller) end },
-      { id = "guard", order = 21, verb = "guard", usage = "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify (all switches off by default)",
+      { id = "guard", order = 21, verb = "guard", usage = "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify (guard and approvals are on by default; deny and grants are off)",
         run = function(_, args, caller) return host._butler_command_run("guard", args, caller) end },
       { id = "typed-lines", order = 13, verb = "typed-lines", usage = "  remuda butler typed-lines on|off",
         run = function(_, args, caller) return host._butler_command_run("typed-lines", args, caller) end },

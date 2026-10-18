@@ -26,7 +26,14 @@ end
 local empty = { processed = {}, timestamps = {} }
 local cases = {
   { name = "plain form strips one bang", event = event("!hello"), ok = true, line = "hello", form = "!" },
-  { name = "shell form leaves one bang", event = event("!!ls"), ok = true, line = "!ls", form = "!!" },
+  { name = "bang then space strips both", event = event("! cmd"), ok = true, line = "cmd", form = "!" },
+  { name = "doubled prefix passes a literal bang", event = event("! ! cmd"), ok = true, line = "! cmd", form = "!" },
+  { name = "bang space bang keeps the second bang", event = event("! !cmd"), ok = true, line = "!cmd", form = "!" },
+  { name = "only one space is stripped", event = event("!  cmd"), ok = true, line = " cmd", form = "!" },
+  { name = "thread reply doubled prefix", event = event("! ! cmd", { content = { msgtype = "m.text", body = "! ! cmd",
+    ["m.relates_to"] = { rel_type = "m.thread", event_id = "$root" } } }), ok = true, line = "! cmd", form = "!" },
+  { name = "shell form with a space keeps it", event = event("!! x"), ok = true, line = "! x", form = "!!" },
+  { name = "shell form leaves one bang",event = event("!!ls"), ok = true, line = "!ls", form = "!!" },
   { name = "leading slash is allowed", event = event("!/status"), ok = true, line = "/status", form = "!" },
   { name = "owner allowlist required", event = event("!hello", { sender = "@other:example.org" }), ok = false },
   { name = "allowlisted Butler sender refused", event = event("!hello", { sender = "@remuda-bot:example.org" }), cfg = {

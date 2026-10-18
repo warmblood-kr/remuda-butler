@@ -6,6 +6,10 @@ release tags yet; entries come from merged pull requests.
 
 ## Unreleased
 
+### Changed
+- A plain owner line `! X` now types X exactly: only the first `!` and one following space are removed, so `! ! cmd` types `! cmd` (a direct shell command in Claude Code/Codex). Before, the space stayed and `! cmd` typed ` cmd`.
+- Guard audit, guard approvals, typed lines, shell lines and approve-text are now on by default (typed lines, shell lines and approve-text still need Matrix and the owner allowlist). A missing guard marker file or Matrix config key means on; an explicit `off` / `false` keeps working (`guard off`, `guard approvals off`, `typed-lines off`, `shell-lines off`, `approve-text off`) and an unreadable value means off. Guard deny and grants stay off. Upgrading users who never set a switch get these features on.
+
 ### Fixed
 - Upgrading no longer posts one owner mention per historical `uncertain` input-queue item: pre-existing uncertain records are stamped as notified once when the ledger is first opened. The input-queue boundary doc now says where the clean-composer check really runs.
 - A durable input-queue item that ended `uncertain` no longer blocks later items in its session stream. Later items are typed only after a fresh positive check that the session composer is empty (an unparseable or non-empty composer, human activity, or any non-uncertain blocker such as `dispatch_intent` or `quarantined` keeps them waiting). The uncertain item is never retried; Butler posts one owner notice per record with `remuda butler input-queue resolve ID not_sent|delivered`, and `not_sent` only marks it failed (it is not re-queued). Sender, owner and approval gates are unchanged.

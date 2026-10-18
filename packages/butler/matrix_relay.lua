@@ -1723,7 +1723,7 @@ function relay.new(options)
         and member_kind(event.sender, cfg) == "HUMAN" then
       local existing = queue.lookup_owner(event, room_id)
       if existing then
-        return {now=os.time(),ok=true,line=event.content.body:sub(2),form="!",duplicate=true}
+        return {now=os.time(),ok=true,line=(event.content.body:sub(2):gsub("^ ", "", 1)),form="!",duplicate=true}
       end
     end
     local now = os.time()

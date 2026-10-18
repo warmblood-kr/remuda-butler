@@ -332,12 +332,12 @@ session PATH must also lie inside the session's working directory; with no
 `remuda butler shell-lines on|off` controls shell lines (`!!TEXT`). Shell lines
 require typed lines to be on; turning typed lines off also turns shell lines
 off. `remuda butler doctor` reports the current values as `Typed lines: on|off`
-and `Shell lines: on|off`. Both switches are off by default. When a switch is
+and `Shell lines: on|off`. Both switches are on by default (once Matrix is set up, and only for the owner allowlist); `typed-lines off`, `shell-lines off` or `typed_lines=false` / `shell_lines=false` in the Matrix config turn them off, and an unreadable value counts as off. When a switch is
 off, matching messages stay on the ordinary mail path. A line that is
 typed is also delivered to the inbox as ordinary mail, so typing is additive.
 These CLI gates do not defend against a hostile same-user agent that clears
-its identity (see Butler #264). The real protection is that both switches
-default off.
+its identity (see Butler #264). The real protection is the owner allowlist,
+the live-sync and rate checks below, and the explicit off switches.
 
 An enabled line must come from an allowlisted owner in a live Matrix sync, be
 no more than five minutes old, contain one line of at most 2000 bytes, and fit
@@ -379,7 +379,7 @@ Session binding uses the Butler session identity and a non-secret launch marker;
 the root Butler identity can survive a pane relaunch, so its fresh launch marker
 is what distinguishes that instance.
 `remuda butler approve-text on|off` is a terminal-only switch that asks for
-`yes` before enabling. It is off by default; with it off, replies stay on the
+`yes` before enabling. It is on by default (once Matrix is set up; `approve-text off` or `approve_text=false` turns it off); with it off, replies stay on the
 ordinary mail path. Registration is also refused in Matrix messages fallback
 mode because that mode cannot receive live owner approvals. Doctor reports
 `Approve text: on|off`.
