@@ -72,8 +72,22 @@ local function typed_line_switches()
   return config.typed_lines == true, config.shell_lines == true, config.approve_text == true, true, approval_room, approval_next
 end
 
+-- remuda.daemon is absent on an older core; a raising or odd answer is just as unknown.
+local function socket_publication_line(answer)
+  if type(answer) == "table" and answer.state == "staged" then return "Socket publication: staged" end
+  if type(answer) == "table" and answer.state == "legacy" then
+    return "Socket publication: legacy" .. (type(answer.reason) == "string" and (": " .. safe(answer.reason)) or "")
+  end
+  return "Socket publication: unknown (old daemon)"
+end
+
 local function probe()
   local results = {}
+  local daemon = type(remuda.daemon) == "table" and remuda.daemon.socket_publication
+  if type(daemon) == "function" then
+    local ok, answer = pcall(daemon)
+    results.socket_publication = ok and answer or nil
+  end
   for _, agent in ipairs({
     { key = "claude", argv = { "claude", "auth", "status" } },
     { key = "codex", argv = { "codex", "login", "status" } },
@@ -107,6 +121,7 @@ local function render(probe_results, platform)
     "Approve text: " .. (probe_results.approve_text == true and "on" or "off"),
     "Approval room: " .. tostring(probe_results.approval_room or "all -> HOME (lounge not joined)"),
   }
+  lines[#lines + 1] = socket_publication_line(probe_results.socket_publication)
   if probe_results.guard_approvals ~= nil then
     lines[#lines + 1] = "Guard approvals: " .. (probe_results.guard_approvals
       and "on (the owner answers Claude permission prompts of new sessions in Matrix; no answer means Claude's own prompt)"
