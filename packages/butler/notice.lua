@@ -869,7 +869,10 @@ local function complete_notice_recovery(session, state)
   clear_notice_fallbacks(session, state.message_ids)
   return true
 end
-local function recovery_human_safe(session, allow_busy)
+-- Guards a human at the keyboard only. Agent busy state is not a guard: Claude Code and
+-- Codex both queue text typed mid-turn (owner decision 2026-10-19), so a notice never
+-- waits for idle. Open dialogs are refused by the notice policy instead.
+local function recovery_human_safe(session)
   local session_row
   for _, candidate in ipairs(remuda.ls()) do
     if candidate.name == session then session_row = candidate end
@@ -883,32 +886,9 @@ local function recovery_human_safe(session, allow_busy)
     end
   end
   if remuda._butler_human_active(session) then return false end
-  if remuda.session then
-    local ok, busy = pcall(function()
-      local row = remuda.session(session)
-      return row and row.is_busy
-    end)
-    if ok and busy == true and not allow_busy then return false end
-  end
   return true
 end
--- ONE guard for every type_text path (recovery tick, probe-to-direct, direct, reminder):
--- Codex STEERS text typed mid-turn into the running task, so a busy Codex defers; Claude
--- queues it for the next turn, so a busy Claude with an EMPTY composer (checked by the
--- caller's policy) may receive it. Codex FAILS CLOSED: only a successful row with an
--- explicit is_busy == false permits typing (missing API, error, nil row or nil is_busy defer).
--- Kinds other than codex (claude, unrecognised) keep the previous behaviour: only codex is
--- known to steer. Not an atomic write boundary: busy can change after this check.
-function remuda._butler_busy_client_may_receive(session)
-  local agent = bus.agents[session]
-  if not (agent and agent.kind == "codex") then return true end
-  if not remuda.session then return false end
-  local ok, busy = pcall(function()
-    local row = remuda.session(session)
-    return row and row.is_busy
-  end)
-  return ok and busy == false
-end
+-- The core refused the write because another input write is in flight: retry shortly.
 local function defer_notice_busy(session)
   bus.notice_recoveries[session] = nil
   local pending = bus.notices[session]
@@ -918,7 +898,7 @@ local function defer_notice_busy(session)
     -- (hourly leader report, closes on delivery/read). Mail stays queued; no sender notice.
     pending.busy_since = pending.busy_since or notice_now()
     if notice_now() - pending.busy_since >= NOTICE_BUSY_CAP_S then
-      remuda._butler_notice_open_stuck(session, pending.message_order, "busy: Codex is_busy has not cleared")
+      remuda._butler_notice_open_stuck(session, pending.message_order, "busy: an input write stayed in flight")
     end
     if pending.diagnostic_reason ~= "prompt_busy" then
       diagnostic("deferred", "prompt_busy", session)
@@ -934,8 +914,6 @@ local function begin_notice_submit(session, state)
     bus.notice_recoveries[session] = nil
     return false
   end
-  if not remuda._butler_busy_client_may_receive(session) then return defer_notice_busy(session) end
-  pending.busy_since = nil
   state.draft = nil
   state.count = pending.count
   state.message_ids = {}
@@ -946,6 +924,7 @@ local function begin_notice_submit(session, state)
   if input_was_busy(typed, result, why) then
     return defer_notice_busy(session)
   end
+  pending.busy_since = nil
   if not typed then
     local fallback = bus.notice_fallbacks[session] or {}
     for _, id in ipairs(state.message_ids) do
@@ -962,13 +941,8 @@ local function tick_notice_recovery(session, state)
   if notice_now() - state.started_at >= NOTICE_RECOVERY_TIMEOUT_S then
     return notice_recovery_error(session, state, "recovery timed out after 20 seconds")
   end
-  local observing_submit = state.phase == "verify_notice" or state.phase == "verify_existing"
-  -- Claude 2.1.300 queues text typed mid-turn for the next turn (probed), so its probe may
-  -- run while busy. Codex 0.162.1 STEERS instead (submitted after the next tool call, can
-  -- redirect a running task), so busy Codex keeps the old defer until queue semantics are verified.
-  local agent_kind = bus.agents[session] and bus.agents[session].kind
-  local probe_busy_ok = state.phase == "probe" and agent_kind == "claude"
-  if not recovery_human_safe(session, observing_submit or probe_busy_ok) then return false end
+  if not recovery_human_safe(session) then return false end
+  -- Busy is observed, never waited on: it only pauses the verification check count.
   local busy = false
   if remuda.session then
     local checked, value = pcall(function()
@@ -990,7 +964,7 @@ local function tick_notice_recovery(session, state)
   if state.phase == "probe" then
     -- An EMPTY composer needs no stable screen: a working pane animates. The
     -- policy inside begin_notice_submit re-checks modal and composer before typing.
-    if decision ~= "EMPTY" or not probe_busy_ok then
+    if decision ~= "EMPTY" then
       if state.last_screen == normalized then state.stable = (state.stable or 0) + 1
       else state.last_screen, state.stable = normalized, 1 end
       if state.stable < 2 then return false end
@@ -1124,8 +1098,6 @@ local function deliver_notice(session)
           "composer was not empty after a failed notice write")
       end
     end
-    if not remuda._butler_busy_client_may_receive(session) then return defer_notice_busy(session) end
-    pending.busy_since = nil
     local state = { phase = "verify_notice", count = pending.count, notice = pending_notice_text(pending), checks = 0,
       started_at = notice_now() }
     state.message_ids = {}
@@ -1134,6 +1106,7 @@ local function deliver_notice(session)
     if input_was_busy(typed, result, why) then
       return defer_notice_busy(session)
     end
+    pending.busy_since = nil
     if not typed or result == false then
       bus.notice_recoveries[session] = state
       return notice_recovery_error(session, state, tostring(why or result or "the notice could not be typed"))

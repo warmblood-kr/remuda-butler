@@ -7,6 +7,7 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Changed
+- Mail notices no longer wait for an agent to go idle. Claude Code and Codex both queue text typed while they work, so a notice is typed as soon as the composer is empty (a dim ghost suggestion counts as empty), including for a busy Codex, which used to wait until it went idle. An open dialog (for example "Teach auto mode" or a folder trust prompt) still blocks typing, busy or idle, because text typed into a dialog is taken as a choice; a real draft in the composer also still blocks.
 - A plain owner line `! X` now types X exactly: only the first `!` and one following space are removed, so `! ! cmd` types `! cmd` (a direct shell command in Claude Code/Codex). Before, the space stayed and `! cmd` typed ` cmd`.
 - Guard audit, guard approvals, typed lines, shell lines and approve-text are now on by default (typed lines, shell lines and approve-text still need Matrix and the owner allowlist). A missing guard marker file or Matrix config key means on; an explicit `off` / `false` keeps working (`guard off`, `guard approvals off`, `typed-lines off`, `shell-lines off`, `approve-text off`) and an unreadable value means off. Guard deny and grants stay off. Upgrading users who never set a switch get these features on.
 
