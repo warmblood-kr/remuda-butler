@@ -304,15 +304,31 @@ function remuda._butler_composer_decision(kind, session, screen)
     local row = ok and styled and styled.cursor and styled.rows and styled.rows[styled.cursor.row]
     if row then
       local parts, dim = {}, {}
-      for _, span in ipairs(row) do
+      -- Claude paints the spaces between a ghost's words undimmed. Only whitespace BETWEEN dim
+      -- spans (or padding after the last) is forgiven; anything undimmed before the first dim
+      -- span must be the bare prompt (glyph + one separator), with the cursor right after it.
+      local prefix, first_dim, gap_text = {}, nil, true
+      for index, span in ipairs(row) do
         local list = span.dim and dim or parts
         list[#list + 1] = span.text
+        if span.dim then
+          first_dim = first_dim or index
+        elseif not first_dim then
+          prefix[#prefix + 1] = span.text
+        elseif span.text:gsub("\194\160", " "):find("%S") then
+          gap_text = false -- undimmed text after the ghost started is not padding
+        end
       end
+      local lead = table.concat(prefix):gsub("\194\160", " ")
+      local col = styled.cursor.col
+      local lead_cells = select(2, lead:gsub("[^\128-\191]", ""))
+      local at_ghost = lead:match("^%S+ ?$") ~= nil and (col == nil or col == lead_cells + 1)
       local decision, text = remuda._butler_prompt_is_empty(kind, table.concat(parts))
       -- The raw text must be exactly the dim ghost: continuation rows below an empty first
       -- line are a human's draft.
-      local ghost = table.concat(dim):gsub("\194\160", " "):match("^%s*(.-)%s*$")
-      if decision == "EMPTY" and ghost == raw_text then return decision, text end
+      local function squeeze(s) return (s:gsub("\194\160", " "):gsub("%s+", "")) end
+      if decision == "EMPTY" and first_dim and gap_text and at_ghost
+          and squeeze(table.concat(dim)) == squeeze(raw_text) then return decision, text end
     end
   end
   return raw, raw_text
