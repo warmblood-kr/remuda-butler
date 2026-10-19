@@ -75,15 +75,15 @@ assert(bus.notices.lead, "deferred notice stays queued")
 assert(run({ working, draft, draft }, { 4 }) == 0, "draft composer is not typed over")
 -- 5. approval dialog stays: nothing typed.
 assert(run({ approval, approval, approval }, { 4 }) == 0, "approval dialog defers")
--- 6. Codex steers mid-turn (not a queue): a working Codex pane is deferred, never typed.
+-- 6. Codex queues text typed mid-turn too (owner decision 2026-10-19): a working Codex
+--    pane with an EMPTY composer receives the notice, like Claude.
 local codex = read(FX .. "codex-0.162.1-working-empty.txt")
 bus.agents.lead.kind = "codex"
-assert(run({ codex, codex, codex }, { 4 }) == 0, "working Codex+EMPTY defers without type_text")
-assert(bus.notices.lead, "Codex notice stays queued")
+assert(run({ codex, codex, codex }, { 4 }) == 1, "working Codex+EMPTY types exactly once")
+assert(run({ codex, codex, codex }, { 4, 6 }) == 0, "Codex busy->modal race defers without typing")
 bus.agents.lead.kind = "claude"
 
--- 7. Shared guard, direct path: busy Codex + EMPTY composer must not reach type_text via
---    notify_policy (no probe) nor via probe-to-direct (policy passes while a probe exists).
+-- 7. Direct path and probe-to-direct: busy Codex + EMPTY composer is typed on both.
 remuda.capture_styled = function() return { rows = { { { text = "› " } } }, cursor = { row = 1 } } end
 local function direct(with_probe)
   bus.agents.lead.kind = "codex"
@@ -97,10 +97,8 @@ local function direct(with_probe)
   deliver("lead")
   return #typed
 end
-assert(direct(false) == 0, "busy Codex direct path defers")
-assert(bus.notices.lead, "deferred notice stays queued (direct)")
-assert(direct(true) == 0, "busy Codex probe-to-direct defers")
-assert(bus.notices.lead, "deferred notice stays queued (probe-to-direct)")
+assert(direct(false) == 1, "busy Codex direct path types")
+assert(direct(true) == 1, "busy Codex probe-to-direct types")
 -- 8. Idle Codex still gets the notice; busy Claude with an EMPTY composer keeps typing.
 remuda.session = function() return { is_busy = false } end
 assert(direct(false) == 1, "idle Codex still typed")
@@ -113,9 +111,8 @@ bus.notice_recoveries, bus.notice_screens = {}, {}
 deliver("lead")
 assert(#typed == 1, "busy Claude + EMPTY composer unchanged")
 
--- 9. Codex busy telemetry that is missing, throwing or nil fails CLOSED (defers).
+-- 9. Busy telemetry that is missing, throwing or nil does not hold a Codex notice.
 bus.agents.lead.kind = "codex"
-local session_api = remuda.session
 for name, api in pairs({
   missing = false,
   throws = function() error("boom") end,
@@ -123,13 +120,15 @@ for name, api in pairs({
   nil_busy = function() return {} end,
 }) do
   remuda.session = api or nil
-  assert(direct(false) == 0, "codex busy telemetry " .. name .. " fails closed")
-  assert(direct(true) == 0, "codex busy telemetry " .. name .. " fails closed (probe)")
+  assert(direct(false) == 1, "codex busy telemetry " .. name .. " still types")
+  assert(direct(true) == 1, "codex busy telemetry " .. name .. " still types (probe)")
 end
-remuda.session = function() return { is_busy = false } end
--- 10. Permanently busy Codex: mail stays queued, one escalation record (reason busy) opens after
---     the cap, the leader hears about it once per hour, and idle later delivers it.
+-- 10. The core keeps refusing the write (another input write in flight): mail stays queued,
+--     one escalation record (reason busy) opens after the cap, the leader hears about it once
+--     per hour, and the notice is typed once the write goes through.
 remuda.session = function() return { is_busy = true } end
+local type_text = remuda.type_text
+remuda.type_text = function() return "a session input write is already in flight" end
 remuda._butler_send = function(from, to, body) sent[#sent + 1] = { to, body } end
 sent = {}
 bus.notices.lead = { count = 1, message_order = { "m1" }, message_ids = { m1 = "Butler message m1 arrived." },
@@ -138,16 +137,15 @@ bus.notice_recoveries, bus.notice_screens, bus.notice_stuck = {}, {}, {}
 bus.notice_reminder_at, bus.notice_sent_at = {}, {}
 frames, calls, typed = { codex }, 0, {}
 local N = remuda._butler_notice
-local t0 = now
 for _ = 1, 600 do now = now + 1; deliver("lead"); N.remind_unread_notices("lead", bus.agents.lead, now) end
 assert(not bus.notice_stuck.lead and #sent == 0, "no escalation before the cap")
 for _ = 1, 7200 do now = now + 1; deliver("lead"); N.remind_unread_notices("lead", bus.agents.lead, now) end
-assert(#typed == 0 and bus.notices.lead, "busy mail retained, never typed")
+assert(#typed == 0 and bus.notices.lead, "refused mail retained")
 assert(bus.notice_stuck.lead and bus.notice_stuck.lead.ids[1] == "m1", "busy cap opens the stuck record")
 assert(tostring(bus.notice_stuck.lead.reason):find("busy"), "reason names busy")
 assert(#sent >= 2 and #sent <= 3, "hourly leader report, deduped: " .. #sent)
 for _, s in ipairs(sent) do assert(s[1] ~= "alice", "sender is not spammed") end
-remuda.session = function() return { is_busy = false } end
+remuda.type_text = type_text
 now = now + 1; deliver("lead")
-assert(#typed == 1, "idle Codex receives the retained notice")
+assert(#typed == 1, "the retained notice is typed once the write goes through")
 print("ok")

@@ -8,7 +8,7 @@ This supersedes earlier notes that unsolicited notice policy is unchanged.
 Notice admission now treats explicit is_busy=false as eligible subject to the
 composer rule below. It preserves live-session, attached-human pause, shared
 known-modal and instance guards. Busy-client queuing still requires EMPTY;
-Codex still requires explicit idle before actual notice typing. Unknown busy
+no agent kind waits for idle (see the 2026-10-19 decision below). Unknown busy
 telemetry does not gain the new idle admission. Explicit idle runs the same styled-aware
 composer decision as the busy path (a dim ghost suggestion reads EMPTY, #137)
 and admits an EMPTY or UNPARSEABLE composer. UNPARSEABLE is refused when the
@@ -41,3 +41,13 @@ known-modal check matched the leader's own report quoting the Teach title. For
 notices only, a Claude modal whose last match is followed by transcript rows
 (⏺, ✻, ⎿) is a quote, not a live modal. First-task delivery keeps the
 fail-closed matcher. Test: tests/butler_notice_ghost_and_quoted_modal.lua.
+
+Owner decision, 2026-10-19: Claude Code and Codex both queue text typed while
+they work, so a notice never waits for idle. The Codex-only busy defer (it
+was thought to steer typed text into the running task) is gone, and the
+recovery probe no longer waits on is_busy for any kind. Busy only pauses the
+verification check count. The one exception is an open dialog: the known-modal,
+dialog-classifier and composer checks refuse it busy or idle, since typed text
+would be taken as a choice. A core "input write already in flight" refusal
+still defers and escalates after the busy cap. Test:
+tests/butler_notice_no_idle_wait.lua.
