@@ -166,6 +166,32 @@ local function looks_like_dialog(screen)
   return ("\n" .. screen):find("\n%s*[❯›>]?%s*%d+[%.%)]%s") ~= nil
 end
 
+-- A Claude transcript row: assistant output, tool result, or turn footer.
+local function claude_transcript_row(line)
+  local rest = line:gsub("^[%s\194\160]+", "")
+  return rest:sub(1, 3) == "⏺" or rest:sub(1, 3) == "✻" or rest:sub(1, 3) == "⎿"
+end
+-- The startup-modal matcher counts modal text anywhere on screen. For notices, a Claude
+-- modal whose last match is followed by transcript rows is a quote in the conversation
+-- (e.g. a report about members stuck on the Teach modal), not a live modal: a live one
+-- is painted below the transcript. Without this, quoting the title blocks every notice.
+local function live_startup_modal(kind, screen)
+  local startup = remuda._butler_agent_startup[kind] or {}
+  if not known_startup_modal(startup, screen) then return false end
+  if kind ~= "claude" then return true end
+  local lines = {}
+  for line in (tostring(screen):gsub("\r\n", "\n") .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  -- Start of the last match: the shortest suffix that still matches.
+  local start = 1
+  for index = #lines, 1, -1 do
+    if known_startup_modal(startup, table.concat(lines, "\n", index)) then start = index; break end
+  end
+  for index = start + 1, #lines do
+    if claude_transcript_row(lines[index]) then return false end
+  end
+  return true
+end
+
 -- Notice admission preserves the live-session and human-pause guards. An
 -- explicitly idle client may receive input into an EMPTY or UNPARSEABLE
 -- composer; a parseable NON-EMPTY draft, a dialog-looking screen or a failed
@@ -238,8 +264,8 @@ function remuda._butler_notify_policy(session, now)
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
   -- Conservative: a Teach-title screen is ongoing deferral (detect-only, never answered), so
-  -- notice typing waits for as long as the title is on screen, like any other known modal.
-  if known_startup_modal(remuda._butler_agent_startup[kind] or {}, full_screen) then
+  -- notice typing waits for as long as the modal is on screen, like any other known modal.
+  if live_startup_modal(kind, full_screen) then
     _butler_session_trace("notice_deferred_modal", session .. " " .. kind)
     return false
   end
@@ -556,7 +582,9 @@ local function recovery_screen(session)
   if not ok then return nil end
   local agent = bus.agents[session]
   local kind = agent and agent.kind or ""
-  local decision, text = remuda._butler_prompt_is_empty(kind, tostring(screen or ""))
+  -- The same styled-aware decision as the policy: a dim ghost suggestion is not a draft.
+  -- A raw read made every retry probe time out while Claude showed a suggestion.
+  local decision, text = remuda._butler_composer_decision(kind, session, tostring(screen or ""))
   return screen, decision, text
 end
 local function recovery_draft(kind, screen, first_line)
