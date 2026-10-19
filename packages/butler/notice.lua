@@ -284,9 +284,10 @@ function remuda._butler_composer_decision(kind, session, screen)
       end
       local decision, text = remuda._butler_prompt_is_empty(kind, table.concat(parts))
       -- The raw text must be exactly the dim ghost: continuation rows below an empty first
-      -- line are a human's draft.
-      local ghost = table.concat(dim):gsub("\194\160", " "):match("^%s*(.-)%s*$")
-      if decision == "EMPTY" and ghost == raw_text then return decision, text end
+      -- line are a human's draft. Claude paints the spaces between a ghost's words undimmed, so
+      -- compare without whitespace.
+      local function squeeze(s) return (s:gsub("\194\160", " "):gsub("%s+", "")) end
+      if decision == "EMPTY" and squeeze(table.concat(dim)) == squeeze(raw_text) then return decision, text end
     end
   end
   return raw, raw_text
