@@ -39,3 +39,41 @@ Caller attribution is advisory within one user account, not an isolation boundar
 `remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 <!-- END remuda-butler:managed id=butler -->
+
+<!-- BEGIN remuda-butler:managed id=guidance-layers -->
+## Guidance layers
+
+Butler loaded these guidance layers in this order when this session started.
+A later layer adds to or overrides an earlier one. Edit the files named here,
+not this block: Butler rewrites it on every session start.
+
+- framework: built in, version sha256:cde212b1ae78
+- cluster: not available (this Remuda core has no cluster file store; update Remuda)
+- team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
+- personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)
+- local: not loaded (no file at <T>/config/remuda/butler/guidance/local.md)
+<!-- END remuda-butler:managed id=guidance-layers -->
+
+<!-- BEGIN remuda-butler:managed id=memory -->
+## Butler memory
+
+Your durable memory is in `<T>/data/remuda/butler/memory/butler` (also `$REMUDA_BUTLER_MEMORY_DIR`).
+Butler owns it for `butler`, so it stays with you across restarts,
+compaction and a switch between Claude and Codex. Use it for facts that
+must outlive this session: decisions, standing instructions from the
+owner, and handoff context. Task notes for this working directory stay in
+`docs/`.
+
+- Read `MEMORY.md` there before you start; it indexes one note per file.
+- To remember something, write one Markdown file per fact in that
+  directory, then add a one-line pointer to `MEMORY.md`:
+  `- [Title](file.md) — one-line hook`.
+- Update a note instead of adding a duplicate; delete a note that is wrong.
+- Never store secrets or credentials there.
+
+`MEMORY.md` when this session started (the file is the source of truth):
+
+# Memory
+
+One line per note: `- [Title](file.md) — one-line hook`.
+<!-- END remuda-butler:managed id=memory -->

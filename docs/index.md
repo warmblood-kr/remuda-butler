@@ -116,7 +116,7 @@ introducing a separate runtime.
 ### Guard audit
 
 `remuda butler guard on|off|status` switches an audit of what Claude members do;
-it is off by default and may be switched by Butler and leaders. While it is on,
+it is on by default and may be switched by Butler and leaders. While it is on,
 the per-session settings file of each Claude member launched from then on gets
 `PreToolUse` and `PermissionRequest` hooks that call `remuda butler guard`.
 Each call appends one JSON line (time, session, agent kind, event, tool,
@@ -156,7 +156,7 @@ The owner can narrow grants from Matrix with whole-message lines in the HOME roo
 
 ### Guard approvals
 
-`remuda butler guard approvals on|off|status` is a second switch, off by
+`remuda butler guard approvals on|off|status` is a second switch, on by
 default and independent of `guard on|off`; routing runs only while both are on,
 for Claude members launched after the switch. The `PermissionRequest` hook of
 such a member registers each permission prompt as an approval request (id,

@@ -45,7 +45,8 @@ T.test("deny switch is independent, off by default, and appears in doctor", func
   start_butler()
   T.eval("remuda._t_dir('s2-switch')")
   local status = ev("return remuda._butler_command_run('guard', {'guard','deny','status'}, {})")
-  T.expect(has(status, "guard deny: off") and has(status, "guard: off"), "default: " .. status)
+  T.expect(has(status, "guard deny: off") and has(status, "guard: on"), "default: " .. status)
+  T.eval("remuda.butler.guard_policy.set(false)") -- guard is on by default; prove deny does not turn it on
   T.eval("remuda._butler_command_run('guard', {'guard','deny','on'}, {kind='session', session = 'butler', instance_id = _inst('butler')})")
   T.expect(has(ev("return remuda._butler_command_run('guard', {'guard','status'}, {})"), "guard: off"),
     "deny switch must not turn audit on")
@@ -238,7 +239,7 @@ end)
 
 T.test("real CLI prints exact deny JSON, gates switches, and audits a redacted summary", function()
   start_butler()
-  T.eval("remuda._t_dir('s2-cli'); remuda._butler_command_run('guard', {'guard','deny','on'}, {kind='session', session = 'butler', instance_id = _inst('butler')})")
+  T.eval("remuda._t_dir('s2-cli'); remuda.butler.guard_policy.set(false); remuda._butler_command_run('guard', {'guard','deny','on'}, {kind='session', session = 'butler', instance_id = _inst('butler')})")
   local json = [[{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Butler guard: Agent permission bypass flag"}}]]
   local function run_cli(name, command, expected, tool)
     T.eval(("remuda._butler_bus.agents[%q] = {id=%q, alias=%q, kind='claude', session_name=%q}")

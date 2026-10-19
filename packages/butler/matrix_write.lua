@@ -74,6 +74,51 @@ local function split_utf8(text)
   return chunks
 end
 
+-- Turn @localpart[:server] in text nodes into matrix.to pills (receiver needs the
+-- anchor AND m.mentions). Skips <a>/<code>/<pre>; unresolved names stay plain.
+local function pillify(html, resolve)
+  local ids, seen, out, at, skip = {}, {}, {}, 1, 0
+  local function link(text)
+    local pos, parts = 1, {}
+    while true do
+      local s, e, name = text:find("@([%w._=%-]+)", pos)
+      if not s then break end
+      name = name:gsub("[%.%-]+$", "")
+      e = s + #name
+      local server = text:match("^:([%w.%-]+)", e + 1)
+      if server then server = server:gsub("[%.%-]+$", "") end
+      local token_end = server and e + 1 + #server or e
+      local mxid = not (s > 1 and text:sub(s - 1, s - 1):match("[%w._=/%-:@]")) and #name > 0
+        and resolve(name, server)
+      parts[#parts + 1] = text:sub(pos, s - 1)
+      if mxid then
+        parts[#parts + 1] = '<a href="https://matrix.to/#/' .. mxid .. '">' .. text:sub(s, token_end) .. "</a>"
+        if not seen[mxid] then seen[mxid] = true; ids[#ids + 1] = mxid end
+      else
+        parts[#parts + 1] = text:sub(s, token_end)
+      end
+      pos = token_end + 1
+    end
+    parts[#parts + 1] = text:sub(pos)
+    return table.concat(parts)
+  end
+  while at <= #html do
+    local lt = html:find("<", at, true)
+    local text = html:sub(at, (lt or #html + 1) - 1)
+    out[#out + 1] = skip > 0 and text or link(text)
+    if not lt then break end
+    local gt = html:find(">", lt, true) or #html
+    local tag = html:sub(lt, gt)
+    local closing, tname = tag:match("^<(/?)(%a+)")
+    if tname == "a" or tname == "code" or tname == "pre" then
+      skip = math.max(0, skip + (closing == "/" and -1 or 1))
+    end
+    out[#out + 1] = tag
+    at = gt + 1
+  end
+  return table.concat(out), ids
+end
+
 local function send_chunks(room, text, relation, on_done, txn_prefix, plain)
   local done = once(on_done)
   if type(text) ~= "string" or text == "" then
@@ -97,6 +142,14 @@ local function send_chunks(room, text, relation, on_done, txn_prefix, plain)
       local ok, html = pcall(function() return remuda.butler.md2html.convert(chunks[index]) end)
       if ok and type(html) == "string" and html ~= "" and #html <= MAX_HTML_BYTES then
         content.format, content.formatted_body = "org.matrix.custom.html", html
+        local relay = matrix.relay and matrix.relay.instance
+        if relay and type(relay.resolve_mention) == "function" then
+          local linked, ids = pillify(html, function(l, s) return relay:resolve_mention(l, s) end)
+          if #ids > 0 and #linked <= MAX_HTML_BYTES then
+            content.formatted_body = linked
+            content["m.mentions"] = { user_ids = ids }
+          end
+        end
       end
     end
     if relation then content["m.relates_to"] = relation end

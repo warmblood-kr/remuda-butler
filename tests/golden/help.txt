@@ -47,7 +47,7 @@ Switches and input:
   remuda butler typed-lines on|off
   remuda butler shell-lines on|off
   remuda butler status-commands on|off
-  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify (all switches off by default)
+  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify (guard and approvals are on by default; deny and grants are off)
   remuda butler input-queue status [ID] | cancel ID | resolve ID not_sent|delivered
 
 Notes:

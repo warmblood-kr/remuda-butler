@@ -32,6 +32,9 @@ local setup_telemetry = chooser.setup_telemetry
 local team_member_guidance = chooser.team_member_guidance
 local team_member_prompt = chooser.team_member_prompt
 local write_agent_guidance = chooser.write_agent_guidance
+local member_guidance_blocks = chooser.member_guidance_blocks
+local guidance_text = chooser.guidance_text
+local write_guidance_layers = chooser.write_guidance_layers
 local option_number = chooser.option_number
 local codex_update_version = chooser.codex_update_version
 local skip_option_number = chooser.skip_option_number
@@ -157,12 +160,21 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   local trust_checked, trust_ok = pcall(function() return chooser.trust_eligible(launch_cwd, trust_env()) end)
   local trust_eligible = trust_checked and trust_ok == true
   local trust_real_cwd = trust_eligible and config.realpath(launch_cwd) or nil
-  if cwd and parent and auto_trust then write_agent_guidance(cwd, team_member_guidance(parent)) end
+  -- #535: every start, relaunch included, reads the user guidance layers again.
+  -- Phase 3: the member's Butler-owned memory store and its block.
+  local guidance_blocks = member_guidance_blocks(name, parent or "butler")
+  local memory_dir = remuda._butler_memory_dir and remuda._butler_memory_dir(name) or nil
+  if cwd and parent and auto_trust then
+    write_agent_guidance(cwd, team_member_guidance(parent))
+    write_guidance_layers(cwd, guidance_blocks)
+  elseif cwd then
+    write_guidance_layers(cwd, guidance_blocks, true)
+  end
   local token = next_token(name)
   local telemetry_by_kind = {}
   local models = {}
   for _, candidate in ipairs(candidates) do models[candidate] = candidate_model(candidate, model) end
-  local agent_telemetry = setup_telemetry(kind, { name = name, model = models[kind] })
+  local agent_telemetry = setup_telemetry(kind, { name = name, model = models[kind], memory_dir = memory_dir })
   telemetry_by_kind[kind] = agent_telemetry
   local choose_opts = {
     name = name, cwd = launch_cwd, auto_trust = auto_trust,
@@ -172,10 +184,13 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         remuda._butler_ensure_coordination(launch_cwd, candidate_kind, "member")
       end
       local telemetry = telemetry_by_kind[candidate_kind]
-        or setup_telemetry(candidate_kind, { name = name, model = models[candidate_kind] })
+        or setup_telemetry(candidate_kind, { name = name, model = models[candidate_kind], memory_dir = memory_dir })
       telemetry_by_kind[candidate_kind] = telemetry
       return { name = name, token = token, model = models[candidate_kind], cwd = launch_cwd,
-        sandbox = profile and profile.sandbox, writable = profile and profile.writable,
+        sandbox = profile and profile.sandbox,
+        writable = candidate_kind == "codex" and remuda._butler_codex_memory_writable
+          and remuda._butler_codex_memory_writable(profile and profile.writable, memory_dir)
+          or (profile and profile.writable),
         settings_path = telemetry.settings_path, telemetry = telemetry,
         system_prompt = parent and team_member_prompt(parent) or nil }
     end,
@@ -184,6 +199,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         REMUDA_BUTLER_AGENT_ALIAS = name,
         REMUDA_BUTLER_LEADER_ID = parent_identity and parent_identity.id or "",
         REMUDA_BUTLER_AGENT_KIND = candidate_kind,
+        REMUDA_BUTLER_MEMORY_DIR = memory_dir or "",
         CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1" }
     end,
   }
@@ -272,7 +288,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   -- A failed welcome write must not prevent the agent from starting.
   if not relaunch_identity then
     pcall(queue_message, mail_address(parent or "butler"), mail_address(actual),
-      team_member_guidance(parent or "butler") .. sandbox_lib.guidance_line(profile), "Welcome to Butler")
+      team_member_guidance(parent or "butler") .. sandbox_lib.guidance_line(profile)
+        .. guidance_text(guidance_blocks), "Welcome to Butler")
     -- First sight of a new member: nothing to replay or re-show (notice.lua).
     bus.unread_seeded[actual] = "launched"
   end

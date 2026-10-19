@@ -2,7 +2,7 @@
 -- Claude Code PreToolUse and PermissionRequest hooks. It classifies the action
 -- with a deterministic classifier, appends one JSON line to the audit log, and
 -- never returns a decision: it changes nothing an agent can do. It fails open.
--- The switch (`guard on|off|status`) is a marker file beside the log; off by default.
+-- The switch (`guard on|off|status`) is a marker file beside the log; on by default (no marker), "off" turns it off.
 -- This is a record, not a boundary: a same-user agent can bypass or edit it.
 local M = {}
 
@@ -29,6 +29,16 @@ local function switch_path() local d = dir(); return d and (d .. "/guard-observe
 function M.enabled()
   local path = switch_path()
   local f = path and io.open(path, "r")
+  if not f then return path ~= nil end -- no marker: on by default; a written "off" (or garbage) is off
+  local text = f:read("*l")
+  f:close()
+  return text == "on"
+end
+
+-- True only when the owner wrote "on": the default-on state (no marker) is not an explicit request.
+function M.explicitly_on()
+  local path = switch_path()
+  local f = path and io.open(path, "r")
   if not f then return false end
   local text = f:read("*l")
   f:close()
@@ -49,7 +59,7 @@ local function approvals_path() local d = dir(); return d and (d .. "/guard-appr
 function M.approvals_enabled()
   local path = approvals_path()
   local f = path and io.open(path, "r")
-  if not f then return false end
+  if not f then return path ~= nil end -- no marker: on by default; a written "off" (or garbage) is off
   local text = f:read("*l")
   f:close()
   return text == "on"

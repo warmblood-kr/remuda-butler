@@ -117,7 +117,8 @@ end
 
 local function test_typed_line_switches_and_non_candidates()
   with_typed_line_stubs(function(typed, keys)
-    local dir, config_path = fixture()
+    -- The switches default on; this case needs them explicitly off.
+    local dir, config_path = fixture("typed_lines=false\nshell_lines=false\n")
     local client, delivered = scripted_client(), {}
     local relay = relay_module.new({ config_path = config_path, matrix = client,
       deliver = function(event) delivered[#delivered + 1] = event return true end })
@@ -138,7 +139,7 @@ local function test_typed_line_switches_and_non_candidates()
       ["!room:example.org"] = { timeline = { limited = true,
         events = { typed_line_event("$off-nonlive", "!hi") } } },
     } } } })
-    assert(#typed == 0, "both typed-line switches default off")
+    assert(#typed == 0, "both typed-line switches explicitly off type nothing")
     local delivered_ids = {}
     for _, event in ipairs(delivered) do delivered_ids[event.event_id] = true end
     for _, event_id in ipairs({ "$off-multiline", "$off-stale", "$off-triple", "$off-nonlive" }) do
@@ -1529,8 +1530,20 @@ end
 local function test_typed_line_config_is_strict_and_off_by_default()
   local dir, path = fixture()
   local conf = assert(matrix.read_config(path))
-  assert(conf.typed_lines == false and conf.shell_lines == false,
-    "typed-line switches must default to false")
+  assert(conf.typed_lines == true and conf.shell_lines == true and conf.approve_text == true,
+    "typed-line switches must default to true")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("typed_lines=false\nshell_lines=false\napprove_text=false\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.typed_lines == false and conf.shell_lines == false and conf.approve_text == false,
+    "explicit false must turn the switches off")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("typed_lines=maybe\nshell_lines=maybe\napprove_text=maybe\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.typed_lines == false and conf.shell_lines == false and conf.approve_text == false,
+    "an unreadable value must turn the switches off")
   assert(conf.approval_room == "all", "approval_room must default to all")
   cleanup_fixture(dir, path)
 
@@ -8340,7 +8353,7 @@ local function test_approved_text_switch_off_keeps_reply_on_mail_path()
       local config = file:read("a")
       file:close()
       file = assert(io.open(env.path, "wb"))
-      file:write((config:gsub("approve_text=true\n", "")))
+      file:write((config:gsub("approve_text=true\n", "approve_text=false\n")))
       file:close()
       room_events(env, { text_event("$switch-off-reply", OWNER, "yes " .. id, rec.event_id) })
       assert(#typed == 0 and rec.status == "open" and delivered_ids(env.delivered, "$switch-off-reply"),
@@ -8357,7 +8370,7 @@ local function test_approved_text_registration_refuses_when_switch_is_off()
       assert(id == nil and tostring(why):find("Prepared text approvals are off", 1, true)
         and #home_posts(env, "Approve prepared text for") == before,
         "switch-off registration must report a clear refusal without a HOME post")
-    end)
+    end, "approve_text=false\n")
   end)
 end
 

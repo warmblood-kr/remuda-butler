@@ -167,6 +167,86 @@ are damaged or doubled, a symlinked `AGENTS.md`, and a file mixing LF and CRLF
 line endings are left unchanged, and the trace names them. A file holding only an earlier Butler text is replaced by the
 marked form; any other unmarked file keeps its text and gets the block appended.
 
+## Your own guidance layers
+
+Rules of your own (local paths, team conventions, preferences) go in plain
+Markdown files outside Butler, not in Butler's code. Butler reads them in this
+order, and a later layer adds to or overrides an earlier one:
+
+1. **framework**: Butler's own text (built in).
+2. **cluster**: shared by every node of a cluster. It is the cluster file
+   `remuda:///butler/guidance/cluster.md` in Remuda's cluster file store
+   (warmblood-kr/remuda#742). Publish it once from any node with
+   `remuda vfs put cluster.md remuda:///butler/guidance/cluster.md`; every node
+   that has synced reads the same version. Butler reads only this node's copy and
+   never waits on the network. The layer is "not available" on a Remuda core
+   without the store, and on a node with no cluster identity. A version this
+   node knows of but has not copied yet is reported, not loaded. Its version is
+   `vN/sha256:` plus 12 hex digits, so each node shows which version it applied.
+3. **team**: `~/.config/remuda/butler/guidance/team.md`. To share it, make it a
+   symlink into a team repository.
+4. **personal**: `~/.config/remuda/butler/guidance/personal.md`. Keep it in
+   your dotfiles.
+5. **local**: `~/.config/remuda/butler/guidance/local.md`. Rules for this
+   machine only, like Emacs `custom.el`; keep it out of a shared dotfiles
+   repository.
+
+The directory follows `XDG_CONFIG_HOME`; `REMUDA_BUTLER_GUIDANCE_DIR`
+overrides it. A missing or empty file means "not loaded", and nothing fails.
+A file over 8 KiB, or one that cannot be read, is not loaded and is reported.
+
+Butler writes the layers into the agent's `AGENTS.md` as the managed block
+`guidance-layers`: a list of every layer with its status and version (the
+first 12 hex digits of the file's sha256), then the text of each loaded layer.
+A new member's welcome mail carries the same text. Edit the files, not the
+block: Butler rewrites it.
+
+Butler reads the files again when a session starts (a new launch, a relaunch,
+or a daemon restart that starts the root again) and just before it compacts a
+session, so the agent reloads the same rules after compaction or a rollout.
+It does not re-read them on every reconcile tick. For a member, Butler
+writes the block only in a directory it made itself. In your own project
+directory it refreshes the block only if Butler wrote it there before, and
+otherwise leaves your `AGENTS.md` alone.
+
+Each load is traced as `guidance_layers` in the session trace, for example
+`butler framework=sha256:1a2b3c4d5e6f cluster=unavailable team=missing
+personal=sha256:9f8e7d6c5b4a local=missing`, and `remuda butler doctor`
+shows the root Butler's last load on its `Guidance layers:` line.
+
+## Butler memory (shared by Claude and Codex)
+
+Each Butler has a memory directory owned by Butler, not by the agent:
+`~/.local/share/remuda/butler/memory/NAME/` (`NAME` is `butler` for the
+root, the member's name otherwise). The directory follows `XDG_DATA_HOME`, and
+`REMUDA_BUTLER_MEMORY_HOME` overrides the parent. It holds plain Markdown: an
+index `MEMORY.md` with one line per note (`- [Title](file.md) — one-line
+hook`) and one file per note. Butler creates the directory with an empty
+index the first time the Butler starts and never rewrites the index.
+
+The memory is keyed by the Butler's name, not by its agent or working
+directory. So a member relaunched under the same name, or switched from
+Claude to Codex, keeps its memory. Every agent is pointed at the same
+directory:
+
+- **Every agent**: `REMUDA_BUTLER_MEMORY_DIR` in its environment, and a managed
+  `memory` block in its `AGENTS.md` (next to `guidance-layers`). The block gives
+  the path and the rules and shows `MEMORY.md` as it was when the session
+  started (up to 8 KiB). The block is refreshed at the same times as the
+  guidance layers. A new member's welcome mail carries it too.
+- **Claude**: the per-launch settings set `autoMemoryDirectory` to the store,
+  so Claude's own auto memory reads and writes it. They also add the store to
+  `permissions.additionalDirectories` and allow `Read`/`Edit` there. The same
+  settings tell Claude to read `AGENTS.md` even where a `CLAUDE.md` exists
+  (`instructionFiles: claude-md-and-agents-md`), so Butler's blocks reach
+  Claude in any project.
+- **Codex**: the store is added to the sandbox's writable roots, on a core
+  whose `_codex_tui` accepts `-c` (on an older core Codex can read the block
+  but not write the store).
+
+Task notes for one working directory still belong in its `docs/`. Never put
+secrets in the memory store: it is plain text.
+
 ## Schedules
 
 A schedule sends a fixed text to a session at wall-clock times and survives
@@ -332,12 +412,12 @@ session PATH must also lie inside the session's working directory; with no
 `remuda butler shell-lines on|off` controls shell lines (`!!TEXT`). Shell lines
 require typed lines to be on; turning typed lines off also turns shell lines
 off. `remuda butler doctor` reports the current values as `Typed lines: on|off`
-and `Shell lines: on|off`. Both switches are off by default. When a switch is
+and `Shell lines: on|off`. Both switches are on by default (once Matrix is set up, and only for the owner allowlist); `typed-lines off`, `shell-lines off` or `typed_lines=false` / `shell_lines=false` in the Matrix config turn them off, and an unreadable value counts as off. When a switch is
 off, matching messages stay on the ordinary mail path. A line that is
 typed is also delivered to the inbox as ordinary mail, so typing is additive.
 These CLI gates do not defend against a hostile same-user agent that clears
-its identity (see Butler #264). The real protection is that both switches
-default off.
+its identity (see Butler #264). The real protection is the owner allowlist,
+the live-sync and rate checks below, and the explicit off switches.
 
 An enabled line must come from an allowlisted owner in a live Matrix sync, be
 no more than five minutes old, contain one line of at most 2000 bytes, and fit
@@ -379,7 +459,7 @@ Session binding uses the Butler session identity and a non-secret launch marker;
 the root Butler identity can survive a pane relaunch, so its fresh launch marker
 is what distinguishes that instance.
 `remuda butler approve-text on|off` is a terminal-only switch that asks for
-`yes` before enabling. It is off by default; with it off, replies stay on the
+`yes` before enabling. It is on by default (once Matrix is set up; `approve-text off` or `approve_text=false` turns it off); with it off, replies stay on the
 ordinary mail path. Registration is also refused in Matrix messages fallback
 mode because that mode cannot receive live owner approvals. Doctor reports
 `Approve text: on|off`.

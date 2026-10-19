@@ -5,6 +5,9 @@
 local guidance_blocks = {}
 
 local MAX_BODY = 8192
+-- A block may ask for a larger cap (`max`), up to 64 KiB.
+local MAX_BODY_CEILING = 65536
+local function body_cap(block) return math.min(tonumber(block.max) or MAX_BODY, MAX_BODY_CEILING) end
 local function begin_line(id) return "<!-- BEGIN remuda-butler:managed id=" .. id .. " -->" end
 local function end_line(id) return "<!-- END remuda-butler:managed id=" .. id .. " -->" end
 
@@ -194,12 +197,12 @@ end
 -- report: one { id, outcome } per block, in order. outcome is written,
 -- unchanged, appended, migrated, damaged, duplicated, mixed-eol (a file with
 -- both LF and CRLF line endings is refused) or dropped (bad id, a body over
--- 8 KiB, or a body holding a marker line). A CRLF file keeps its CRLF.
+-- its cap: 8 KiB, or the block's `max` up to 64 KiB; or a body holding a marker line). A CRLF file keeps its CRLF.
 function guidance_blocks.merge(text, blocks)
   local report, valid, seen = {}, {}, {}
   for _, block in ipairs(blocks or {}) do
     local id, body = block.id, block.body
-    if valid_id(id) and type(body) == "string" and #body <= MAX_BODY and not seen[id]
+    if valid_id(id) and type(body) == "string" and #body <= body_cap(block) and not seen[id]
       and not body:find("remuda%-butler:managed id=") then
       seen[id] = true
       valid[#valid + 1] = block
