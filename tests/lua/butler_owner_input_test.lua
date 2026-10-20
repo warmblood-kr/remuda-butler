@@ -286,3 +286,36 @@ T.test('uncertain head keeps later input blocked unless the composer is positive
   end)
  end
 end)
+-- Core/Butler contract (warmblood-kr/remuda#763): when the first Return only adds a
+-- newline, core sends a retry Return. Before the fix it then reported 'unverified'
+-- even if the retry had submitted; after it, it reports 'submitted'. Butler marks an
+-- entry delivered only on exactly 'submitted', so the core's answer decides whether
+-- the entry and the ones behind it move on.
+T.test('contract: type_text unverified after a retry Return leaves the entry uncertain and gates later input',function()
+ subject('retry-return-unverified',function(s)
+  s.request('AH01','first');s.mode.provider='unverified';s.queue.tick()
+  local head=s.queue.status()[1]
+  T.eq(head.status,'uncertain');T.eq(head.provider_status,'unverified');T.eq(head.reason,nil)
+  -- The composer cannot be confirmed empty here (an unparseable screen), so later input waits.
+  s.mode.provider=nil;s.request('AH02','second');s.queue.tick();s.queue.tick()
+  T.eq(table.concat(s.writes,','),'first','head is not retyped and the next entry is not typed')
+  T.eq(s.queue.status()[1].status,'uncertain');T.eq(s.queue.status()[2].status,'queued')
+  T.ok(tostring(s.queue.status()[2].reason):find('^uncertain_ahead_'),tostring(s.queue.status()[2].reason))
+  -- Since #524 a positively empty composer lets later input pass; the head stays uncertain.
+  s.mode.screen='› '
+  local clock=os.time;os.time=function()return clock()+400 end -- skip the deferral backoff
+  s.queue.tick();os.time=clock
+  T.eq(table.concat(s.writes,','),'first,second');T.eq(s.queue.status()[1].status,'uncertain')
+  T.eq(s.queue.status()[2].status,'delivered');T.eq(s.queue.status()[2].provider_status,'submitted')
+ end)
+end)
+T.test('contract: type_text submitted after a retry Return delivers the entry and the next one',function()
+ subject('retry-return-submitted',function(s)
+  -- Same unparseable screen as the unverified case: delivery must not depend on a composer check.
+  s.request('AI01','first');s.request('AI02','second');s.mode.provider='submitted';s.queue.tick();s.queue.tick()
+  local rows=s.queue.status()
+  T.eq(rows[1].status,'delivered');T.eq(rows[1].provider_status,'submitted')
+  T.eq(rows[2].status,'delivered');T.eq(rows[2].provider_status,'submitted')
+  T.eq(table.concat(s.writes,','),'first,second');T.eq(#resolve_notes(s),0,'no uncertain notice for delivered entries')
+ end)
+end)
