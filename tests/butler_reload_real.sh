@@ -28,7 +28,16 @@ r() { "$B" -s "$SV" "$@"; }
 # Host-backed sessions outlive `stop`: close every session first, or their
 # hosts (and PTYs) leak past this test.
 cleanup() {
-  r -e 'for _, s in ipairs(remuda.ls()) do pcall(remuda.close, s.name) end' >/dev/null 2>&1
+  # Butler relaunches a closed root: stop its reconcile first.
+  r -e 'remuda._butler_reconcile = function() end' >/dev/null 2>&1
+  # A hosted close stops its host in the background; close until the
+  # inventory is empty.
+  local i
+  for i in $(seq 100); do
+    r -e 'for _, s in ipairs(remuda.ls()) do pcall(remuda.close, s.name) end' >/dev/null 2>&1
+    [[ -z $(ls -A "$REMUDA_RUNTIME_DIR"/remuda/*.sock.hosts 2>/dev/null) ]] && break
+    sleep 0.1
+  done
   r stop -f >/dev/null 2>&1
   rm -rf "$T"
 }
