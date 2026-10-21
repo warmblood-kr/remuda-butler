@@ -157,6 +157,42 @@ must report `--done` again. A report without `--done`, or an MCP report with
 `done: false` or `done` omitted, creates no new auto-close request and does not
 cancel an earlier request. The root and leader-less rows are never closed this way.
 
+## Daemon reload (`remuda reload`)
+
+`remuda reload` (Remuda core, `docs/reload.md` there) moves the daemon onto
+another build. Host-backed sessions (`REMUDA_EXPERIMENTAL_SESSION_HOST=1`) keep
+running, but Butler starts again in a fresh Lua image. What Butler keeps:
+
+- **Ownership of the home.** While the replaced daemon is still exiting, Butler
+  waits for it (at most 30 s) and then takes the home locks. It waits only when
+  core says the socket was handed over by a reload and the lock holder is the
+  daemon that started this one; any other holder still means standby.
+- **The team.** Butler keeps a private roster, `roster.json` beside
+  `agents.jsonl` (0600; names, ids, leaders, directories, sandbox settings and
+  session instance ids; never a token or message text). A fresh image takes
+  back every session that is still the same live instance and whose identity is
+  still running, the root included, so the root is not restarted and members
+  stay known (mail, `sessions`, CLI caller identity, notices). A member whose
+  leader did not come back is handed to the root.
+- **Mail, schedules, approvals and the Matrix cursor.** These live on disk.
+  Unread mail is announced again in each member's pane.
+
+Known limits after a reload:
+
+- Codex members' MCP tools (`butler_*`) are refused until the member is
+  relaunched: the bridge's capability lived in the old image. The
+  `remuda butler` CLI keeps working.
+- A member's first task that was still being typed when the reload happened
+  may not arrive. The leader is not told; send the task again as mail.
+- `send-to-leader --done` requests are forgotten, so that member stays open
+  until it reports `--done` again.
+- A Codex update relaunch in progress is lost; relaunch the member by hand.
+- An open guard approval ends as expired ("daemon restarted"), as after any
+  restart; the agent asks again. A command still waiting for an answer (a
+  Matrix wizard, a typed-lines prompt) is told to run again.
+- A session that stopped during the reload is not taken back; its identity is
+  ended as `daemon_restart`.
+
 ## The root AGENTS.md
 
 Butler's own guidance in the root session's `AGENTS.md` sits between
