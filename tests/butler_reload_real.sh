@@ -25,7 +25,14 @@ LUA
 SV=brr$$
 [[ $SV != default ]] || exit 1
 r() { "$B" -s "$SV" "$@"; }
-trap 'r stop -f >/dev/null 2>&1; rm -rf "$T"' EXIT
+# Host-backed sessions outlive `stop`: close every session first, or their
+# hosts (and PTYs) leak past this test.
+cleanup() {
+  r -e 'for _, s in ipairs(remuda.ls()) do pcall(remuda.close, s.name) end' >/dev/null 2>&1
+  r stop -f >/dev/null 2>&1
+  rm -rf "$T"
+}
+trap cleanup EXIT
 fail() { echo "FAIL: $*"; exit 1; }
 wait_up() {
   local i
