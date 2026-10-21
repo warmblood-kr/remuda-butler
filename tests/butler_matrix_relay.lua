@@ -5730,6 +5730,34 @@ rx_tests = {
       assert(not rx_find(delivered, "$gap"), "limited timeline applies state delta first")
       sync({ mention("$gap-restored") }, { power(50, 50) }, NEW, true)
       assert(rx_find(delivered, "$gap-restored"), "known delta permits limited timeline mention")
+      -- Ruma-based servers omit an empty state block on a limited timeline. The
+      -- cache is kept but stale: @room is denied until a full state refresh.
+      local denials, previous_diagnostics = {}, remuda._butler_diagnostics
+      remuda._butler_diagnostics = { record = function(_, outcome, reason)
+        if outcome == "filtered" then denials[reason] = (denials[reason] or 0) + 1 end
+      end }
+      local function last_path() return client.requests[#client.requests].path end
+      sync({ mention("$stale-in-gap") }, nil, NEW, true)
+      assert(not rx_find(delivered, "$stale-in-gap"), "stateless gap denies @room in its own batch")
+      assert(denials.room_mention_denied_stale == 1, "stale denial is recorded with its reason")
+      assert(last_path():find("full_state=true&filter=", 1, true)
+        and last_path():find("m.room.power_levels", 1, true),
+        "stateless gap requests a filtered full state refresh")
+      sync({ mention("$after-refresh") }, { power(50, 50) })
+      assert(rx_find(delivered, "$after-refresh"), "refreshed state permits @room after a stateless gap")
+      assert(not last_path():find("full_state=true", 1, true), "refresh is one request, not a loop")
+      sync({ rx_msg("$burst", OWNER, "filler") }, nil, NEW, true)
+      sync({ mention("$changed-in-gap") }, { power(0, 50) })
+      assert(not rx_find(delivered, "$changed-in-gap"), "power lowered during a gap still fails closed")
+      assert(denials.room_mention_denied_power == 1, "power denial is recorded with its reason")
+      sync({ mention("$power-back") }, { power(50, 50) })
+      assert(rx_find(delivered, "$power-back"), "a later state delta permits @room again")
+      sync({ mention("$gap-before-power"), power(50, 50), mention("$gap-after-power") }, nil, NEW, true)
+      assert(not rx_find(delivered, "$gap-before-power") and rx_find(delivered, "$gap-after-power"),
+        "a power event in the gap timeline makes the snapshot current again")
+      sync({ mention("$refresh-after-power") }, { power(50, 50) })
+      assert(rx_find(delivered, "$refresh-after-power"), "refresh still answers after an in-timeline power event")
+      remuda._butler_diagnostics = previous_diagnostics
       for index, metadata in ipairs({ { room = false }, { room = "true" }, { room = 1 }, "true", {} }) do
         sync({ mention("$malformed" .. index, metadata, "@room @roommate #alias:example.org") })
         assert(not rx_find(delivered, "$malformed" .. index), "only boolean true is a room mention")

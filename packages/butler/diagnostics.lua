@@ -9,7 +9,8 @@ local reasons = {}
 for word in ('storage_prepare body_write envelope_write inbox_append envelope_read read_state_write '
   .. 'conversion_failed conversion_ok routing_failed routing_accepted delivery_failed delivery_ok '
   .. 'delivery_deferred filter_policy retry_scheduled prompt_busy prompt_policy heuristic_unknown_choice '
-  .. 'heuristic_dialog heuristic_completion capture_unavailable session_unavailable session_replaced detection_unavailable write_returned'):gmatch('%S+') do
+  .. 'heuristic_dialog heuristic_completion capture_unavailable session_unavailable session_replaced detection_unavailable write_returned '
+  .. 'room_mention_denied_stale room_mention_denied_no_state room_mention_denied_power room_mention_denied_malformed room_mention_denied_unusable'):gmatch('%S+') do
   reasons[word] = true
 end
 local state = remuda._butler_diagnostics_state or {

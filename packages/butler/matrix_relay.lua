@@ -416,7 +416,9 @@ end
 local function notification_state_event(room, event)
   if room.unusable or type(event) ~= "table" or event.state_key ~= "" then return end
   if event.type == "m.room.power_levels" then
-    room.power, room.power_seen = event.content, true
+    -- The event carries the whole power map and create never changes, so a
+    -- power event seen after a gap makes the snapshot current again.
+    room.power, room.power_seen, room.stale = event.content, true, nil
   elseif event.type == "m.room.create" then
     room.create, room.creator = event.content, event.sender
   end
@@ -441,7 +443,12 @@ local function room_mention_allowed(room, content, sender)
     return true
   end
   local mention = content["m.mentions"]
-  if not object(mention) or mention.room ~= true or not room or room.unusable then return false end
+  if not object(mention) or mention.room ~= true then return false end
+  if not room then return false, "room_mention_denied_no_state" end
+  if room.unusable then return false, "room_mention_denied_unusable" end
+  -- A limited sync without a state block may have skipped a power change.
+  -- Deny until a full state refresh or a fresh power event.
+  if room.stale then return false, "room_mention_denied_stale" end
   local function integer(value, default)
     if value == nil then return default end
     if type(value) == "number" and value == value and value ~= math.huge
@@ -464,19 +471,23 @@ local function room_mention_allowed(room, content, sender)
   end
   local power = room.power
   if power == nil and not room.power_seen then
-    if not room.complete or not known_version then return false end
-    return is_creator -- all other users default to 0; notification threshold is 50.
+    if not room.complete or not known_version then return false, "room_mention_denied_no_state" end
+    -- All other users default to 0; notification threshold is 50.
+    if is_creator then return true end
+    return false, "room_mention_denied_power"
   end
-  if not object(power) then return false end
-  if power.notifications ~= nil and not object(power.notifications) then return false end
-  if power.users ~= nil and not object(power.users) then return false end
+  local malformed = "room_mention_denied_malformed"
+  if not object(power) then return false, malformed end
+  if power.notifications ~= nil and not object(power.notifications) then return false, malformed end
+  if power.users ~= nil and not object(power.users) then return false, malformed end
   local threshold = integer(power.notifications and power.notifications.room, 50)
   local default_level = integer(power.users_default, 0)
-  if default_level == nil then return false end
+  if default_level == nil then return false, malformed end
   local level = integer(power.users and power.users[sender], default_level)
-  if threshold == nil or level == nil then return false end
+  if threshold == nil or level == nil then return false, malformed end
   if is_creator and known_version and tonumber(version) >= 12 then return true end
-  return level >= threshold
+  if level >= threshold then return true end
+  return false, "room_mention_denied_power"
 end
 
 local function media_uri(content)
@@ -842,6 +853,8 @@ function relay.new(options)
   local reply_retry_timers, reply_in_flight = {}, {}
   local untrusted_receive_times = {}
   local notification_rooms, notification_full_state = {}, true
+  -- Rooms whose permission snapshot went stale; the next sync asks for full state.
+  local notification_refresh = {}
   local typed_line_refusal_at
   local status_reply_at = {}
   -- ponytail: in memory, a restart may repeat the line once
@@ -2080,7 +2093,9 @@ function relay.new(options)
           local actual_room = room_id or cfg.room
           local sender_kind = member_kind(ev.sender, cfg)
           local is_mention = mentions(content, content.body, cfg.self_mxid)
-          local is_room_mention = room_mention_allowed(notification_rooms[actual_room], content, ev.sender)
+          local is_room_mention, room_mention_denied =
+            room_mention_allowed(notification_rooms[actual_room], content, ev.sender)
+          if room_mention_denied then diagnostic("filtered", room_mention_denied, event_id) end
           local thread_id = thread_root or in_reply_to
           local subscriptions = state.subscriptions[actual_room] or json.object({})
           state.subscriptions[actual_room] = subscriptions
@@ -2532,20 +2547,29 @@ function relay.new(options)
       for room_id in pairs(notification_rooms) do
         if not cfg.rooms[room_id] then notification_rooms[room_id] = nil end
       end
+      -- Whether this response answers a full_state request (restart or refresh).
+      local full_state = notification_full_state or next(notification_refresh) ~= nil
+      for room_id in pairs(notification_refresh) do
+        if not cfg.rooms[room_id] then notification_refresh[room_id] = nil end
+      end
       for room_id, room in pairs(type(rooms.join) == "table" and rooms.join or {}) do
         if cfg.rooms[room_id] and type(room) == "table" then
           local snapshot = notification_rooms[room_id] or {}
           -- Full state is at the START of the timeline. Never use state_after
           -- as permission for earlier messages. Missing full state fails closed.
-          if notification_full_state then snapshot = {} end
+          if full_state then snapshot = {} end
           if room.state_after ~= nil then snapshot = { unusable = true } end
           if type(room.state) == "table" and type(room.state.events) == "table" then
-            if notification_full_state then snapshot.complete = true end
+            if full_state then snapshot.complete = true end
             for _, event in ipairs(room.state.events) do notification_state_event(snapshot, event) end
             -- Newly joined rooms include full state, including the create event.
             if snapshot.create ~= nil then snapshot.complete = true end
           elseif room.timeline and room.timeline.limited == true then
-            snapshot = {}
+            -- Some servers (ruma-based) omit an empty state block, so a gap
+            -- without one may or may not hide a power change. Keep the cache
+            -- but deny @room until a filtered full state refresh answers.
+            snapshot.stale = true
+            if not full_state then notification_refresh[room_id] = true end
           end
           notification_rooms[room_id] = snapshot
           if state.since == nil then
@@ -2555,7 +2579,12 @@ function relay.new(options)
           end
         end
       end
-      if type(response.next_batch) == "string" then notification_full_state = false end
+      if type(response.next_batch) == "string" then
+        notification_full_state = false
+        -- One refresh per gap: a room left out of a full state response stays
+        -- stale (fail closed) until a power event, another gap, or a restart.
+        if full_state then notification_refresh = {} end
+      end
     end
     if path == SYNC_PATH and state.since == nil then
       if type(response.next_batch) ~= "string" then failed(); return end
@@ -2621,8 +2650,8 @@ function relay.new(options)
       begin_request(SYNC_PATH, { timeout = "0" }, 10)
     else
       local query = { since = state.since, timeout = tostring(cfg.timeout_ms) }
-      if notification_full_state then
-        -- Restart: room mention permission needs state at the timeline start, but
+      if notification_full_state or next(notification_refresh) ~= nil then
+        -- Restart or a stale room after a limited gap: room mention permission needs state at the timeline start, but
         -- unfiltered full state can exceed the response cap in large rooms and
         -- stall live sync. Limit the snapshot to create and power levels for
         -- configured rooms; the timeline itself is not filtered.
@@ -2636,7 +2665,7 @@ function relay.new(options)
     if active then return false end
     generation = generation + 1
     live_sync_ready = false
-    notification_rooms, notification_full_state = {}, true
+    notification_rooms, notification_full_state, notification_refresh = {}, true, {}
     active = true
     remuda._butler_matrix_live_config = cfg
     if approval and type(approval.reapply_approved) == "function" then approval.reapply_approved() end
