@@ -96,6 +96,7 @@ local function trust_env()
   }
 end
 
+local FIRST_TASK_TYPE_LIMIT = 8192
 local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity, fresh_trusted_cwd, profile)
   local candidates = kind and { kind } or configured_agent_order()
   local compatible = {}
@@ -292,6 +293,15 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         .. guidance_text(guidance_blocks), "Welcome to Butler")
     -- First sight of a new member: nothing to replay or re-show (notice.lua).
     bus.unread_seeded[actual] = "launched"
+  end
+  -- A host-backed session takes at most 8 KiB per input act (remuda#713's
+  -- session host), so a longer task is mailed and a short pointer is typed.
+  if task and #task > FIRST_TASK_TYPE_LIMIT then
+    local queued, message = pcall(queue_message, mail_address(parent or "butler"), mail_address(actual), task, "Task")
+    if queued and type(message) == "table" and message.id then
+      task = "Your task from " .. tostring(parent or "butler") .. " is too long to type here; it is message "
+        .. message.id .. " in your inbox. Read it: remuda butler inbox"
+    end
   end
   if task and task ~= "" then
     -- Keep an immediate mail notice out of the child's first prompt until the
