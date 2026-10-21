@@ -79,14 +79,13 @@ end
 
 -- Rebuild bus.agents from the roster for every session that is still the same
 -- live instance and whose identity is still running. Only on a fresh image
--- (an empty roster in memory). Returns the adopted aliases, sorted.
+-- (no row in memory). Returns the adopted aliases, sorted.
 -- Each adopted row gets a fresh capability record that no bridge holds: an
 -- old MCP bridge's token died with the old image, while CLI callers are
 -- attributed by session and instance (remuda#800).
 function M.adopt(sessions)
-  for alias in pairs(bus.agents) do
-    if alias ~= "butler" or bus.agents.butler.instance_id then return {} end
-  end
+  -- Any row at all means this image already knows its team (an in-image mod reload).
+  if next(bus.agents) ~= nil then return {} end
   local live = {}
   for _, session in ipairs(type(sessions) == "table" and sessions or {}) do
     if session.alive and type(session.name) == "string" and type(session.instance_id) == "string" then
