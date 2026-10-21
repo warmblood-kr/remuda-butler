@@ -984,6 +984,29 @@ end
 for _, record in pairs(bus.tokens) do
   if type(record) == "table" and record.instance_binding ~= 1 then record.instance_id = nil end
 end
+-- A fresh image (`remuda reload`, remuda#713) takes back the sessions that
+-- outlived the old one, matched by instance id, instead of closing the root
+-- and forgetting live members. See roster.lua.
+remuda._butler_roster_config = { bus = bus, data_home = data_home, new_ulid = remuda._butler_new_ulid,
+  next_token = next_token }
+remuda.exec("butler/roster")
+local roster = remuda._butler_roster
+local adopted_ok, adopted_on_start = pcall(roster.adopt, remuda.ls())
+if not adopted_ok then
+  io.stderr:write("butler: roster adoption failed: " .. tostring(adopted_on_start) .. "\n")
+  adopted_on_start = {}
+end
+remuda._butler_adopted_on_start = adopted_on_start
+if bus.agents.butler and bus.agents.butler.adopted then
+  -- launch_butler then adopts the live root instead of replacing it.
+  remuda._butler_selected_agent, remuda._butler_name = bus.agents.butler.kind, "butler"
+end
+function remuda._butler_roster_save()
+  local ok, saved, why = pcall(roster.save)
+  if not (ok and saved) and _butler_session_trace then
+    _butler_session_trace("roster_not_saved", tostring(ok and why or saved):gsub("%c+", " "))
+  end
+end
 local existing_butler = bus.agents.butler
 local launch_options = remuda._mod_launch_options and remuda._mod_launch_options.butler
 local butler_kind = existing_butler and existing_butler.kind
@@ -1021,6 +1044,10 @@ bus.identities.butler = bus.identities.butler or root_identity
 local root_migrated, root_migration_error = migrate_legacy_mail("butler", root_identity.id)
 if not root_migrated then error("cannot migrate legacy Butler mail: " .. tostring(root_migration_error), 0) end
 mailbox(root_identity.id)
+roster.link_children(adopted_on_start)
+for _, alias in ipairs(adopted_on_start) do
+  if alias ~= "butler" and bus.agents[alias] then mailbox(bus.agents[alias].id) end
+end
 -- The root MCP config carries the root capability: owner-only (0600), and a
 -- file left 0644 by an older Butler is replaced.
 remuda.butler.guard.write_private(mcp_config_path, agent_mcp_json(butler_token))
@@ -1503,6 +1530,7 @@ end
 
 function remuda._butler_reconcile()
   local ok, result = pcall(launch_butler)
+  remuda._butler_roster_save()
   if not ok then
     reconcile_retry.note_failure()
     _butler_session_trace("reconcile_error", tostring(result))
@@ -1639,6 +1667,7 @@ function remuda._butler_session_exited(name, info)
     -- A lead that is about to relaunch under the same name keeps its members.
     if not update_restart then remuda._butler_adopt_members(name, exited) end
   end
+  remuda._butler_roster_save()
   if name == butler_name then
     _butler_session_trace("relaunching", name)
     remuda._butler_reconcile()
@@ -1660,6 +1689,10 @@ function remuda._butler_session_exited(name, info)
 end
 
 function remuda._butler_bootstrap()
+  if #(remuda._butler_adopted_on_start or {}) > 0 then
+    _butler_session_trace("roster_adopted", table.concat(remuda._butler_adopted_on_start, " "))
+    remuda._butler_adopted_on_start = {}
+  end
   return remuda._butler_reconcile()
 end
 -- Pre-lifecycle cores load this file directly; lifecycle cores call bootstrap
