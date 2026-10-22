@@ -157,6 +157,20 @@ local function render(probe_results, platform)
     if type(agent) == "table" and not (principal and principal.bound(agent)) then unbound = unbound + 1 end
   end
   if unbound > 0 then lines[#lines + 1] = unbound .. " members not instance-bound: relaunch to bind" end
+  -- After a reload: an adopted member's MCP bridge is re-bound on its first call
+  -- only when core attributes that call to the member's session (remuda#800).
+  local waiting = {}
+  for alias, agent in pairs((remuda._butler_bus or {}).agents or {}) do
+    if type(agent) == "table" and agent.adopted == true and not agent.capability_rebound then
+      waiting[#waiting + 1] = safe(alias)
+    end
+  end
+  table.sort(waiting)
+  if #waiting > 0 then
+    lines[#lines + 1] = "Taken back after a reload, MCP tools not re-bound yet: " .. table.concat(waiting, ", ")
+    lines[#lines + 1] = "Next: they re-bind on first use when this core attributes MCP calls to sessions;"
+      .. " if butler_* tools stay refused, relaunch that member (the remuda butler CLI keeps working)"
+  end
   return lines
 end
 

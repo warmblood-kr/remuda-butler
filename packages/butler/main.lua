@@ -1644,6 +1644,7 @@ function remuda._butler_session_exited(name, info)
     bus.trusted_launch_dirs[exited.cwd] = nil
   end
   if exited and name ~= "butler" and exited.token then bus.tokens[exited.token] = nil end
+  if exited and type(exited.capability_rebound) == "string" then bus.tokens[exited.capability_rebound] = nil end
   -- ponytail: reached by exits of the bound instance or without an instance id (older core); an exit of another
   -- instance was dropped as stale above. A late exit of a replaced root while a launch is pending is skipped
   -- (that launch rotates anyway); one arriving after finish would revoke the new launch.
