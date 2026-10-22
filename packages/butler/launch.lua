@@ -281,6 +281,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   local migrated, migration_error = migrate_legacy_mail(actual, identity.id)
   if not migrated then error("cannot migrate legacy Butler mail: " .. tostring(migration_error), 0) end
   mailbox(identity.id)
+  if remuda._butler_roster_save then remuda._butler_roster_save() end
   if waiting_for_trust then
     pcall(remuda._butler_send, "butler", parent or "butler",
       "waiting for a human: trust dialog in " .. tostring(launch_cwd or "unknown directory")
