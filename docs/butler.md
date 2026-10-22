@@ -179,9 +179,12 @@ running, but Butler starts again in a fresh Lua image. What Butler keeps:
 
 Known limits after a reload:
 
-- Codex members' MCP tools (`butler_*`) are refused until the member is
-  relaunched: the bridge's capability lived in the old image. The
-  `remuda butler` CLI keeps working.
+- A Codex member's MCP bridge still holds the old image's capability. Butler
+  binds it again on the member's first `butler_*` call that core attributes
+  to that member's own session and instance (core with warmblood-kr/remuda#800).
+  Otherwise the tools stay refused until the member is relaunched: on an older
+  core, for a second token, or for a call from another session. `remuda butler
+  doctor` lists members not re-bound yet; the `remuda butler` CLI keeps working.
 - A member's first task that was still being typed when the reload happened
   may not arrive. The leader is not told; send the task again as mail.
 - `send-to-leader --done` requests are forgotten, so that member stays open
