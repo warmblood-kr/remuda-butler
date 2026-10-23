@@ -747,8 +747,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       ready = startup.ready,
       modals = startup.modals,
       working = startup.working,
-      -- written: the first task is already typed. The Teach modal (detect + defer) only holds the
-      -- PRE-write phase; afterwards its text on screen may be our own task echoed, so it never
+      -- written: the first task is already typed. The Teach modal (detected + deferred here;
+      -- dialogs.lua answers it) only holds the PRE-write phase; afterwards its text on screen may be our own task echoed, so it never
       -- vetoes verification (delivery then falls back to the normal post-write checks).
       trust_dialog = function(screen, written)
         delivery.last_screen = screen

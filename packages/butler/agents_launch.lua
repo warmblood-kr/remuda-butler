@@ -737,7 +737,8 @@ trust_modal_state = function(modal, screen)
   end
   return plan.selected and "safe_selected" or "safe"
 end
--- A titled choice modal (Claude "Teach auto mode ..."): DETECTION ONLY, never answered.
+-- A titled choice modal (Claude "Teach auto mode ..."): launch only detects it and defers;
+-- dialogs.lua answers it "Not now" (claude_teach_auto_mode) once the member is registered.
 -- Quoted, drafted, partial or wrapped title text counts, so first-task delivery defers. Text is lowercased with punctuation/whitespace/borders
 -- collapsed so a wrapped title still matches. The title alone suffices; option text counts
 -- only with the title or the context phrase in the same capture (lone "Not now" is not it).

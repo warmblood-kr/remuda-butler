@@ -90,3 +90,13 @@ headers use description/destination fields:
 https://github.com/openai/codex/blob/main/codex-rs/tui/src/bottom_pane/apply_patch_header.rs
 The command/edit fixtures are synthetic representative renderings of those
 source layouts using harmless sample values, not captures of real panes.
+
+## Named states and responses (#499)
+
+Each exceptional screen above now has a named state with a response
+(`approval`, `report` or `auto`), listed per agent under "Recognised dialog
+states" in docs/butler.md and in `dialog_states` in the agent files. Reports
+name the state instead of `kind=unknown`. The only `auto` state is Claude's
+Teach auto mode page 1, answered `Not now` by its text (owner, #453). An
+unrecognised current numbered choice still allows input; it is reported once
+to the leader after 60 unchanged seconds.
