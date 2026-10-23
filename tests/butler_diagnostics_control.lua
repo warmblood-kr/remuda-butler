@@ -8,7 +8,7 @@ dofile = function(path)
     collector.record = function(subsystem, outcome, reason, correlation)
       assert(subsystem == 'control' and outcome == 'stopped')
       assert(correlation == 'child-id' or correlation == 'codex-id', 'only agent identifier at boundary')
-      if reason == 'heuristic_unknown_choice' then seen = seen + 1 end
+      if reason == 'heuristic_dialog' then seen = seen + 1 end
       if broken then error('broken observer') end
       return record(subsystem, outcome, reason, correlation)
     end
@@ -16,7 +16,7 @@ dofile = function(path)
   return original_dofile(path)
 end
 dofile('tests/butler_dialogs.lua')
-assert(seen > 0, 'actual unknown-choice stop boundary was not observed')
+assert(seen > 0, 'recognised dialog stop boundary was not observed')
 for _, event in ipairs(collector.snapshot().events) do
   assert(event.outcome == 'stopped' and event.severity == 'warn')
   assert(event.correlation:match('^c%-%x+$'), 'raw session identifier retained')

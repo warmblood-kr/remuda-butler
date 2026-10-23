@@ -77,7 +77,8 @@ assert(#writes == 0 and #reports == 0, 'no write, report waits for stable state'
 D.tick()
 assert(#reports == 1 and reports[1][1] == 'child' and reports[1][2] == 'leader', 'report to own leader')
 assert(not pcall(remuda.key, 'child', 'RET'), 'legacy pcall-based handlers must observe write refusal')
-assert(reports[1][3]:find('unknown', 1, true) and not reports[1][3]:find('dangerous', 1, true), 'metadata only')
+assert(reports[1][3]:find('state=claude_permission_prompt response=approval', 1, true)
+  and reports[1][3]:find('Approval required', 1, true) and not reports[1][3]:find('Yes', 1, true), 'named state, metadata only')
 D.tick(); attempt(remuda.type_text, 'child', 'task', 0.1)
 assert(#reports == 1 and #writes == 0, 'dedupe reports and stop text writes')
 assert(attempt(remuda.send, 'child', 'task') == false and #writes == 0, 'send API cannot bypass blocked write gate')
@@ -191,7 +192,6 @@ bus.agents.child.session_start_marker = 'child-launch'
 bus.first_task_delivery.child = {state = 'waiting', marker = 'child-launch'}
 for _, screen in ipairs({
   'Accessing workspace:\n/proj\nQuick safety check:\n\n❯ Yes, I trust this folder\n  No, exit\n\nEnter to confirm',
-  "Teach auto mode\n❯ 1. Not now\n2. Don't show again",
 }) do
   screens.child = screen
   assert(attempt(remuda.key, 'child', 'RET') == true, 'startup handler retains authority')
@@ -281,7 +281,8 @@ end
 D.tick()
 assert(attempt(remuda.key, 'child', 'RET') == true, 'existing positive composer probe releases resolved blocker')
 -- A descriptor failure leaves screen recognition unknown.
-remuda._butler_agent_startup.claude.blocking[1].match = function() error('parser broke') end
+remuda._butler_agent_startup.claude.blocking[1] = { id = 'extra', risk = 'report',
+  match = function() error('parser broke') end }
 screens.child = 'done\n─\n❯ \n'; D.tick(); D.tick()
 assert(attempt(remuda.key, 'child', 'RET') == true, 'parser failure allows input')
 D.stop()

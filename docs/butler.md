@@ -924,24 +924,76 @@ internal `remuda butler status-hook`, which stores only that word and a time in
 the screen probe decides. Codex has no status hooks yet and stays on the screen
 probe.
 
-Butler also checks managed Claude and Codex panes every second for unfamiliar
-boxed or numbered choice dialogs. The reporting-only dispatcher stops Butler
-input immediately, then reports `kind=unknown` to the member's leader after two
-matching captures. It reports once per stable signature and session instance;
-an ambiguous repaint keeps input stopped until a known ready or working screen
-appears. Capture or detector failure also stops input. This geometry check does
-not recognise every possible blocker and does not classify tool-result text,
-including Claude auto-mode denials. New semantic recognisers require an observed
-dialog-only fixture; no cache-invalidation or Codex denial signature is assumed.
+Butler also checks managed Claude and Codex panes every second for blocking
+dialogs. An unrecognised screen does not stop input (owner decision
+2026-10-15, docs/concepts/input-screen-policy.md). A recognised dialog stops
+Butler's own input on the first capture. After two matching captures Butler
+records `dialog_blocked` and applies the state's response:
 
-Existing launch trust, Codex update and Teach-auto-mode policies retain their
-handlers. Startup ownership requires the matching pending launch/update record
-and the current dialog's known options; historical startup markers alone never
-admit an unfamiliar choice. Model/effort dialogs belong to the existing compaction handler only
-while that member owns the compaction operation and its recorded picker phase
-and target match the current caption and option rows. Historical picker titles
-never establish ownership. The dispatcher sends no new
-automatic keys and creates no owner approval or standing grant.
+- `approval`: the dialog asks for a permission or reports a classifier
+  decision. Butler reports it to the member's leader as
+  `state=<id> response=approval` and never chooses an option, switches mode or
+  sends a key. The owner answers in the pane.
+- `report`: the dialog needs a decision (model, limit, setup). Butler reports
+  `state=<id> response=report` and chooses nothing.
+- `auto`: a harmless confirmation. Butler moves to the named option by its
+  text with arrow keys, presses Return only after a later capture shows that
+  option selected, and audits each key. It does nothing while someone is
+  typing in the pane, and after four tries without effect it reports the state
+  like `report`.
+
+Butler reports each state once per stable screen and session instance. It
+lifts its stop, with a `dialog_resolved` audit record, once no recognised state
+remains. A missing or replaced session also stops input and is reported.
+
+### Recognised dialog states
+
+Matching uses the current choice block and the heading directly above it (or
+inside its box); a later composer or a fenced quote makes it history. The lists
+live in `dialog_states` in `packages/butler/agents/claudecode.lua` and
+`packages/butler/agents/codex.lua`; add a row here with every new entry.
+
+Claude Code:
+
+| State | Recognised by | Response |
+| --- | --- | --- |
+| `claude_permission_prompt` | `Do you want to proceed?` | approval |
+| `claude_fetch_permission` | `Do you want to allow Claude to fetch this content?` | approval |
+| `claude_usage_limit` | `What do you want to do?` with `Stop and wait for limit to reset` | report |
+| `claude_model_confirm` | `Switch model?` | report; compaction answers its own |
+| `claude_effort_confirm` | `Change effort level?` | report; compaction answers its own |
+| `claude_teach_auto_mode` | `Teach auto mode about your environment?` with Yes / Not now / Don't show again | auto: `Not now` (#453) |
+| `claude_teach_auto_mode_setup` | the same title with `Also scan shell history` and `Enter to continue` | report |
+| `claude_trust` | `Quick safety check:` workspace trust | launch answers it for an eligible launch; otherwise approval |
+
+Codex:
+
+| State | Recognised by | Response |
+| --- | --- | --- |
+| `codex_command_approval` | `Would you like to run the following command?` | approval |
+| `codex_edit_approval` | `Would you like to make the following edits?` | approval |
+| `codex_permissions_approval` | `Would you like to grant these permissions?` | approval |
+| `codex_terminal_input_approval` | `Would you like to send input to the existing terminal?` | approval |
+| `codex_auto_review_refused` | `Automatic approval review rejected too many approval requests for this turn (…); interrupting the turn.` above a choice | approval |
+| `codex_proceed_confirm` | `Do you want to proceed?` | approval |
+| `codex_model_picker`, `codex_effort_picker` | a complete model or effort picker | report; compaction answers its own; `recover` closes it on request |
+| `codex_model_effort_dialog`, `codex_reasoning_dialog` | `Select Model and Effort`, `Select Reasoning Level for gpt-…` | report |
+| `codex_model_confirm`, `codex_effort_confirm` | `Switch model?`, `Change effort level?` | report |
+| `codex_update` | update available, options Update now / Skip | launch answers Skip; otherwise report |
+| `codex_trust` | `Trust this folder?` | launch answers it for an eligible launch; otherwise approval |
+
+Teach auto mode's `Yes` lets Claude Code scan the project, recent sessions,
+shell history and other repositories to tune auto mode's classifier, so Butler
+never chooses it or the follow-up `Continue`. `Not now` changes no setting and
+grants nothing. Claude auto-mode denials are tool-result text in the
+transcript, not dialogs; Butler does not act on them.
+
+`unknown_choice`: a current numbered choice that matches none of these does
+not stop input. If it stays unchanged for 60 seconds, Butler reports it once to
+the leader (`state=unknown_choice`, input not stopped) and records
+`dialog_reported`, because the session may be waiting for an answer. A box with
+no choices is not reported. Add a recognised state for a dialog that is
+reported this way only with a real capture of it.
 
 Managed `key`, `type_text` and `send` calls append `dialog_action` to the private
 guard audit before input, even while guard observation is off. Failed audit

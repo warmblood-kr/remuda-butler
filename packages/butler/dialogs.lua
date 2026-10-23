@@ -41,25 +41,38 @@ local function audit(name, agent, state, event, action, outcome)
   return ok and wrote == true
 end
 
-local function report(name, agent, alias, state)
-  if state.reported or state.reporting then return end
+local HINT = {
+  approval = 'Approval required: the owner must answer it in the pane; Butler chooses no option.',
+  report = 'It needs a decision in the pane; Butler chooses no option.',
+}
+
+local function notify(name, agent, alias, text)
   local leader = agent.parent or 'butler'
   -- The root cannot send itself a report without producing another notice to
   -- its blocked pane; its durable audit and operator log remain the fallback.
-  local text = 'Butler stopped writes: agent=' .. agent.kind .. ' session=' .. name
-    .. ' kind=unknown state=' .. state.id
-    .. '. Waiting for owner review; no input was sent.'
-    .. (state.audited and '' or ' Audit unavailable; writes remain stopped.')
   local ok, sent
-  state.reporting = true
   if leader ~= alias and type(remuda._butler_send) == 'function' then
     ok, sent = pcall(remuda._butler_send, alias, leader, text)
   elseif type(remuda.log) == 'function' then
     ok, sent = pcall(remuda.log, 'warn', text)
     sent = ok
   end
+  return ok and sent ~= false and sent ~= nil
+end
+
+local function report(name, agent, alias, state)
+  if state.reported or state.reporting then return end
+  local response = state.entry and state.entry.response or 'report'
+  if response == 'auto' then response = 'report' end -- only after the automatic answer failed
+  local text = 'Butler stopped writes: agent=' .. agent.kind .. ' session=' .. name
+    .. ' state=' .. state.id .. ' response=' .. response .. '. '
+    .. (state.auto_failed and 'Its automatic answer did not take effect. ' or '')
+    .. HINT[response] .. ' No input was sent.'
+    .. (state.audited and '' or ' Audit unavailable; writes remain stopped.')
+  state.reporting = true
+  local sent = notify(name, agent, alias, text)
   state.reporting = nil
-  if ok and sent ~= false and sent ~= nil then
+  if sent then
     state.reported = true
     audit(name, agent, state, 'dialog_reported', 'report', 'queued')
   end
@@ -98,14 +111,8 @@ local function startup_owned(name, agent, screen, signature)
     end
     return true
   end
-  -- Teach's exact informational options still belong to its defer-only launch
-  -- handler; a historical title cannot bless any other choice block.
-  if agent.kind == 'claude' and full and full.title == 'Teach auto mode' then
-    for _, label in ipairs(labels) do
-      if label ~= 'not now' and label ~= "don't show again" then return false end
-    end
-    return true
-  end
+  -- Teach auto mode is answered by the dispatcher (claude_teach_auto_mode);
+  -- launch only defers the first task while it is on screen.
   return false
 end
 
@@ -173,6 +180,37 @@ local function current_geometry(screen, geometry)
   return table.concat(current, '\n')
 end
 
+-- The agent file's dialog_states list (agents/claudecode.lua, agents/codex.lua)
+-- names each recognised state and its response; docs/butler.md lists them.
+local function state_for(kind, heading, signature, context)
+  local startup = (remuda._butler_agent_startup or {})[kind] or {}
+  local labels = {}
+  for line in (signature .. '\n'):gmatch('(.-)\n') do
+    local _, label = remuda._butler_compaction.numbered_option(line)
+    if label then labels[#labels + 1] = label:gsub('%s+$', '') end
+  end
+  for _, entry in ipairs(startup.dialog_states or {}) do
+    if not entry.screen then
+      local hit = (entry.heading == nil or entry.heading == heading)
+        and (entry.requires == nil or signature:find(entry.requires, 1, true) ~= nil)
+      if hit and entry.match then
+        local ok, value = pcall(entry.match, heading, context, labels)
+        hit = ok and value == true
+      end
+      if hit then return entry end
+    end
+  end
+end
+
+local function scan_heading(kind, lower)
+  local startup = (remuda._butler_agent_startup or {})[kind] or {}
+  for _, entry in ipairs(startup.dialog_states or {}) do
+    if entry.scan and entry.heading == lower then return true end
+  end
+end
+
+-- Returns signature, state id and its dialog_states entry (nil for startup
+-- dialogs owned by the launch flow's own parsers).
 local function exception_signature(kind, screen, signature)
   if not signature then return nil end
   local start, from = nil, 1
@@ -196,16 +234,13 @@ local function exception_signature(kind, screen, signature)
     end
   end
   heading = heading:match('^%s*(.-)%s*$'):lower()
+  local compaction = remuda._butler_compaction
   if kind == 'codex' then
-    local tail = remuda._butler_compaction.bottom_screen_lines(prefix, 32)
+    local tail = compaction.bottom_screen_lines(prefix, 32)
     for i = #tail, 1, -1 do
       local line = tail[i]:match('^%s*(.-)%s*$')
       local lower = line:lower()
-      local approval = lower == 'would you like to run the following command?'
-        or lower == 'would you like to make the following edits?'
-        or lower == 'would you like to grant these permissions?'
-        or lower == 'would you like to send input to the existing terminal?'
-      if approval then heading = lower; break end
+      if scan_heading(kind, lower) then heading = lower; break end
       -- Recognized approval header fields and command/diff rows may separate
       -- the title from choices. A new unrelated heading ends the search.
       if line ~= '' and not line:match('^Reason:') and not line:match('^Thread:')
@@ -215,47 +250,40 @@ local function exception_signature(kind, screen, signature)
           and not line:match('^%d+%s') and not line:match('^%d+%s*[+%-]') then break end
     end
   end
-  local known = heading == 'switch model?' or heading == 'change effort level?'
-    or heading == 'do you want to proceed?'
-  if kind == 'codex' then
-    known = known or heading == 'select model and effort'
-      or heading:match('^select reasoning level for gpt%-[%w%.%-]+$') ~= nil
-      or heading == 'would you like to run the following command?'
-      or heading == 'would you like to make the following edits?'
-      or heading == 'would you like to grant these permissions?'
-      or heading == 'would you like to send input to the existing terminal?'
-    -- The interruption text alone is historical output. Only a current choice
-    -- immediately following it is an exceptional confirmation surface.
-    known = known or (heading:match('^automatic approval review rejected too many approval requests for this turn %(') ~= nil
-      and heading:match('reviews%); interrupting the turn%.$') ~= nil)
-  elseif kind == 'claude' then
-    known = known or heading == 'do you want to allow claude to fetch this content?'
-    -- Session-limit UI uses this title together with these exact options.
-    known = known or (heading == 'what do you want to do?'
-      and signature:find('Stop and wait for limit to reset', 1, true) ~= nil)
-  end
-  if known then return heading .. '\n' .. signature end
-  -- Trust/update/Teach screens have established, agent-specific parsers. Check
+  local lines = compaction and compaction.bottom_screen_lines
+  local context = lines and table.concat(lines(prefix, 6), '\n') .. '\n' .. signature or signature
+  local entry = state_for(kind, heading, signature, context)
+  if entry then return heading .. '\n' .. signature, entry.id, entry end
+  -- Trust/update screens have established, agent-specific parsers. Check
   -- the current choice segment plus nearby context, never the full scrollback.
   local startup = (remuda._butler_agent_startup or {})[kind] or {}
   local chooser = remuda._butler_chooser
-  local compaction = remuda._butler_compaction
-  local lines = compaction and compaction.bottom_screen_lines
-  local context = lines and table.concat(lines(prefix, 4), '\n') .. '\n' .. signature or signature
   local modal = chooser and chooser.startup_modal and chooser.startup_modal(startup, context)
-  if modal and modal.trust and chooser.trust_plan(modal, context) then return context end
-  if modal and (modal.update or modal.title == 'Teach auto mode') then
+  if modal and modal.trust and chooser.trust_plan(modal, context) then
+    return context, kind .. '_trust', { id = kind .. '_trust', response = 'approval' }
+  end
+  if modal and modal.update then
     local count = 0
     for line in (signature .. '\n'):gmatch('(.-)\n') do
       local _, label = compaction.numbered_option(line)
       if label then
         label, count = label:lower():gsub('%s+$', ''), count + 1
-        if modal.update then
-          if label ~= 'skip' and not label:match('^skip ') and not label:match('^update now') then return nil end
-        elseif label ~= 'not now' and label ~= "don't show again" then return nil end
+        if label ~= 'skip' and not label:match('^skip ') and not label:match('^update now') then return nil end
       end
     end
-    if count > 0 then return context end
+    if count > 0 then return context, 'codex_update', { id = 'codex_update', response = 'report' } end
+  end
+end
+
+-- Screen-only states (no numbered choice block), checked on the bottom lines.
+local function screen_state(kind, screen)
+  local startup = (remuda._butler_agent_startup or {})[kind] or {}
+  local tail = remuda._butler_compaction.bottom_screen_lines(screen, 16)
+  for _, entry in ipairs(startup.dialog_states or {}) do
+    if entry.screen then
+      local ok, hit = pcall(entry.match, tail)
+      if ok and hit == true then return entry.id, table.concat(tail, '\n'), entry end
+    end
   end
 end
 
@@ -266,11 +294,15 @@ local function classify(name, agent, screen)
   local geometry = compaction and compaction.unknown_dialog_signature
   local signature = current_geometry(screen, geometry)
   local probes = { unknown = function(current)
-    return exception_signature(agent.kind, current, current_geometry(current, geometry))
+    return (exception_signature(agent.kind, current, current_geometry(current, geometry)))
   end }
   if legacy_owned(name, agent, screen, signature) then return nil, nil, true end
   local picker = signature and startup.picker and startup.picker(screen)
   if picker then return "codex_" .. picker.kind .. "_picker", picker.signature end
+  local current, id, entry = exception_signature(agent.kind, screen, signature)
+  if current then return id, current, nil, entry end
+  id, current, entry = screen_state(agent.kind, screen)
+  if id then return id, current, nil, entry end
   for _, descriptor in ipairs(startup.blocking or {}) do
     assert(descriptor.risk == 'report' and type(descriptor.id) == 'string'
       and type(descriptor.match) == 'function', 'invalid reporting-only dialog descriptor')
@@ -279,31 +311,120 @@ local function classify(name, agent, screen)
   end
   -- Screen recognition is not an authorization requirement. Only a positively
   -- detected exceptional state stops input, including a nonempty composer after
-  -- type_text whose first Return was dropped.
-  return nil, nil, true
+  -- type_text whose first Return was dropped. An unrecognised current numbered
+  -- choice is returned separately: it is reported, but input stays allowed.
+  local choice = signature and not (signature:sub(1, 3) == '╭' or signature:sub(1, 3) == '┌'
+    or signature:sub(1, 3) == '╔') and signature or nil
+  return nil, nil, true, nil, choice
 end
 
-local function observe(name, agent, alias, instance, screen, failure)
+-- Answer a recognised harmless dialog (response = "auto") by the text of its
+-- `choose` option: arrow keys onto it, then Return once a later capture shows
+-- it selected. Each key is audited first and the state rechecked after the
+-- audit. After AUTO_LIMIT tries the state is reported like any other.
+M.auto_limit = 4
+local function choice_plan(screen, choose)
+  local geometry = remuda._butler_compaction.unknown_dialog_signature
+  local block = current_geometry(screen, geometry)
+  if not block then return nil end
+  local labels, marked, target = {}, nil, nil
+  for line in (block .. '\n'):gmatch('(.-)\n') do
+    local number, label, selected = remuda._butler_compaction.numbered_option(line)
+    if number then
+      labels[#labels + 1] = label
+      if selected then marked = #labels end
+      if label:gsub('%s+$', ''):lower() == choose:lower() then
+        if target then return nil end
+        target = #labels
+      end
+    end
+  end
+  if not marked or not target then return nil end
+  local moves = {}
+  for _ = 1, math.abs(target - marked) do moves[#moves + 1] = target > marked and '<down>' or '<up>' end
+  return { moves = moves, selected = target == marked }
+end
+
+local function auto_answer(name, agent, alias, state, screen)
+  local entry = state.entry
+  if type(remuda._butler_human_active) == 'function' then
+    local ok, active = pcall(remuda._butler_human_active, name)
+    if ok and active then return end -- someone is typing in the pane: leave it to them
+  end
+  state.auto_steps = (state.auto_steps or 0) + 1
+  local plan = state.auto_steps <= M.auto_limit and choice_plan(screen, entry.choose)
+  local originals = remuda._butler_dialog_originals
+  if not plan or not originals or not originals.key then
+    state.auto_failed = true
+    return report(name, agent, alias, state)
+  end
+  local keys = plan.selected and { 'RET' } or plan.moves
+  for _, key in ipairs(keys) do
+    local action = 'key/' .. key
+    if not audit(name, agent, state, 'dialog_action', action, 'auto:' .. entry.choose) then
+      state.auto_failed = true
+      return report(name, agent, alias, state)
+    end
+    -- The audit can yield: the same dialog must still be current.
+    local captured, now = pcall(remuda.capture, name)
+    local ok, id, signature = pcall(classify, name, agent, captured and now or nil)
+    if not ok or id ~= state.id or signature ~= state.signature or states[name] ~= state then
+      audit(name, agent, state, 'dialog_action_result', action, 'not_written')
+      return
+    end
+    local sent, result = pcall(originals.key, name, key)
+    local written = sent and result ~= false
+    audit(name, agent, state, 'dialog_action_result', action, written and 'returned' or 'not_written')
+    if not written then return end
+  end
+  if plan.selected and type(remuda.log) == 'function' then
+    pcall(remuda.log, 'info', 'Butler answered ' .. state.id .. ' in ' .. name .. ': ' .. entry.choose)
+  end
+end
+
+-- An unrecognised current choice does not stop input (owner decision
+-- 2026-10-15), but one that stays unchanged is reported once: the session
+-- may be waiting for an answer nobody sees.
+M.unknown_report_seconds = 60
+M.clock = os.time
+local function watch_unknown(name, agent, alias, state, choice)
+  if not choice then state.unknown = nil; return end
+  local seen = state.unknown
+  if not seen or seen.signature ~= choice then
+    state.unknown = { signature = choice, since = M.clock() }
+    return
+  end
+  if seen.reported or M.clock() - seen.since < M.unknown_report_seconds then return end
+  local record = { instance = state.instance, id = 'unknown_choice', signature = choice }
+  audit(name, agent, record, 'dialog_reported', 'report', 'unrecognised_choice_input_allowed')
+  seen.reported = notify(name, agent, alias, 'Butler sees an unrecognised choice dialog: agent=' .. agent.kind
+    .. ' session=' .. name .. ' state=unknown_choice response=report. It has not changed for '
+    .. M.unknown_report_seconds .. ' seconds; the session may be waiting for an answer.'
+    .. ' Input is not stopped and Butler chooses no option.')
+end
+
+local function observe(name, agent, alias, instance, screen, failure, ticking)
   local state = states[name]
   if not state or state.instance ~= instance or state.agent ~= agent then
     state = { instance = instance, agent = agent, captures = 0 }
     states[name] = state
   end
-  local ok, id, signature, resolved
+  local ok, id, signature, resolved, entry, choice
   if failure then
     ok, id, signature = true, failure, failure
   else
-    ok, id, signature, resolved = pcall(classify, name, agent, screen)
+    ok, id, signature, resolved, entry, choice = pcall(classify, name, agent, screen)
   end
-  if not ok then id, signature, resolved = nil, nil, true end
+  if not ok then id, signature, resolved, entry, choice = nil, nil, true, nil, nil end
+  watch_unknown(name, agent, alias, state, not id and choice or nil)
   if id then
+    if state.id ~= id then state.auto_steps, state.auto_failed = nil, nil end
     if state.id ~= id or state.signature ~= signature then
-      state.id, state.signature, state.captures = id, signature, 0
+      state.id, state.signature, state.captures, state.entry = id, signature, 0, entry
       state.audited, state.reported = nil, nil
       local diagnostics = remuda._butler_diagnostics
       if diagnostics and type(diagnostics.record) == 'function' then
-        local reason = id == 'unknown_choice' and 'heuristic_unknown_choice'
-          or (id == 'capture_unavailable' or id == 'session_unavailable'
+        local reason = (id == 'capture_unavailable' or id == 'session_unavailable'
             or id == 'session_replaced' or id == 'detection_unavailable') and id
           or 'heuristic_dialog'
         pcall(diagnostics.record, 'control', 'stopped', reason, agent.id)
@@ -313,18 +434,24 @@ local function observe(name, agent, alias, instance, screen, failure)
     state.blocked = true -- stop on the first capture, not after debounce
     if state.captures >= 2 then
       if not state.audited then state.audited = audit(name, agent, state, 'dialog_blocked') end
-      report(name, agent, alias, state)
+      if entry and entry.response == 'auto' and not state.auto_failed and state.audited then
+        -- Only the periodic tick answers; a writer's gate check never sends keys.
+        if ticking then auto_answer(name, agent, alias, state, screen) end
+      else
+        report(name, agent, alias, state)
+      end
     end
   elseif state.blocked and resolved then
     if audit(name, agent, state, 'dialog_resolved', 'wait', 'no_exception_detected') then
-      state.id, state.signature, state.blocked = nil, nil, nil
+      state.id, state.signature, state.blocked, state.entry = nil, nil, nil, nil
       state.captures, state.reported, state.audited = 0, nil, nil
+      state.auto_steps, state.auto_failed = nil, nil
     end
   end
   return not state.blocked, state
 end
 
-function M.check(name)
+local function check(name, ticking)
   local agent, alias = agent_for(name)
   if not agent then return true end
   -- ls exposes instance_id on the core versions used by launch's identity gate;
@@ -342,8 +469,9 @@ function M.check(name)
   -- Missing/malformed captures are unknown screens, not identified modals.
   -- Session availability and instance fencing above remain mandatory.
   if not captured or type(screen) ~= 'string' then screen = nil end
-  return observe(name, agent, alias, instance, screen, failure)
+  return observe(name, agent, alias, instance, screen, failure, ticking)
 end
+function M.check(name) return check(name, false) end
 
 function M.tick()
   local listed, sessions = pcall(remuda.ls)
@@ -352,7 +480,7 @@ function M.tick()
   for _, session in ipairs(sessions) do
     if session.alive then
       live[session.name] = true
-      if agent_for(session.name) then M.check(session.name) end
+      if agent_for(session.name) then check(session.name, true) end
     end
   end
   for name in pairs(states) do if not live[name] then states[name] = nil end end

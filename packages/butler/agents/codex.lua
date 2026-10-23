@@ -127,12 +127,32 @@ remuda._butler_agent_startup.codex = {
     else return false end
     return target or phase == "escape"
   end,
-  -- No invented Codex denial/cache signatures: unfamiliar choices only.
-  blocking = {
-    { id = "unknown_choice", risk = "report", match = function(screen, probes)
-      return probes.unknown and probes.unknown(screen)
+  -- Recognised dialog states (see claudecode.lua and docs/butler.md).
+  -- `scan` headings may sit above approval metadata and command/diff rows.
+  -- No invented Codex denial/cache signatures beyond these.
+  dialog_states = {
+    { id = "codex_command_approval", response = "approval", scan = true,
+      heading = "would you like to run the following command?" },
+    { id = "codex_edit_approval", response = "approval", scan = true,
+      heading = "would you like to make the following edits?" },
+    { id = "codex_permissions_approval", response = "approval", scan = true,
+      heading = "would you like to grant these permissions?" },
+    { id = "codex_terminal_input_approval", response = "approval", scan = true,
+      heading = "would you like to send input to the existing terminal?" },
+    -- The guardian (auto-review) refusal: a classifier decision, never answered.
+    { id = "codex_auto_review_refused", response = "approval", match = function(heading)
+      return heading:match("^automatic approval review rejected too many approval requests for this turn %(") ~= nil
+        and heading:match("reviews%); interrupting the turn%.$") ~= nil
     end },
+    { id = "codex_model_effort_dialog", response = "report", heading = "select model and effort" },
+    { id = "codex_reasoning_dialog", response = "report", match = function(heading)
+      return heading:match("^select reasoning level for gpt%-[%w%.%-]+$") ~= nil
+    end },
+    { id = "codex_model_confirm", response = "report", heading = "switch model?" },
+    { id = "codex_effort_confirm", response = "report", heading = "change effort level?" },
+    { id = "codex_proceed_confirm", response = "approval", heading = "do you want to proceed?" },
   },
+  blocking = {},
   ready = function(screen)
     local lower = screen:lower()
     for _, marker in ipairs(codex_modal_markers) do
