@@ -39,7 +39,10 @@ check("edit", event("?status", { content = { msgtype = "m.text", body = "?status
 check("two lines", event("?status\n?help"), "invalid_line")
 check("control character", event("?sta\0tus"), "invalid_line")
 check("bidi override", event("?status\226\128\174"), "invalid_line")
-check("oversize", event("?" .. string.rep("a", 2000)), "invalid_line")
+check("5000 characters", event("?" .. string.rep("a", 4999)), nil)
+check("oversize", event("?" .. string.rep("a", 5000)), "invalid_line")
+check("5000 Hangul", event("?" .. string.rep("\237\149\156", 4999)), nil)
+check("oversize Hangul", event("?" .. string.rep("\237\149\156", 5000)), "invalid_line")
 check("notice msgtype", event("?status", { content = { msgtype = "m.notice", body = "?status" } }), "unreadable_content")
 
 local state = { processed = {} }

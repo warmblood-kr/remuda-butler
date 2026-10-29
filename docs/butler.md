@@ -456,7 +456,8 @@ its identity (see Butler #264). The real protection is the owner allowlist,
 the live-sync and rate checks below, and the explicit off switches.
 
 An enabled line must come from an allowlisted owner in a live Matrix sync, be
-no more than five minutes old, contain one line of at most 2000 bytes, and fit
+no more than five minutes old, contain one line of at most 5000 characters (Unicode code points, so
+5000 Hangul fit), and fit
 the limit of 10 lines per 10 minutes. the switch verbs are for a person at the
 machine; an agent is refused.
 

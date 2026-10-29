@@ -6,7 +6,18 @@ local M = butler.typed_lines or {}
 if type(remuda) == "table" then butler.typed_lines = M end
 
 local MAX_AGE_SECONDS = 300
-local MAX_LINE_BYTES = 2000
+-- An owner line is at most MAX_LINE_CHARS characters (Unicode code points, so
+-- 5000 Hangul fit). MAX_LINE_BYTES only backstops malformed UTF-8: 5000
+-- four-byte characters is the largest valid line.
+local MAX_LINE_CHARS = 5000
+local MAX_LINE_BYTES = 4 * MAX_LINE_CHARS
+M.MAX_LINE_CHARS, M.MAX_LINE_BYTES = MAX_LINE_CHARS, MAX_LINE_BYTES
+
+-- Code points in UTF-8 text: every byte that is not a continuation byte.
+local function char_count(text)
+  return select(2, text:gsub("[^\128-\191]", ""))
+end
+
 local RATE_WINDOW_SECONDS = 600
 local RATE_LIMIT = 10
 
@@ -67,7 +78,7 @@ function M.accept(state, event, now, cfg)
   end
 
   local body = content.body
-  if #body > MAX_LINE_BYTES or body:find("[\r\n]") or has_forbidden_character(body) then
+  if #body > MAX_LINE_BYTES or char_count(body) > MAX_LINE_CHARS or body:find("[\r\n]") or has_forbidden_character(body) then
     return reject("invalid_line")
   end
 

@@ -5,6 +5,9 @@ local FINAL = {delivered=true,failed=true,cancelled=true}
 local STATES = {queued=true,dispatch_intent=true,uncertain=true,quarantined=true,
  delivered=true,failed=true,cancelled=true}
 local LIMIT, PENDING, BYTES, FILE = 256, 32, 2*1024*1024, 3*1024*1024
+-- Text caps per route: prepared text is registered at up to 8 KiB; an owner
+-- line is 5000 characters, up to 4 bytes each (see typed_lines.lua).
+local TEXT_BYTES = {prepared=8192, owner_line=20000}
 local function string_ok(v, limit) return type(v)=='string' and #v>0 and #v<=(limit or 512) end
 local FIELDS = {'id','route','submission','text','session','agent_id','session_marker','instance_id',
  'owner','event_id','approval_id','approval_nonce','origin_digest'}
@@ -16,7 +19,7 @@ local function digest(record, hash)
   return hash(table.concat(parts))
 end
 local function valid(record, hash)
-  if type(record)~='table' or not string_ok(record.id) or not string_ok(record.text,8192)
+  if type(record)~='table' or not string_ok(record.id) or not string_ok(record.text,TEXT_BYTES[record.route] or 8192)
       or (record.route~='prepared' and record.route~='owner_line') then return false end
   for _,key in ipairs({'session','agent_id','session_marker','instance_id','owner','event_id'}) do
     if not string_ok(record[key]) then return false end
