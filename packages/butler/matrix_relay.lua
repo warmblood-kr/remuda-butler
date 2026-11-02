@@ -1,5 +1,13 @@
 -- L3 Matrix relay: durable state + event delivery over the L1 request word.
 -- The relay owns no transport details; request_json is its only HTTP composite.
+
+-- Diagnostics are observational: unavailable/broken recording cannot affect mail or control.
+local function diagnostic(outcome, reason, correlation)
+  local diagnostics = remuda._butler_diagnostics
+  if diagnostics and type(diagnostics.record) == "function" then
+    pcall(diagnostics.record, "matrix", outcome, reason, correlation)
+  end
+end
 local matrix = assert(remuda.butler and remuda.butler.matrix,
   "load butler/matrix_request before butler/matrix_relay")
 local typed_lines = assert(remuda.butler.typed_lines,
@@ -8,9 +16,17 @@ local approve_text = assert(remuda.butler.approve_text,
   "load butler/approve_text before butler/matrix_relay")
 local status_command = assert(remuda.butler.status_command,
   "load butler/status_command before butler/matrix_relay")
+if not (remuda.butler.matrix and remuda.butler.matrix.mention_normalization) then
+  remuda.exec("butler/matrix_mentions")
+end
+local mention_normalization = assert(remuda.butler.matrix.mention_normalization,
+  "load butler/matrix_mentions before butler/matrix_relay")
 -- Trust words are bound at load (main.lua execs matrix_request before
 -- this file), so a later redefinition of the public entry cannot change them.
 local read_config = matrix.read_config
+assert(matrix.delivery_policy, "load butler/matrix_delivery_policy before butler/matrix_relay")
+-- Do not capture policy functions here: a policy-only reevaluation publishes
+-- its interface on the retained matrix table for already-refactored instances.
 local json = assert(remuda.json, "Matrix requires core remuda.json")
 local relay = matrix.relay or {}
 matrix.relay = relay
@@ -76,7 +92,7 @@ local function query(path, params)
   local parts = {}
   local order
   if params.from ~= nil then order = { "from", "dir", "limit" }
-  elseif params.since ~= nil then order = { "since", "timeout" }
+  elseif params.since ~= nil then order = { "since", "timeout", "full_state", "filter" }
   else order = { "timeout", "dir", "limit" } end
   for _, key in ipairs(order) do
     local value = params[key]
@@ -347,24 +363,120 @@ local function approval_answer_fields(ev)
   return targets, verdict, explicit_id, text_verdict, content.msgtype
 end
 
-local function mentions(content, body, mxid)
-  local mentions = content and content["m.mentions"]
-  if type(mentions) == "table" and type(mentions.user_ids) == "table" then
-    for _, user in ipairs(mentions.user_ids) do if user == mxid then return true end end
-  end
-  if type(body) ~= "string" then return false end
+-- Whole-token scan: needle must not touch an mxid character on either side.
+local function has_token(text, needle)
   local at = 1
   while true do
-    local first, last = body:find(mxid, at, true)
+    local first, last = text:find(needle, at, true)
     if not first then return false end
-    local before = first > 1 and body:sub(first - 1, first - 1) or nil
-    local after = body:sub(last + 1, last + 1)
+    local before = first > 1 and text:sub(first - 1, first - 1) or nil
+    local after = text:sub(last + 1, last + 1)
     local boundary = "[%w._=/%-:@]"
     if (not before or not before:match(boundary)) and (after == "" or not after:match(boundary)) then
       return true
     end
     at = first + 1
   end
+end
+
+-- Element's autocomplete pill carries the mxid only in formatted_body, as an
+-- href to matrix.to (plain or percent-encoded), when m.mentions is absent.
+-- The <mx-reply> fallback quotes the parent message, so it never counts.
+local function pill_mentions(formatted, mxid)
+  if type(formatted) ~= "string" then return false end
+  formatted = formatted:gsub("<mx%-reply>.-</mx%-reply>", "")
+  local encoded = mxid:gsub("@", "%%40"):gsub(":", "%%3a"):lower()
+  local lowered = formatted:lower()
+  for _, form in ipairs({ { formatted, mxid }, { lowered, encoded } }) do
+    for _, quote in ipairs({ '"', "'" }) do
+      local head = "href=" .. quote .. "https://matrix.to/#/" .. form[2]
+      local at = 1
+      while true do
+        local first, last = form[1]:find(head, at, true)
+        if not first then break end
+        if form[1]:sub(last + 1, last + 1):match("^[\"'?]$") then return true end
+        at = first + 1
+      end
+    end
+  end
+  return false
+end
+
+local function mentions(content, body, mxid)
+  local mentions = content and content["m.mentions"]
+  if type(mentions) == "table" and type(mentions.user_ids) == "table" then
+    for _, user in ipairs(mentions.user_ids) do if user == mxid then return true end end
+  end
+  if type(body) == "string" and has_token(body, mxid) then return true end
+  return pill_mentions(content and content.formatted_body, mxid)
+end
+
+-- Notification permission is room state, not message text or owner trust.
+-- A complete sync distinguishes absent power levels from state not yet fetched.
+local function notification_state_event(room, event)
+  if room.unusable or type(event) ~= "table" or event.state_key ~= "" then return end
+  if event.type == "m.room.power_levels" then
+    room.power, room.power_seen = event.content, true
+  elseif event.type == "m.room.create" then
+    room.create, room.creator = event.content, event.sender
+  end
+end
+
+-- Inline sync filter: state limited to the two events notification permission
+-- reads, in configured rooms only. Sorted so the request URL is stable.
+local function notification_state_filter(rooms)
+  local ids = {}
+  for room_id in pairs(rooms) do ids[#ids + 1] = encode(room_id) end
+  table.sort(ids)
+  return '{"room":{"state":{"types":["m.room.create","m.room.power_levels"],"rooms":['
+    .. table.concat(ids, ",") .. "]}}}"
+end
+
+local function room_mention_allowed(room, content, sender)
+  local function object(value)
+    if type(value) ~= "table" or value == json.null or getmetatable(value) == JSON_ARRAY_MT then
+      return false
+    end
+    for key in pairs(value) do if type(key) ~= "string" then return false end end
+    return true
+  end
+  local mention = content["m.mentions"]
+  if not object(mention) or mention.room ~= true or not room or room.unusable then return false end
+  local function integer(value, default)
+    if value == nil then return default end
+    if type(value) == "number" and value == value and value ~= math.huge
+        and value >= -9007199254740991 and value <= 9007199254740991
+        and value % 1 == 0 then return value end
+  end
+  local create = room.create
+  local version = type(create) == "table" and (create.room_version or "1") or nil
+  local known_version = type(version) == "string" and version:match("^%d+$")
+    and tonumber(version) >= 1 and tonumber(version) <= 12
+  local creator = known_version and type(create) == "table" and
+    (tonumber(version) <= 10 and create.creator or nil) or nil
+  if known_version and tonumber(version) >= 11 then creator = room.creator end
+  local is_creator = sender == creator
+  if type(create) == "table" and known_version and tonumber(version) >= 12
+      and type(create.additional_creators) == "table" then
+    for _, user in ipairs(create.additional_creators) do
+      if user == sender then is_creator = true end
+    end
+  end
+  local power = room.power
+  if power == nil and not room.power_seen then
+    if not room.complete or not known_version then return false end
+    return is_creator -- all other users default to 0; notification threshold is 50.
+  end
+  if not object(power) then return false end
+  if power.notifications ~= nil and not object(power.notifications) then return false end
+  if power.users ~= nil and not object(power.users) then return false end
+  local threshold = integer(power.notifications and power.notifications.room, 50)
+  local default_level = integer(power.users_default, 0)
+  if default_level == nil then return false end
+  local level = integer(power.users and power.users[sender], default_level)
+  if threshold == nil or level == nil then return false end
+  if is_creator and known_version and tonumber(version) >= 12 then return true end
+  return level >= threshold
 end
 
 local function media_uri(content)
@@ -729,6 +841,7 @@ function relay.new(options)
   local context_fetching, context_fetch_handles = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
   local untrusted_receive_times = {}
+  local notification_rooms, notification_full_state = {}, true
   local typed_line_refusal_at
   local status_reply_at = {}
   -- ponytail: in memory, a restart may repeat the line once
@@ -813,8 +926,25 @@ function relay.new(options)
     return cfg.b2b_max_turns
   end
 
+  function instance:notification_mode(room_id)
+    return matrix.notification_mode(cfg, room_id)
+  end
+
+  function instance:set_notification_mode(room_id, mode)
+    if cfg.rooms[room_id] == nil then return false end
+    cfg.room_notifications = cfg.room_notifications or {}
+    local default = matrix.notification_mode({ home_room = cfg.home_room, all_room = cfg.all_room,
+      rooms = cfg.rooms, room_notifications = {} }, room_id)
+    cfg.room_notifications[room_id] = mode ~= default and mode or nil
+    return true
+  end
+
   function instance:note_own_turn(room, root)
-    return note_turn(room, root, "agent")
+    -- The loop budget counts messages from other Butlers, not our progress
+    -- reports. Do not reset the peer streak either: genuine ping-pong must
+    -- still stop when the other Butler reaches the limit.
+    local turns = b2b_turns[room] and b2b_turns[room][root]
+    return turns and turns.n or 0
   end
 
   local approval = remuda.butler and remuda.butler.approval
@@ -981,6 +1111,21 @@ function relay.new(options)
     return true
   end
 
+  -- Known Butler/owner mxids only; ambiguous or unknown names stay plain text.
+  function instance:resolve_mention(localpart, server)
+    local found
+    local function consider(mxid)
+      local l, s = mxid:match("^@([^:]+):(.+)$")
+      if l == localpart and (not server or s == server) then
+        if found and found ~= mxid then found = false elseif found == nil then found = mxid end
+      end
+    end
+    if cfg.self_mxid then consider(cfg.self_mxid) end
+    for mxid in pairs(cfg.butler_senders or {}) do consider(mxid) end
+    for mxid in pairs(cfg.allowed_senders or {}) do consider(mxid) end
+    return found or nil
+  end
+
   local function own_event_for(event_id)
     for room_id, events in pairs(state.own_events) do
       if cfg.rooms[room_id] ~= nil then
@@ -1141,7 +1286,7 @@ function relay.new(options)
       if pending >= MAX_REPLY_OUTBOX then return nil, "Matrix mail reply outbox is full" end
       local room = route.room_id
       local root = instance:thread_root_for_event(route.event_id)
-      if instance:b2b_stopped(room, root) then
+      if route.allowlisted_human ~= true and instance:b2b_stopped(room, root) then
         local safe_room = terminal_safe_field(room, 512)
         local shown_root = matrix.shown_event_id(root)
         local root_is_shown = shown_root ~= "(id not shown)"
@@ -1204,6 +1349,7 @@ function relay.new(options)
 
   local deliver_pending
   local function schedule_delivery_retry(id, delay)
+    diagnostic("retry", "retry_scheduled", id)
     local elapsed = 0
     local timer
     timer = remuda.schedule({ every = 1, run = function()
@@ -1298,6 +1444,13 @@ function relay.new(options)
       for _, id in ipairs(ids) do
         local event = state.pending[id]
         if event and not delivery_retry_waiting[id] then
+          local subscriptions = state.subscriptions[event.room_id] or {}
+          if not matrix.delivery_policy.accept_pending(cfg, event.room_id, subscriptions, event) then
+            diagnostic("filtered", "filter_policy", id)
+            add_processed(state, event.event_id)
+            state.pending[id] = nil
+            persist()
+          else
           resolve_pending_thread_context(event)
           local needs_context = event.thread_root and event.trusted == true
             and not event.context_mail_id and not event.references
@@ -1312,6 +1465,7 @@ function relay.new(options)
           else
             local ok, result = pcall(deliver, event)
             if ok and result ~= nil then
+              diagnostic("delivered", "delivery_ok", id)
               if type(result) == "table" and type(result.id) == "string" and result.id ~= "" then
                 state.routes[result.id] = { room_id = event.room_id, event_id = event.event_id,
                   thread_root = event.thread_root, in_reply_to = event.in_reply_to,
@@ -1319,14 +1473,16 @@ function relay.new(options)
                   allowlisted_human = event.trusted == true and event.from_agent == false,
                   room_kind = event.room_kind,
                   created_at = event.created_at }
-                if event.subscribe_thread and event.thread_root then
-                  subscribe(state, event.room_id, event.thread_root, event.context_mail_id or result.id)
+                local followed_root = event.thread_root or (event.subscribe_thread and event.event_id or nil)
+                if event.subscribe_thread and followed_root then
+                  subscribe(state, event.room_id, followed_root, event.context_mail_id or result.id)
                 end
                 trim_map(state.routes, MAX_MAIL_ROUTES, "created_at")
                 persist()
               end
               append_ack(id)
             elseif not ok then
+              diagnostic("error", "delivery_failed", id)
               local attempts = (tonumber(event._relay_failures) or 0) + 1
               event._relay_failures = attempts
               if attempts >= MAX_DELIVERY_FAILURES then
@@ -1345,10 +1501,13 @@ function relay.new(options)
                   io.stderr:write("butler Matrix delivery failed for " .. tostring(id) .. ": " .. tostring(result) .. "\n")
                 end)
               end
+            else
+              diagnostic("deferred", "delivery_deferred", id)
             end
+          end
+          end
         end
       end
-    end
     reconcile_acks()
   end
 
@@ -1550,15 +1709,23 @@ function relay.new(options)
   end
 
   local function typed_line_room_allowed(event, room_id)
-    if room_id == cfg.home_room then return true end
     local content = type(event.content) == "table" and event.content or {}
     local thread_root = relation_fields(content)
     local subscriptions = state.subscriptions[room_id] or {}
-    return (thread_root ~= nil and subscriptions[thread_root] ~= nil)
-      or mentions(content, content.body, cfg.self_mxid)
+    return matrix.delivery_policy.accept_received(cfg, room_id, subscriptions, {
+      thread_root = thread_root, is_mention = mentions(content, content.body, cfg.self_mxid),
+    })
   end
 
-  local function check_typed_line(event)
+  local function check_typed_line(event, room_id)
+    local queue = remuda.butler and remuda.butler.owner_input
+    if queue and queue.lookup_owner and cfg.allowed_senders[event.sender] == true
+        and member_kind(event.sender, cfg) == "HUMAN" then
+      local existing = queue.lookup_owner(event, room_id)
+      if existing then
+        return {now=os.time(),ok=true,line=(event.content.body:sub(2):gsub("^ ", "", 1)),form="!",duplicate=true}
+      end
+    end
     local now = os.time()
     trim_typed_line_timestamps(now)
     local ok, reason, line, form = typed_lines.gate({
@@ -1589,6 +1756,29 @@ function relay.new(options)
       target, target_line, target_agent, member_target = resolve_typed_target(line, form)
       if form == "!!" and type(target_agent) == "table" and tostring(target_agent.kind):lower() ~= "claude" then
         ok, reason = false, tostring(target_agent.kind):lower() == "codex" and "shell_codex" or "shell_unsupported"
+      elseif form == "!" and remuda.butler and remuda.butler.owner_input then
+        local queue = remuda.butler.owner_input
+        local called, receipt, failure = pcall(queue.accept_line, target, target_line, event, room_id, true)
+        if not called or not receipt then
+          local why = called and failure or "storage_uncertain"
+          trace_typed_line(event, room_id, form, target_line, target, "not_accepted:" .. tostring(why))
+          local message = why == "storage_uncertain"
+            and ("Queue acceptance is uncertain; check input-queue status before resending this event.")
+            or ("Not accepted into the input queue: " .. tostring(why) .. ".")
+          send_typed_line_reply(event, room_id, message)
+          return true -- No accepted ACK and no processed marker on rejection.
+        end
+        if event.event_id ~= "" then add_processed(state, event.event_id) end
+        if not receipt.duplicate then state.typed_line_timestamps[#state.typed_line_timestamps + 1] = now end
+        -- Queue durability is authoritative even if this secondary checkpoint
+        -- fails. Replayed events use the original ID/payload receipt.
+        pcall(persist)
+        trace_typed_line(event, room_id, form, target_line, target, "queued:" .. receipt.status)
+        -- Acceptance receipts are per-event acknowledgements, not the
+        -- rate-limited refusal notices shared by unrelated owner lines.
+        send_threaded_notice(event, room_id, "Queued input " .. receipt.id .. " for "
+          .. terminal_safe_field(target,128) .. "; status " .. receipt.status .. ".", "input-queue-accepted-")
+        return true
       else
         local policy_ok, may_type = false, false
         local bus = remuda._butler_bus or {}
@@ -1667,6 +1857,9 @@ function relay.new(options)
     local added = {}
     for _, ev in ipairs(type(events) == "table" and events or {}) do
       if type(ev) == "table" then
+        if room_id and notification_rooms[room_id] then
+          notification_state_event(notification_rooms[room_id], ev)
+        end
         local event_id = type(ev.event_id) == "string" and ev.event_id or ""
         if (event_id == "" or (not state.processed[event_id] and not state.pending[event_id]))
           and ev.sender ~= cfg.self_mxid then
@@ -1711,7 +1904,9 @@ function relay.new(options)
           if approval_verdict == "grant" and approval_record and approval_record.kind ~= "guard_action" then
             approval_record, approval_verdict = nil, nil
           end
-          local typed_line_candidate = not approval_record and cfg.allowed_senders[ev.sender] == true
+          local route_mail = false
+          local recovery_line = type(content.body) == "string" and (content.body == "!recover-input" or content.body:match("^!recover%-input%s"))
+          local typed_line_candidate = not recovery_line and not approval_record and cfg.allowed_senders[ev.sender] == true
             and member_kind(ev.sender, cfg) == "HUMAN"
             and type(content.body) == "string" and content.body:sub(1, 1) == "!"
           local typed_line_enabled = typed_line_candidate and cfg.typed_lines == true
@@ -1723,7 +1918,7 @@ function relay.new(options)
           local typed_line_check
           local typed_line_check_failed = false
           if typed_line_enabled and live_sync == true then
-            local checked, result = pcall(check_typed_line, ev)
+            local checked, result = pcall(check_typed_line, ev, room_id or cfg.room)
             if checked then
               typed_line_check = result
             else
@@ -1744,7 +1939,15 @@ function relay.new(options)
               trace_typed_line(ev, room_id or cfg.room, nil, nil, "butler", "refused:not_live")
             end
           end
-          local guard_reply = not approval_record and owner_guard_line(ev, content, live_sync == true, room_id or cfg.room)
+          -- Recovery is handled by code even when the root pane is blocked.
+          -- The owner event is durably consumed BEFORE any cancellation key.
+          local recovery_target = recovery_line and content.body:match("^!recover%-input ([%w_.%-]+)$")
+          local recovery_allowed = recovery_line and not approval_record
+            and typed_lines.accept(state, ev, os.time(), cfg)
+            and approve_text.owner_event_allowed(ev, {room_id=cfg.home_room, created_ms=relay_started_ms}, cfg,
+              live_sync == true, room_id or cfg.room)
+            and member_kind(ev.sender, cfg) == "HUMAN"
+          local guard_reply = not recovery_line and not approval_record and owner_guard_line(ev, content, live_sync == true, room_id or cfg.room)
           local status_matched, status_text, status_commit = false, nil, nil
           if not approval_record and type(content.body) == "string" and content.body:sub(1, 1) == "?"
               and member_kind(ev.sender, cfg) == "HUMAN" then
@@ -1759,7 +1962,26 @@ function relay.new(options)
                 "consumed:" .. trace_reason .. ":" .. (terminal_safe_field(tostring(matched), 64):gsub("%c", " ")))
             end
           end
-          if guard_reply then
+          if recovery_line then
+            -- A rejected recovery line is never forwarded as terminal text.
+            if event_id ~= "" then add_processed(state, event_id) end
+            if cursor then state.since = cursor end
+            local saved, saved_result = pcall(persist)
+            if recovery_allowed and saved and saved_result == true then
+              local dialogs = remuda.butler and remuda.butler.dialogs
+              if not recovery_target then
+                send_threaded_notice(ev, room_id or cfg.room, "Usage: !recover-input SESSION", "input-recovery-")
+              elseif dialogs and type(dialogs.recover_input) == "function" then
+                local ok = pcall(dialogs.recover_input, recovery_target, function(text)
+                  send_threaded_notice(ev, room_id or cfg.room, text, "input-recovery-")
+                end)
+                if not ok then send_threaded_notice(ev, room_id or cfg.room,
+                  "Input recovery stopped. Reissue a fresh command after review; no automatic replay.", "input-recovery-") end
+              else
+                send_threaded_notice(ev, room_id or cfg.room, "Input recovery unavailable on this Butler version.", "input-recovery-")
+              end
+            end
+          elseif guard_reply then
             -- The event is spent before it acts, so a replay after a restart changes nothing.
             if event_id ~= "" then add_processed(state, event_id) end
             if cursor then state.since = cursor end
@@ -1805,8 +2027,11 @@ function relay.new(options)
             persist()
           elseif typed_line_enabled and typed_line_check_failed then
             -- The event was marked processed above; keep this response moving without a retry loop.
+            route_mail = true
           elseif typed_line_enabled and not switch_disabled
               and typed_line_scope_allowed then
+            -- The owner line is typed only after the strict gate above (allowlisted HUMAN sender, live sync, age,
+            -- rate, switches). The typing is additive: the same event then continues to the ordinary mail path.
             if live_sync == true then
               local handled, err = pcall(handle_typed_line, ev, room_id or cfg.room, typed_line_check)
               if not handled then mark_typed_line_error(ev, room_id or cfg.room, err) end
@@ -1815,7 +2040,12 @@ function relay.new(options)
               persist()
               send_typed_line_reply(ev, room_id or cfg.room, typed_line_refusal("not_live"))
             end
+            -- A queue refusal leaves the event unprocessed so a later sync can retry it; mail waits for that retry.
+            route_mail = event_id == "" or state.processed[event_id] == true
           else
+            route_mail = true
+          end
+          if route_mail then
           local reason
           if event_id == "" then reason = "missing_event_id"
           elseif ev.type ~= "m.room.message" then reason = "unsupported_event_type"
@@ -1832,23 +2062,37 @@ function relay.new(options)
             reason = "unsupported_message_type"
           elseif type(content.body) ~= "string" then reason = "missing_text_body" end
           if reason then
+            diagnostic("error", "conversion_failed", event_id)
             quarantine_event(ev, reason)
           else
+          diagnostic("converted", "conversion_ok", event_id)
           local thread_root, in_reply_to = relation_fields(content)
           local media_kind = MEDIA_MSGTYPES[content.msgtype]
           local trusted = cfg.allowed_senders[ev.sender] == true
           local raw_body = media_kind and media_mail_body(content, media_kind) or content.body
+          local mention_ids = {}
+          if trusted and member_kind(ev.sender, cfg) == "HUMAN" and not media_kind
+              and not (in_reply_to and not thread_root) then
+            raw_body, mention_ids = mention_normalization.normalize(content)
+          end
           local body = trusted and mail_body(raw_body) or cap_body(raw_body)
           if in_reply_to and not thread_root then body = strip_reply_fallback(body) end
           local actual_room = room_id or cfg.room
           local sender_kind = member_kind(ev.sender, cfg)
           local is_mention = mentions(content, content.body, cfg.self_mxid)
+          local is_room_mention = room_mention_allowed(notification_rooms[actual_room], content, ev.sender)
           local thread_id = thread_root or in_reply_to
           local subscriptions = state.subscriptions[actual_room] or json.object({})
           state.subscriptions[actual_room] = subscriptions
-          local is_subscribed = thread_root and subscriptions[thread_root] ~= nil
+          local follow_root = thread_root or ev.event_id
+          local auto_followed = false
+          if trusted and is_mention and not subscriptions[follow_root] then
+            auto_followed = subscribe(state, actual_room, follow_root, nil)
+          end
           local is_agent = sender_kind == "AGENT"
-          local accepted = actual_room == cfg.home_room or thread_root == nil or is_subscribed or is_mention
+          local accepted = matrix.delivery_policy.accept_received(cfg, actual_room, subscriptions, {
+            thread_root = thread_root, is_mention = is_mention, is_room_mention = is_room_mention,
+          })
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
           local thread_root_mail_id = thread_root
@@ -1881,8 +2125,10 @@ function relay.new(options)
             end
           end
           if not accepted or rate_capped then
+            diagnostic("filtered", "filter_policy", event_id)
             add_processed(state, ev.event_id)
             if cursor then state.since = cursor end
+            if auto_followed then persist() end
           else
           local root = thread_root or ev.event_id
           if is_agent then note_turn(actual_room, root, "agent")
@@ -1890,15 +2136,21 @@ function relay.new(options)
           state.pending[ev.event_id] = {
             sender = ev.sender, room_id = actual_room, event_id = ev.event_id,
             created_at = timestamp(ev), body = body,
+            normalized_mentions = #mention_ids > 0 and mention_ids or nil,
             thread_root = thread_root, in_reply_to = in_reply_to,
             mxc = valid_media_uri(media_uri(content)) and media_uri(content) or nil,
             room = cfg.rooms[actual_room], room_kind = cfg.rooms[actual_room], context_mail_id = context_mail_id,
             references = references and { references } or nil,
             from_agent = is_agent,
             trusted = trusted,
-            subscribe_thread = thread_root ~= nil and is_mention and trusted,
+            is_mention = is_mention,
+            is_room_mention = is_room_mention,
+            mention_follow_root = is_mention and trusted and subscriptions[follow_root] ~= nil
+              and follow_root or nil,
+            subscribe_thread = is_mention and trusted,
             thread_id = thread_id,
           }
+          diagnostic("routed", "routing_accepted", event_id)
           added[#added + 1] = ev.event_id
           if cursor then state.since = cursor end
           persist()
@@ -2270,6 +2522,41 @@ function relay.new(options)
         remuda._butler_matrix_live_config = cfg
       end
     end
+    if path == SYNC_PATH then
+      local rooms = type(response.rooms) == "table" and response.rooms or {}
+      for _, kind in ipairs({ "leave", "invite" }) do
+        for room_id in pairs(type(rooms[kind]) == "table" and rooms[kind] or {}) do
+          notification_rooms[room_id] = nil
+        end
+      end
+      for room_id in pairs(notification_rooms) do
+        if not cfg.rooms[room_id] then notification_rooms[room_id] = nil end
+      end
+      for room_id, room in pairs(type(rooms.join) == "table" and rooms.join or {}) do
+        if cfg.rooms[room_id] and type(room) == "table" then
+          local snapshot = notification_rooms[room_id] or {}
+          -- Full state is at the START of the timeline. Never use state_after
+          -- as permission for earlier messages. Missing full state fails closed.
+          if notification_full_state then snapshot = {} end
+          if room.state_after ~= nil then snapshot = { unusable = true } end
+          if type(room.state) == "table" and type(room.state.events) == "table" then
+            if notification_full_state then snapshot.complete = true end
+            for _, event in ipairs(room.state.events) do notification_state_event(snapshot, event) end
+            -- Newly joined rooms include full state, including the create event.
+            if snapshot.create ~= nil then snapshot.complete = true end
+          elseif room.timeline and room.timeline.limited == true then
+            snapshot = {}
+          end
+          notification_rooms[room_id] = snapshot
+          if state.since == nil then
+            for _, event in ipairs(room.timeline and room.timeline.events or {}) do
+              notification_state_event(snapshot, event)
+            end
+          end
+        end
+      end
+      if type(response.next_batch) == "string" then notification_full_state = false end
+    end
     if path == SYNC_PATH and state.since == nil then
       if type(response.next_batch) ~= "string" then failed(); return end
       handle_invites(response)
@@ -2333,7 +2620,15 @@ function relay.new(options)
     elseif state.since == nil then
       begin_request(SYNC_PATH, { timeout = "0" }, 10)
     else
-      begin_request(SYNC_PATH, { since = state.since, timeout = tostring(cfg.timeout_ms) }, cfg.timeout_ms / 1000 + 10)
+      local query = { since = state.since, timeout = tostring(cfg.timeout_ms) }
+      if notification_full_state then
+        -- Restart: room mention permission needs state at the timeline start, but
+        -- unfiltered full state can exceed the response cap in large rooms and
+        -- stall live sync. Limit the snapshot to create and power levels for
+        -- configured rooms; the timeline itself is not filtered.
+        query.full_state, query.filter = "true", notification_state_filter(cfg.rooms)
+      end
+      begin_request(SYNC_PATH, query, cfg.timeout_ms / 1000 + 10)
     end
   end
 
@@ -2341,6 +2636,7 @@ function relay.new(options)
     if active then return false end
     generation = generation + 1
     live_sync_ready = false
+    notification_rooms, notification_full_state = {}, true
     active = true
     remuda._butler_matrix_live_config = cfg
     if approval and type(approval.reapply_approved) == "function" then approval.reapply_approved() end
@@ -2414,6 +2710,7 @@ function relay.start(config)
           in_reply_to = event.in_reply_to, thread_id = event.thread_id,
           room = event.room, room_kind = event.room_kind,
           context_mail_id = event.context_mail_id, from_agent = event.from_agent,
+          mentions = event.normalized_mentions,
           trusted = event.trusted ~= false, mxc = event.mxc },
         references = event.references,
       })

@@ -72,77 +72,39 @@ local function run(parser, argv)
   ]])
 end
 
-T.test("Matrix declared parser and legacy fallback agree on safe forms", function()
-  for _, argv in ipairs({
-    { "matrix", "status" }, { "matrix", "--json", "status" },
-    { "matrix", "rooms" }, { "matrix", "rooms", "--public", "science" },
-    { "matrix", "--room", "!room:example.org", "-n", "8", "history" },
-    { "matrix", "event", "$event" }, { "matrix", "follow", "$event" },
-  }) do
-    local current, old = run(true, argv), run(false, argv)
-    T.eq(current:gsub("parses=%d+", "parses=N"), old:gsub("parses=%d+", "parses=N"), table.concat(argv, " "))
-    T.ok(current:match("parses=[1-9]%d*$"), "current core must consult the declared spec")
-    T.ok(old:match("parses=0$"), "old core must use the legacy path")
-  end
-end)
-
--- Differential parity: the spec path may only ever accept what the legacy parser accepts and
--- must route identically (same stub fields, same visible reply). Thread is excluded: it
--- always used its declared spec (see the next test). Boundary shapes from SEC #497.
-T.test("Matrix declared parser accepts and routes exactly like the legacy parser", function()
-  local R, E = "!room:example.org", "$event"
+T.test("Matrix safe forms dispatch through the shared parser", function()
   local cases = {
-    -- forbidden root -n / -o outside history / download
-    { "matrix", "-n", "8", "status" }, { "matrix", "-o", "/tmp/out", "rooms" },
-    { "matrix", "-n", "8", "event", E }, { "matrix", "-o", "/tmp/out", "history" },
-    { "matrix", "-n", "8", "get", E }, { "matrix", "-n", "8", "follow", E },
-    { "matrix", "-o", "/tmp/out", "unfollow", E }, { "matrix", "-n", "8", "-o", "/tmp/out", "status" },
-    { "matrix", "-n", "8", "history" }, { "matrix", "history", "-n", "8" },
-    { "matrix", "-o", "/tmp/out", "history", "-n", "3" }, { "matrix", "history", "-o", "/tmp/out" },
-    -- rooms TERM without --public, and extra positionals
-    { "matrix", "rooms", "science" }, { "matrix", "rooms", "--public" },
-    { "matrix", "rooms", "--public", "a", "b" }, { "matrix", "rooms", "science", "--public" },
-    { "matrix", "rooms", "science", "--json" }, { "matrix", "--json", "rooms", "--public", "x" },
-    -- empty / extra history positionals
-    { "matrix", "history", "" }, { "matrix", "history", "words" }, { "matrix", "history", "a", "b" },
-    { "matrix", "history", "-n" }, { "matrix", "history", "--room" },
-    -- options after the first positional / event id
-    { "matrix", "event", E, "--json" }, { "matrix", "event", E, "--room", R },
-    { "matrix", "get", E, "--json" }, { "matrix", "follow", E, "--json" },
-    { "matrix", "unfollow", E, "--room", R }, { "matrix", "event", "--json", E },
-    { "matrix", "event", "--room", R, E }, { "matrix", "--room", R, "event", E },
-    { "matrix", "event", E, E }, { "matrix", "event" }, { "matrix", "follow" }, { "matrix", "follow", "nodollar" },
-    -- spellings the legacy parser does not know
-    { "matrix", "--room=" .. R, "event", E }, { "matrix", "event", "--room=" .. R, E },
-    { "matrix", "--n=8", "history" }, { "matrix", "--o=/tmp/out", "download", "mxc://x/y" },
-    { "matrix", "-n8", "history" }, { "matrix", "-o/tmp/out", "download", "mxc://x/y" },
-    { "matrix", "history", "--n", "8" }, { "matrix", "history", "-n8" },
-    { "matrix", "--json=true", "status" }, { "matrix", "--public", "rooms" },
-    -- missing values, duplicates, help, unknown flags, empties
-    { "matrix", "--room" }, { "matrix", "-n" }, { "matrix", "-o" }, { "matrix", "status", "--room" },
-    { "matrix", "--room", R, "--room", "!other:example.org", "event", E },
-    { "matrix", "--json", "--json", "status" }, { "matrix", "status", "--help" },
-    { "matrix", "history", "--help" }, { "matrix", "status", "--bogus" }, { "matrix", "--bogus", "status" },
-    { "matrix", "status", "" }, { "matrix", "event", "" }, { "matrix", "--room", "", "event", E },
-    -- verbs with a room option the legacy parser refuses
-    { "matrix", "--room", R, "status" }, { "matrix", "--room", R, "rooms" },
-    { "matrix", "status", "--room", R }, { "matrix", "--room", R, "history" },
-    { "matrix", "--id", E, "status" }, { "matrix", "quarantine", "--id", E },
+    {{"matrix", "status"}, "status:nil"},
+    {{"matrix", "--json", "status"}, "status:true"},
+    {{"matrix", "rooms", "--public", "science"}, "rooms:true:science"},
+    {{"matrix", "--room", "!room:example.org", "-n", "8", "history"}, "history:!room:example.org:8"},
+    {{"matrix", "history", "-n", "8"}, "history:nil:8"},
+    {{"matrix", "event", "$event"}, "event:nil:$event"},
   }
-  for _, argv in ipairs(cases) do
-    local current, old = run(true, argv), run(false, argv)
-    T.eq((current:gsub("parses=%d+", "parses=N")), (old:gsub("parses=%d+", "parses=N")), table.concat(argv, " "))
+  for _, case in ipairs(cases) do
+    local out = run(true, case[1])
+    T.ok(out:find(case[2], 1, true), out)
+    T.ok(out:find("parses=1", 1, true), out)
   end
 end)
 
--- Thread keeps its pre-existing declared grammar: only --room/--json, no root -n/-o.
-T.test("Matrix thread rejects root -n/-o and does not suggest them (no dispatch)", function()
+T.test("Matrix refuses an unavailable parser instead of using legacy grammar", function()
+  local out = run(false, {"matrix", "status"})
+  T.ok(out:find("Matrix CLI requires remuda.cli.parse; upgrade Remuda core", 1, true), out)
+  T.ok(not out:find("\nstatus:", 1, true), out)
+end)
+
+T.test("Matrix invalid options and arity never dispatch an action", function()
   for _, argv in ipairs({
-    { "matrix", "-n", "8", "thread", "$event" }, { "matrix", "-o", "/tmp/out", "thread", "$event" },
-    { "matrix", "--n=8", "thread", "$event" }, { "matrix", "-n8", "thread", "$event" },
+    {"matrix", "-n", "8", "status"}, {"matrix", "-o", "/tmp/out", "rooms"},
+    {"matrix", "-n", "8", "thread", "$event"},
+    {"matrix", "rooms", "science"}, {"matrix", "event"},
+    {"matrix", "history", "extra"}, {"matrix", "--json", "--json", "status"},
+    {"matrix", "status", "--bogus"}, {"matrix", "history", "-n"},
   }) do
     local out = run(true, argv)
-    T.ok(not out:find("thread:", 1, true), "thread must not dispatch: " .. out)
+    T.ok(not out:find("\nstatus:", 1, true) and not out:find("\nhistory:", 1, true)
+      and not out:find("\nrooms:", 1, true) and not out:find("\nevent:", 1, true)
+      and not out:find("\nthread:", 1, true), out)
   end
-  T.ok(not run(true, { "matrix", "thread", "$event", "--nn" }):find("--n", 5, true), "no --n suggestion")
 end)

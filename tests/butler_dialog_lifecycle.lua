@@ -1,6 +1,7 @@
 -- Lifecycle wiring with a fake host; never boots a daemon or real agent.
 local ticks, stopped = 0, {}
-local host = { butler = {}, schedules = {}, emit = function() end }
+local host = {
+  cli = { parse = function() error("this lifecycle fixture must not invoke CLI parsing") end }, butler = {}, schedules = {}, emit = function() end }
 host.exec = function(name)
   if name == 'butler/system' then host._butler_system = {} end
   if name == 'butler/main' then

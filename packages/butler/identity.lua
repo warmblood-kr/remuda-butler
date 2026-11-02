@@ -202,7 +202,21 @@ local function caller_name(caller)
     local resolved, alias = pcall(resolve, ok and id or "")
     if not resolved or not alias then return nil end
     local record = caller.capability and bus.tokens[caller.capability]
-    if caller.capability and remuda._butler_caller_principal.enforcing(bus.agents[alias]) then
+    local agent = bus.agents[alias]
+    -- After a reload (roster.lua) a member's MCP bridge still holds the old
+    -- image's capability. Core's attribution has just proven this caller is
+    -- that row's bound session instance, so bind the token to the row once.
+    if caller.capability and record == nil and type(agent) == "table" and agent.adopted == true
+        and not agent.capability_rebound and remuda._butler_caller_principal.bound(agent)
+        and caller.session == agent.session_name and caller.instance_id == agent.instance_id then
+      record = { id = agent.id, generation = agent.session_start_marker,
+        instance_id = agent.instance_id, instance_binding = 1 }
+      bus.tokens[caller.capability], agent.capability_rebound = record, caller.capability
+      local diagnostics = remuda._butler_diagnostics
+      if diagnostics then pcall(diagnostics.record, "control", "observed", "capability_rebound", alias) end
+      if _butler_session_trace then pcall(_butler_session_trace, "capability_rebound", alias) end
+    end
+    if caller.capability and remuda._butler_caller_principal.enforcing(agent) then
       -- A supplied capability on the enforcing path must be a proven record of the same bound instance;
       -- a missing, legacy or unbound record is no capability (a tokenless snapshot is still admitted).
       if type(record) ~= "table" or record.instance_binding ~= 1 or record.instance_id ~= caller.instance_id then return nil end

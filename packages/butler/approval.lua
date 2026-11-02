@@ -60,6 +60,14 @@ local function random_id(state)
   return nil
 end
 
+function approval.source_refresh_busy()
+  if next(pending_requests) or next(applying) then return true end
+  for _, record in pairs(attached and attached.state and attached.state.approvals or {}) do
+    if record.status == "open" or record.status == "approved" then return true end
+  end
+  return false
+end
+
 local function hex(bytes)
   local out = {}
   for i = 1, #bytes do out[i] = string.format("%02x", bytes:byte(i)) end
@@ -70,7 +78,8 @@ local function open_records(state)
   local rows = {}
   for _, record in pairs(state and state.approvals or {}) do
     if type(record) == "table" and (record.status == "open"
-      or (record.kind == "approve_text" and record.status == "approved")) then rows[#rows + 1] = record end
+      or (record.kind == "approve_text" and (record.status == "approved" or record.status == "queued"
+        or record.status == "delivery_uncertain" or record.status == "delivery_quarantined"))) then rows[#rows + 1] = record end
   end
   table.sort(rows, function(a, b)
     if tonumber(a.created_ms) and tonumber(b.created_ms) then return a.created_ms < b.created_ms end
@@ -177,8 +186,13 @@ function approval.attach(state, persist_fn, post_fn, room_fn, home_room)
 end
 
 function approval.begin_delivery(rec)
-  if not attached or type(rec) ~= "table" or (rec.kind ~= "approve_text" and rec.kind ~= "dialog_action")
-      or rec.status ~= "approved" or rec.delivery_started == true then return false end
+  if not attached or type(rec) ~= "table" then return false end
+  if rec.kind == "dialog_action" then
+    if rec.status ~= "approved" or rec.delivery_started == true then return false end
+  elseif rec.kind ~= "approve_text"
+      or (rec.status ~= "approved" and rec.status ~= "queued") or rec.delivery_started == true then
+    return false
+  end
   rec.delivery_started = true
   local ok, result = pcall(persist)
   if not ok or result == false then
@@ -234,9 +248,9 @@ function approval.granted_by(event_id, grant_id, class, scope, holder)
 end
 
 -- A plain notice in the owner's room (no request, no mention); nil and why when the relay is not running.
-function approval.notify(text)
+function approval.notify(text, done, opts)
   if not attached or type(attached.post) ~= "function" then return nil, "Matrix relay is not running" end
-  return attached.post(text, nil, function() end, {})
+  return attached.post(text, nil, type(done) == "function" and done or function() end, type(opts) == "table" and opts or {})
 end
 
 -- Named per-second hooks run by sweep(); a name is replaced, never added, so a live reload leaves one.
@@ -258,7 +272,7 @@ local function apply_approved(rec)
     if completed then return end
     completed = true
     applying[rec.id] = nil
-    rec.status = ok == "retry" and "approved" or ok and "applied" or "failed"
+    rec.status = ok == "retry" and "approved" or ok == "queued" and "queued" or ok and "applied" or "failed"
     if err then rec.error = tostring(err)
     elseif ok then rec.error = nil end
     persist()
@@ -517,13 +531,30 @@ function approval.answer(id_or_event, verdict, who, event_id)
   return true, nil, rec
 end
 
+-- Queue acceptance is authoritative before an approved waiting record's TTL.
+local before_sweep = approval._before_sweep or {}
+approval._before_sweep = before_sweep
+function approval.before_sweep(name, fn) before_sweep[name] = fn end
+function approval.persist_queue_state(rec, status, queue_id)
+  local allowed = {queued=true,applied=true,delivery_uncertain=true,delivery_quarantined=true,failed=true,denied=true}
+  if not attached or type(rec) ~= 'table' or rec.kind ~= 'approve_text' or not allowed[status]
+      or type(queue_id) ~= 'string' then return false end
+  rec.status, rec.queue_id = status, queue_id
+  local ok, result = pcall(persist)
+  return ok and result ~= false
+end
 function approval.sweep(now)
   if not attached then return 0 end
   now = tonumber(now) or math.floor(os.time() * 1000)
+  local prepared_safe = true
+  for _, fn in pairs(before_sweep) do
+    local ok, ready = pcall(fn, attached.state.approvals)
+    if not ok or ready ~= true then prepared_safe = false end
+  end
   local count = 0
   for _, rec in pairs(attached.state.approvals or {}) do
     local expirable = type(rec) == "table" and (rec.status == "open"
-      or (rec.status == "approved" and rec.kind == "approve_text"))
+      or (rec.status == "approved" and rec.kind == "approve_text" and prepared_safe))
     if expirable and tonumber(rec.expires_at) and now >= rec.expires_at then
       rec.status, rec.answered_at = "expired", now
       local callback = handlers[rec.kind] and handlers[rec.kind].expire
@@ -544,58 +575,32 @@ local function fail(message)
   return message
 end
 
-local function usage(verb)
-  if verb == "approvals" then return "Usage: remuda butler approvals\nExample: remuda butler approvals" end
-  return "Usage: remuda butler " .. verb .. " ID\nExample: remuda butler " .. verb .. " A7K2"
-end
-
 local APPROVAL_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
-    approvals = { about = "List open approval requests", next = "remuda butler approvals" },
-    approve = { about = "Approve a request", args = { { name = "ID", help = "Approval request ID" } },
+    approvals = { about = "List open approval requests. Example: remuda butler approvals", next = "remuda butler approve --help" },
+    approve = { about = "Approve a request. Example: remuda butler approve A7K2", args = { { name = "ID", help = "Approval request ID" } },
       next = "remuda butler approvals" },
-    deny = { about = "Deny a request", args = { { name = "ID", help = "Approval request ID" } },
+    deny = { about = "Deny a request. Example: remuda butler deny A7K2", args = { { name = "ID", help = "Approval request ID" } },
       next = "remuda butler approvals" },
   },
 }
-
-local function parsed_approval_id(args, verb)
-  local cli = remuda.cli
-  if type(cli) ~= "table" or type(cli.parse) ~= "function" then return nil, false end
-  -- The old parser treated a leading-dash ID as an ordinary word. clap treats
-  -- `--` as an option boundary, so let the legacy answer path handle it.
-  for _, word in ipairs(args) do
-    if word == "--" then
-      if verb ~= "approvals" and #args == 2 then return args[2], false end
-      return nil, true
-    end
-  end
-  local ok, report = pcall(cli.parse, APPROVAL_CLI_SPEC, args)
-  if not ok then return nil, false end
-  local exact_help = #args == 2 and (args[2] == "--help" or args[2] == "-h")
-  if exact_help then return nil, true, "help" end
-  if not report.ok or report.kind == "help" then
-    -- A lone dash-prefixed ID used to reach approval.answer as an ID. Keep
-    -- that behavior while the declared grammar owns ordinary valid argv.
-    if verb ~= "approvals" and #args == 2 and type(args[2]) == "string" and args[2] ~= ""
-        and args[2]:sub(1, 1) == "-" then return args[2], true end
-    return nil, true
-  end
-  if verb == "approvals" then return nil, true end
-  local id = report.values and report.values.ID
-  if type(id) ~= "string" or id == "" then return nil, true end
-  return id, true
-end
+local cli_parse = assert(remuda.cli and remuda.cli.parse,
+  "Butler CLI requires remuda.cli.parse (Remuda core #465 or later); upgrade Remuda")
 
 function approval.cli(args, agent)
-  local verb = args and args[1]
+  local parse_ok, report = pcall(cli_parse, APPROVAL_CLI_SPEC, args or {})
+  if not parse_ok then
+    return fail("Usage: remuda butler approvals | approve ID | deny ID\nNext: remuda butler approvals")
+  end
+  if report.kind == "help" then return report.text end
+  if not report.ok then
+    local text = report.text ~= "" and report.text or "Usage: remuda butler approvals | approve ID | deny ID"
+    if not text:find("\nNext:", 1, true) then text = text .. "\nNext: remuda butler approvals" end
+    return fail(text)
+  end
+  local verb = report.verb
   if verb == "approvals" then
-    parsed_approval_id(args, verb)
-    if #args == 2 and (args[2] == "--help" or args[2] == "-h") then return usage(verb) end
-    if #args ~= 1 then
-      return fail(usage(verb) .. "\nNext: remuda butler approvals")
-    end
     local rows = approval.list()
     if #rows == 0 then return "No open approval requests.\nNext: nothing to do; agent requests appear here." end
     local now = math.floor(os.time() * 1000)
@@ -613,15 +618,13 @@ function approval.cli(args, agent)
     return table.concat(lines, "\n")
   end
   if verb == "approve" or verb == "deny" then
-    local parsed_id, parsed = parsed_approval_id(args, verb)
-    if #args == 2 and (args[2] == "--help" or args[2] == "-h") then return usage(verb) end
-    if #args ~= 2 or type(args[2]) ~= "string" or args[2] == "" then
-      return fail(usage(verb) .. "\nNext: remuda butler approvals")
+    local id = report.values.ID
+    if type(id) ~= "string" or id == "" then
+      return fail("Usage: remuda butler " .. verb .. " ID\nNext: remuda butler approvals")
     end
     if agent then
       return fail(verb .. " is operator-only. Next: wait for the owner's answer by mail; remuda butler inbox")
     end
-    local id = parsed and parsed_id or args[2]
     if id == nil or id == "" then return fail(usage(verb) .. "\nNext: remuda butler approvals") end
     local ok, err, rec = approval.answer(id, verb, "operator (terminal)")
     if not ok then

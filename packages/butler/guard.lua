@@ -99,7 +99,7 @@ function guard.standby(state, paths)
   remuda._butler_standby = state
   local DOCTOR_CLI_SPEC = {
     name = "remuda butler",
-    verbs = { doctor = { about = "Check the Butler installation", next = "remuda butler doctor" } },
+    verbs = { doctor = { about = "Check the Butler installation. Example: remuda butler doctor", next = "remuda butler doctor" } },
   }
   local function run(args)
     local now = guard.claim(paths)
@@ -109,14 +109,14 @@ function guard.standby(state, paths)
     end
     remuda._butler_standby = now
     local refusal = guard.refusal(now)
-    local doctor_ok = type(args) == "table" and args[1] == "doctor" and #args == 1
+    local doctor_ok = false
     local cli = remuda.cli
     if type(cli) == "table" and type(cli.parse) == "function" then
       -- Claim/refusal stays first: a parser error never changes standby policy.
       -- Reject the marker explicitly because clap treats it as an option boundary.
-      for _, word in ipairs(args or {}) do if word == "--" then doctor_ok = false end end
       local ok, report = pcall(cli.parse, DOCTOR_CLI_SPEC, args or {})
-      doctor_ok = doctor_ok and ok and report.ok and report.kind ~= "help"
+      doctor_ok = ok and report.ok and report.verb == "doctor" and report.kind ~= "help"
+      for _, word in ipairs(args or {}) do if word == "--" then doctor_ok = false end end
     end
     if doctor_ok then
       remuda.exec("butler/doctor")
@@ -131,6 +131,57 @@ function guard.standby(state, paths)
   if type(remuda.extension_command) == "function" then
     remuda.extension_command("butler", function(args) return run(args) end)
   end
+end
+
+-- `remuda reload` (remuda#713): the new daemon runs init.lua while the daemon
+-- it replaced may still be exiting with this home's locks. That holder is the
+-- predecessor only when core says this socket was handed over by a reload AND
+-- the holder's pid is this daemon's parent (the old daemon starts the new one
+-- directly). Any other holder, including a dead one's leftovers, is not.
+local PREDECESSOR_POLL_S = 0.1
+-- Old daemon: up to 10 s for accepted requests, then a bounded module stop.
+guard.predecessor_wait_s = 30
+function guard.handed_by_reload()
+  local daemon = remuda.daemon
+  if type(daemon) ~= "table" or type(daemon.socket_publication) ~= "function" then return false end
+  local ok, answer = pcall(daemon.socket_publication)
+  return ok and type(answer) == "table" and answer.state == "handed over by reload"
+end
+-- This daemon's parent pid as digits, or nil. `sh`'s $PPID is the daemon.
+function guard.parent_pid()
+  local process = remuda.process
+  if type(process) ~= "table" or type(process.run) ~= "function" then return nil end
+  local ok, result = pcall(process.run, { argv = { "sh", "-c", 'ps -o ppid= -p "$PPID"' }, timeout = 5 })
+  if not ok or type(result) ~= "table" or result.code ~= 0 then return nil end
+  return tostring(result.stdout or ""):match("^%s*(%d+)%s*$")
+end
+local function pause(seconds)
+  pcall(remuda.process.run, { argv = { "sleep", tostring(seconds) }, timeout = seconds + 2 })
+end
+-- Claim, waiting a bounded time for a reload predecessor to let go.
+function guard.claim_after_reload(paths)
+  local state = guard.claim(paths)
+  if state.owner or not state.held or not state.pid or not guard.handed_by_reload() then return state end
+  local parent = guard.parent_pid()
+  if parent ~= state.pid then
+    -- The predecessor may have exited between the claim and the probe.
+    state = guard.claim(paths)
+    if state.owner or not state.held or not state.pid then return state end
+    parent = guard.parent_pid()
+    if parent ~= state.pid then return state end
+  end
+  local predecessor = state.pid
+  local wait_s = guard.predecessor_wait_s
+  local deadline = remuda.clock() + wait_s * 1000
+  while not state.owner and state.held and state.pid == predecessor and remuda.clock() < deadline do
+    pause(PREDECESSOR_POLL_S)
+    state = guard.claim(paths)
+  end
+  if not state.owner and state.pid == predecessor then
+    io.stderr:write("butler: the daemon this one replaced (pid " .. predecessor .. ") still holds this home after "
+      .. wait_s .. "s; standing by\n")
+  end
+  return state
 end
 
 -- main.lua calls this before it touches any shared state. True = carry on.
@@ -158,7 +209,7 @@ function guard.boot(paths)
       pcall(remuda.fs.mkdir_new, parent(config_path))
     end
   end
-  local state = guard.claim(paths)
+  local state = guard.claim_after_reload(paths)
   if state.owner then
     -- Core keeps the handles alive; this slot only keeps them reachable from Lua.
     remuda._butler_owner_lock, remuda._butler_standby = state.handles, nil

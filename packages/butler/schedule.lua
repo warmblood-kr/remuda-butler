@@ -140,6 +140,10 @@ function M.check(entry)
   if not ok then return nil, err end
   local by, last = entry.created_by, entry.last_message
   if type(by) ~= "string" or #by > 64 or by:find("%c") then return nil, "created_by must be short text" end
+  if entry.recipient_id ~= nil and (type(entry.recipient_id) ~= "string" or entry.recipient_id == ""
+      or #entry.recipient_id > 64 or entry.recipient_id:find("%c")) then
+    return nil, "recipient_id must be short text"
+  end
   if last ~= nil and (type(last) ~= "string" or #last > 64 or last:find("%c")) then
     return nil, "last_message must be a message id"
   end
@@ -268,6 +272,13 @@ function M.fire(env, list, entry, slot)
   if not resolved then
     trace("schedule_target_absent", entry.name .. " -> " .. entry.target)
     return nil
+  end
+  if entry.recipient_id ~= nil then
+    local identified, id = pcall(env.resolve_id, alias)
+    if not identified or type(id) ~= "string" or id == "" or id ~= entry.recipient_id then
+      trace("schedule_target_identity_mismatch", entry.name .. " -> " .. entry.target)
+      return nil
+    end
   end
   if entry.last_message and env.unread(alias, entry.last_message) then
     trace("schedule_unread_skip", entry.name .. " slot=" .. slot)

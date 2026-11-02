@@ -28,7 +28,7 @@ lua 'remuda._butler_argv = {"sleep", "60"}; remuda._butler_skip_relay = true; re
 for _ in $(seq 50); do lua 'return remuda._butler_agent_builders ~= nil' | grep -qx true && break; sleep 0.1; done
 echo "registry: $(lua 'return remuda.contribute and "core" or "butler-local"')"
 
-lua 'remuda._butler_contribute("butler.command", "hello", { verb = "hello", order = 85,
+lua 'remuda._butler_contribute("butler.command", "hello", { verb = "hello", order = 85, group = "mail",
        usage = "  remuda butler hello <name>", run = function(args) return "hello " .. args[2] end })
      remuda._butler_contribute("butler.guidance", "extra", { order = 35,
        agents_md = function(ctx) return "EXTRA for " .. ctx.parent .. "\n\n" end,
@@ -37,8 +37,8 @@ lua 'remuda._butler_contribute("butler.command", "hello", { verb = "hello", orde
 [[ $("$REMUDA_BIN" -s "$SERVER" butler hello pat) == "hello pat" ]] || fail "a contributed verb did not dispatch"
 HELP=$("$REMUDA_BIN" -s "$SERVER" butler help)
 printf '%s\n' "$HELP" | grep -A1 -F 'remuda butler forward <message-id>' | grep -F 'remuda butler hello <name>' >/dev/null ||
-  fail "help does not list the contributed verb by its order: $HELP"
-echo "ok - a contributed verb dispatches and is listed in help by its order"
+  fail "help does not list the contributed verb in its group by its order: $HELP"
+echo "ok - a contributed verb dispatches and is listed in help in its group by its order"
 
 lua 'remuda._butler_agent_builders.fake = function() return {"sleep", "60"} end; remuda._butler_launch("fake", "w1")' >/dev/null
 AGENTS=$(cat "$XDG_DATA_HOME/remuda/butler/sessions/w1/AGENTS.md")

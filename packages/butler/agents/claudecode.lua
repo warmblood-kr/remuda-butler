@@ -2,10 +2,30 @@ local builders = assert(remuda._butler_agent_builders)
 local support = assert(remuda._butler_agent_support)
 local telemetry = assert(remuda._butler_telemetry_adapters)
 
+-- Owned status directories by member name, replaced (old one removed) on the
+-- next setup for that name; also the key for the settings directory.
+local status_dirs = {}
+
 telemetry.claude = {
   setup = function(spec)
-    local status_path = spec.status_path or (os.tmpname() .. "." .. spec.name .. ".status")
-    return { status_path = status_path, settings_path = support.status_settings(status_path) }
+    local status_path = spec.status_path
+    if not status_path then
+      -- Not a name beside a reserved tmpname file: a directory this session owns.
+      local dir, why
+      if type(support.new_private_dir) == "function" then dir, why = support.new_private_dir()
+      else why = "support lacks a private directory helper" end
+      if not dir then
+        if _butler_session_trace then _butler_session_trace("settings_not_written", tostring(why)) end
+        return { settings_error = why }
+      end
+      status_path = dir .. "/" .. spec.name .. ".status"
+      local previous = status_dirs[spec.name]
+      status_dirs[spec.name] = dir
+      if previous then pcall(remuda.remove_dir_all, previous) end
+    end
+    local settings_path, why = support.status_settings(status_path, spec.name, spec.memory_dir)
+    if not settings_path and _butler_session_trace then _butler_session_trace("settings_not_written", tostring(why)) end
+    return { status_path = status_path, settings_path = settings_path, settings_error = why }
   end,
   read = function(state)
     -- The hook-written `.state` file: "<word> <unix time>", one fixed word.
@@ -40,6 +60,22 @@ telemetry.claude = {
 }
 
 builders.claude = function(spec)
+  -- The per-launch settings file carries the guard hooks (PreToolUse and
+  -- PermissionRequest) when guard policy is on. A launch that needs them but
+  -- could not persist the file is refused (fail closed) only when the owner
+  -- EXPLICITLY turned guard on: the chooser records a spawn_error for this
+  -- candidate and never starts Claude without them. With guard off, or on
+  -- only by default, the failure only drops the defaults and status
+  -- telemetry; the launch continues without --settings (traced).
+  local settings_error = spec.telemetry and spec.telemetry.settings_error
+  if settings_error then
+    local policy = remuda.butler and remuda.butler.guard_policy
+    local ok, guard_on = pcall(function() return policy and policy.explicitly_on() end)
+    if not ok or guard_on then
+      error("Claude settings file could not be written (" .. tostring(settings_error)
+        .. "); refusing to start Claude without its guard hooks", 0)
+    end
+  end
   local argv = { "claude" }
   local config = remuda._butler_compaction_config or {}
   local configured = remuda._butler_claude_autocompact
@@ -81,17 +117,54 @@ builders.claude = function(spec)
   return argv
 end
 
+-- Teach page 1 is answered "Not now" by its text (owner, #453). Never "Yes":
+-- it scans shell history and other repositories to change the classifier.
+local TEACH_TITLE = "teach auto mode about your environment?"
+local TEACH_OPTIONS = { ["yes"] = true, ["not now"] = true, ["don't show again"] = true }
+local function teach_labels(labels)
+  local not_now = false
+  for _, label in ipairs(labels) do
+    label = label:lower()
+    if not TEACH_OPTIONS[label] then return false end
+    not_now = not_now or label == "not now"
+  end
+  return not_now
+end
+
 remuda._butler_agent_startup.claude = {
-  -- Report-only descriptor contract; tool-result auto-mode denials are outside
-  -- PR1. Future semantic recognisers require an observed dialog-only fixture.
-  -- Add only fixture-backed semantic descriptors; see docs/butler.md.
-  -- Classifier denials never belong in this action registry.
+  -- Empty until a real, fixture-backed recognizer is approved for one-time input.
   dialog_approvals = {},
-  blocking = {
-    { id = "unknown_choice", risk = "report", match = function(screen, probes)
-      return probes.unknown and probes.unknown(screen)
-    end },
+  -- Recognised dialog states, matched by dialogs.lua. Documented in
+  -- docs/butler.md ("Recognised dialog states"); keep the two in step.
+  -- response: approval = stop writes and report, the owner answers in the
+  -- pane; report = stop writes and report; auto = Butler picks `choose` by
+  -- its text and audits each key. A `heading` must head the current choice
+  -- block; `match(heading, context, labels)` refines it; a `screen` entry
+  -- matches the bottom lines when there is no numbered choice block.
+  dialog_states = {
+    { id = "claude_permission_prompt", response = "approval", heading = "do you want to proceed?" },
+    { id = "claude_fetch_permission", response = "approval",
+      heading = "do you want to allow claude to fetch this content?" },
+    { id = "claude_usage_limit", response = "report", heading = "what do you want to do?",
+      requires = "Stop and wait for limit to reset" },
+    { id = "claude_model_confirm", response = "report", heading = "switch model?" },
+    { id = "claude_effort_confirm", response = "report", heading = "change effort level?" },
+    { id = "claude_teach_auto_mode", response = "auto", choose = "Not now",
+      match = function(_, context, labels)
+        return context:lower():find(TEACH_TITLE, 1, true) ~= nil and teach_labels(labels)
+      end },
+    -- Page 2 appears only after someone chose "Yes"; its Continue starts the scan.
+    { id = "claude_teach_auto_mode_setup", response = "report", screen = true,
+      match = function(lines)
+        local last = lines[#lines] and lines[#lines]:lower() or ""
+        local text = table.concat(lines, "\n"):lower()
+        return last:find("enter to continue", 1, true) ~= nil and text:find(TEACH_TITLE, 1, true) ~= nil
+          and text:find("also scan shell history", 1, true) ~= nil
+      end },
   },
+  -- Extra report-only descriptors: { id, risk = "report", match(screen, probes) }.
+  -- dialogs.lua checks dialog_states first.
+  blocking = {},
   ready = function(screen)
     if screen:find("─\n❯", 1, true) then return true end
     for line in (screen .. "\n"):gmatch("(.-)\n") do
@@ -108,7 +181,7 @@ remuda._butler_agent_startup.claude = {
   clear_input = "C-u",
   modals = {
     { trust = "claude", pending_match = "Quick safety check:" }, -- option chosen by its text
-    -- Detect + defer only (never answered): the title (or option text with title/context) on screen holds the first task.
+    -- Launch detects + defers (dialogs.lua answers "Not now"): the title (or option text with title/context) on screen holds the first task.
     -- The TITLE keys detection; option text counts only together with the title or the
     -- "about your environment" context (a lone "Not now" is ordinary text).
     { title = "Teach auto mode", context = "about your environment",

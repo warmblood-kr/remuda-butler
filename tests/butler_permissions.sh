@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The root Butler's permission rule against a private daemon and a stub claude:
 # written at launch, respawn and once per mod load, never on the reconcile tick,
-# and never for a member.
+# Legacy root rule stays root-only; both clients get workdir defaults at starts.
 #   REMUDA_BIN=~/.local/bin/remuda tests/butler_permissions.sh
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -126,7 +126,9 @@ cat >"$SCRATCH/want.json" <<WANT
     "allow": [
       "Bash(ls:*)",
       "Bash(git status:*)",
-      "$RULE"
+      "$RULE",
+      "Bash(remuda:*)",
+      "mcp__remuda__*"
     ],
     "ask": [],
     "deny": [
@@ -177,7 +179,7 @@ echo "== a rule under deny is withheld"
 printf '{"permissions":{"deny":["%s"]}}' "$RULE" >"$FILE"
 respawn
 sleep 1
-[[ $(cat "$FILE") == '{"permissions":{"deny":["'"$RULE"'"]}}' ]] || fail "a file with the rule under deny was changed: $(cat "$FILE")"
+lua 'local f=assert(io.open(remuda._butler_permission_report.report.path)); local s=remuda.json.decode(f:read("*a")); f:close(); assert(s.permissions.deny[1] == "Bash(remuda butler:*)"); for _, r in ipairs(s.permissions.allow or {}) do assert(r ~= "Bash(remuda butler:*)") end' >/dev/null
 "$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "$RULE under deny in $FILE" \
   || fail "doctor does not say the rule is withheld"
 
@@ -188,23 +190,34 @@ ln -s "$SCRATCH/elsewhere.json" "$FILE"
 respawn
 sleep 1
 [[ -L $FILE && $(cat "$SCRATCH/elsewhere.json") == '{}' ]] || fail "the mod wrote through or over a symlink"
-"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "no current allow rule covers remuda butler close NAME" \
-  || fail "doctor must not reuse the launch report for a symlink without an allow"
+# The symlinked local file must not be credited with a rule; the per-launch
+# --settings file now carries the allow, and doctor must name that source.
+DOCTOR_OUT=$("$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1)
+echo "$DOCTOR_OUT" | grep -F "present Bash(remuda:*)" | grep -qF "/settings.json" \
+  || fail "doctor must source the allow from the session settings file"
+echo "$DOCTOR_OUT" | grep -F "present Bash(remuda:*)" | grep -qF "$FILE" \
+  && fail "doctor must not credit the symlinked local settings file"
 
 echo "== launch_survives_unwritable_dir"
 rm "$FILE"
 chmod 500 "$ROOT/.claude"
 respawn
 [[ ! -e $FILE ]] || fail "a file appeared in a read-only directory"
-"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -qF "Permissions butler (claude): close permission not confirmed — " \
-  || fail "doctor does not report the failed write"
+# The workdir file could not be written, but the per-launch --settings file
+# carries the allow, and doctor must say so from that source.
+"$REMUDA_BIN" -s "$SERVER" butler doctor 2>&1 | grep -F "Permissions butler (claude): present Bash(remuda:*)" \
+  | grep -qF "/settings.json" \
+  || fail "doctor does not source the allow from the session settings file after the failed write"
 chmod 700 "$ROOT/.claude"
 
-echo "== member_launch_writes_nothing"
+echo "== member_launch_initializes_both_clients"
 "$REMUDA_BIN" -s "$SERVER" butler launch claude w1 >/dev/null
 wait_for "member w1 did not start" test -d "$XDG_DATA_HOME/remuda/butler/sessions/w1"
 sleep 2
-[[ ! -e $XDG_DATA_HOME/remuda/butler/sessions/w1/.claude ]] || fail "a member got a .claude directory"
+MEMBER=$XDG_DATA_HOME/remuda/butler/sessions/w1
+grep -qF '"Bash(remuda:*)"' "$MEMBER/.claude/settings.local.json" || fail "member Remuda CLI grant missing"
+grep -qF '"mcp__remuda__*"' "$MEMBER/.claude/settings.local.json" || fail "member Remuda MCP grant missing"
+[[ -s $MEMBER/.codex/config.toml && -s $MEMBER/.codex/rules/remuda.rules ]] || fail "member Codex defaults missing"
 
 echo "== traced"
 grep -qE 'permissions_added' -r "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" 2>/dev/null || fail "the write was not traced"

@@ -1,0 +1,6 @@
+Captured 2026-10-15 from disposable sessions probe-claude (Claude Code 2.1.300) and
+probe-codex (Codex 0.162.1) via remuda capture; trimmed to the relevant rows and redacted.
+Real, trimmed captures: claude-2.1.300-working-queued, claude-2.1.300-working-draft,
+codex-0.162.1-working-steer-pending.
+Reconstructed from observed frames (spinner/status rows hand-written, NOT raw captures):
+claude-2.1.300-working-empty, codex-0.162.1-working-empty.

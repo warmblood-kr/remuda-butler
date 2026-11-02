@@ -2,6 +2,7 @@
 --   luajit tests/butler_agent_monocle.lua
 
 local remuda = {
+  cli = { parse = function() error("this lifecycle fixture must not invoke CLI parsing") end },
   _butler_agent_builders = {},
   _butler_agent_startup = { claude = { modals = {} }, codex = { modals = {} } },
   _butler_telemetry_adapters = {},

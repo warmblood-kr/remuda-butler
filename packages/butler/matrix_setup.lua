@@ -391,52 +391,80 @@ local function resolve_outputs(options)
   return { token_path = token_path, config_path = config_path, dir = dir }
 end
 
-local VALUE_OPTIONS = {
-  ["--homeserver"] = "homeserver", ["--bot"] = "bot_mxid", ["--owner"] = "owner_mxid",
-  ["--password-file"] = "password_file", ["--token-file"] = "token_file",
-  ["--registration-token-file"] = "registration_token_file",
-  ["--dir"] = "dir", ["--pin"] = "pin", ["--ca-file"] = "ca_file",
-  ["--rooms"] = "rooms_mode",
+local SETUP_CLI_SPEC = {
+  name = "remuda butler matrix",
+  verbs = {
+    setup = {
+      about = "Configure the Butler Matrix account. Example: remuda butler matrix setup --homeserver https://matrix.example.org --owner @alice:example.org --register --dir /path/to/private/butler",
+      options = {
+        { long = "homeserver", value = "URL", help = "Matrix server URL (http or https)" },
+        { long = "owner", value = "ID", help = "Your Matrix user ID" },
+        { long = "password-file", value = "PATH", help = "Read the bot password from this file" },
+        { long = "password-cmd", help = "Run the following program and arguments; use its first output line as the password (must be last)" },
+        { long = "token-file", value = "PATH", help = "Read an existing access token from this file" },
+        { long = "bot", value = "ID", help = "Bot Matrix user ID" },
+        { long = "registration-token-file", value = "PATH", help = "Read the homeserver registration token from this file" },
+        { long = "register", help = "Create the bot account; prompt for the homeserver registration token if no file is given" },
+        { long = "dir", value = "PATH", help = "Save private token and config files in this directory" },
+        { long = "default", help = "Save into the live Butler config directory" },
+        { long = "force", help = "Replace existing token or config files" },
+        { long = "all", help = "Also create the optional ALL-BUTLERS room" },
+        { long = "rooms", value = "MODE", help = "Room invite policy: allowlist (default) or open" },
+        { long = "pin", value = "SHA256HEX", help = "Trust this HTTPS certificate SPKI SHA-256" },
+        { long = "ca-file", value = "PATH", help = "Trust the HTTPS certificate authority in this file" },
+      },
+      args = { { name = "PASSWORD_COMMAND", help = "Program and arguments after --password-cmd; this positional is only used with that option", multiple = true, required = false } },
+      next = "remuda butler matrix setup",
+    },
+  },
 }
 
 function matrix.setup_usage()
+  local cli = remuda.cli
+  if cli and cli.parse then
+    return cli.parse(SETUP_CLI_SPEC, { "setup", "--help" }).text .. "\n\n" .. USAGE
+  end
   return USAGE
 end
 
 function matrix.setup_prepare(args)
   if type(args) ~= "table" then return nil, "Matrix setup arguments must be a list" end
   if #args == 0 then return { wizard = true } end
-  if #args == 1 and (args[1] == "--help" or args[1] == "-h") then
-    return { help = true, usage = USAGE }
+  local cli = remuda.cli
+  if type(cli) ~= "table" or type(cli.parse) ~= "function" then
+    return nil, "Matrix setup requires remuda.cli.parse; upgrade Remuda core"
   end
-  local options, seen = {}, {}
-  local flags = { ["--default"] = "default", ["--force"] = "force", ["--all"] = "create_all",
-    ["--register"] = "register" }
-  local at = 1
-  while at <= #args do
-    local name, value = args[at], args[at + 1]
-    if name == "--password-cmd" then
-      -- Takes every remaining argument, so it must be the last option.
-      if not value or value == "" then return nil, "--password-cmd requires a program to run" end
-      options.password_cmd = {}
-      for index = at + 1, #args do options.password_cmd[#options.password_cmd + 1] = args[index] end
-      break
-    elseif flags[name] then
-      if seen[name] then return nil, "duplicate option " .. name end
-      options[flags[name]], seen[name] = true, true
-      at = at + 1
-    elseif VALUE_OPTIONS[name] then
-      if seen[name] then return nil, "duplicate option " .. name end
-      if not value or value == "" or value:sub(1, 2) == "--" then
-        return nil, name .. " requires a value"
-      end
-      options[VALUE_OPTIONS[name]], seen[name] = value, true
-      at = at + 2
-    elseif name:sub(1, 2) == "--" then
-      return nil, "unknown option " .. name
-    else
-      return nil, "unexpected setup argument " .. name
+  local argv = { "setup" }
+  for index = 1, #args do argv[#argv + 1] = args[index] end
+  local report = cli.parse(SETUP_CLI_SPEC, argv)
+  if report.kind == "help" then return { help = true, usage = matrix.setup_usage() } end
+  if not report.ok then return nil, report.text end
+  local values = report.values or {}
+  local options = {
+    homeserver = values.homeserver,
+    owner_mxid = values.owner,
+    password_file = values["password-file"],
+    token_file = values["token-file"],
+    registration_token_file = values["registration-token-file"],
+    bot_mxid = values.bot,
+    register = values.register == true,
+    dir = values.dir,
+    default = values.default == true,
+    force = values.force == true,
+    create_all = values.all == true,
+    rooms_mode = values.rooms,
+    pin = values.pin,
+    ca_file = values["ca-file"],
+  }
+  if values["password-cmd"] == true then
+    local command = values.PASSWORD_COMMAND
+    if type(command) == "string" then command = { command } end
+    options.password_cmd = type(command) == "table" and command or {}
+    if #options.password_cmd == 0 or options.password_cmd[1] == "" then
+      return nil, "--password-cmd requires a program to run"
     end
+  elseif values.PASSWORD_COMMAND ~= nil then
+    return nil, "password command arguments require --password-cmd"
   end
 
   options.rooms_mode = options.rooms_mode or "allowlist"

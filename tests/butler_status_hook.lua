@@ -13,6 +13,7 @@ local payloads = {
 }
 local written = {}
 _G.remuda = {
+  fail = function(message, code) return { error = message, code = code } end,
   json = { decode = function(text)
     if text == "{broken" then error("bad json") end
     return payloads[text]
@@ -63,7 +64,9 @@ check(fire('{"e":"stop"}', "/tmp/./f.status"), nil, "a . component is refused")
 check(fire('{"e":"stop"}', "C:\\a\\..\\f.status"), nil, "a .. component is refused with backslashes")
 assert(fire('{"e":"stop"}', "/tmp/..x/.f/f.status"), "names that merely contain dots are accepted")
 written = {}
-hook.run({ "status-hook" }, { stdin = '{"e":"stop"}' })
+local missing = hook.run({ "status-hook" }, { stdin = '{"e":"stop"}' })
+check(missing.code, 2, "missing path is a parser error")
+assert(missing.error:find("Usage: remuda butler status-hook", 1, true), "missing path shows declared usage")
 check(written[1], nil, "missing path refused")
 check(hook.run({ "status-hook", "/tmp/other.status" }, { stdin = '{"e":"stop"}' }), "", "path other than the member's registered telemetry is refused quietly")
 check(written[1], nil, "foreign path not written")

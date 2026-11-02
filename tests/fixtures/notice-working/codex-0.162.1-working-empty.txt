@@ -1,0 +1,10 @@
+› Write a 1200-word essay about lighthouses. No tools.
+
+ 
+• Working (5s • esc to interrupt)
+
+ 
+› Ask Codex to do anything
+
+  GPT-6.1-Sol low · ~/.local/share/remuda/butler/sessions/probe-codex
+  ? for shortcuts

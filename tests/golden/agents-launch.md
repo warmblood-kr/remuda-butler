@@ -5,6 +5,20 @@ task sent to this terminal. Your Butler identity is already in
 `REMUDA_BUTLER_AGENT_ID`, and your leader is in `REMUDA_BUTLER_LEADER_ID`.
 Start by running `remuda butler inbox` to read your welcome message.
 
+## Memory
+
+Keep useful notes under `docs/`. Put stable, reusable facts and decisions in
+`docs/concepts/`; put dated events, progress, and context that may expire in
+`docs/journal/YYYY-MM-DD.md`. Keep source files concise: each concepts file and
+daily note must stay at or below 5,000 characters. Use at most 50 concepts
+files; when full, delete low-value material, consolidate or compress existing
+notes, or decline lower-priority material.
+
+Summarize daily notes older than two ISO weeks into
+`docs/journal/YYYY-Www.md` (use the correct ISO week year and week number), then
+gzip the summarized daily files under `docs/journal/archive/`. These are
+manual file practices; do not assume a process performs them automatically.
+
 Use Butler's CLI for communication:
 
 - `remuda butler inbox` reads your own queued messages.
@@ -56,7 +70,7 @@ Caller attribution is advisory within one user account, not an isolation boundar
 
 You may create a Remuda-managed child team with `remuda butler topic delegate
 NAME TASK...` when useful. Internal agent subagents are separate from Butler
-team members. `remuda butler send FROM TO MESSAGE...` is an operator form, not
+team members. `remuda butler send --from FROM TO MESSAGE...` is an operator form, not
 the normal way for a member to communicate.
 Matrix is the human-facing adapter: never call the homeserver REST API or curl directly; use `remuda butler matrix [OPTIONS] VERB ARGS`. Options go BEFORE the verb (`--json` for machine output; `--room ROOM` defaults to the configured room).
 - `status`: whoami, joined rooms, and the sync cursor.
@@ -69,3 +83,41 @@ Matrix is the human-facing adapter: never call the homeserver REST API or curl d
 - `reply EVENT_ID TEXT` / `react EVENT_ID KEY`: answer or react (same room only).
 - `upload PATH`: post a file (up to 20 MB). `[-o PATH] download MXC`: fetch media.
 - `redact EVENT_ID [--reason TEXT]`: remove your message.
+
+<!-- BEGIN remuda-butler:managed id=guidance-layers -->
+## Guidance layers
+
+Butler loaded these guidance layers in this order when this session started.
+A later layer adds to or overrides an earlier one. Edit the files named here,
+not this block: Butler rewrites it on every session start.
+
+- framework: built in, version sha256:a394937732e8
+- cluster: not available (this Remuda core has no cluster file store; update Remuda)
+- team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
+- personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)
+- local: not loaded (no file at <T>/config/remuda/butler/guidance/local.md)
+<!-- END remuda-butler:managed id=guidance-layers -->
+
+<!-- BEGIN remuda-butler:managed id=memory -->
+## Butler memory
+
+Your durable memory is in `<T>/data/remuda/butler/memory/w1` (also `$REMUDA_BUTLER_MEMORY_DIR`).
+Butler owns it for `w1`, so it stays with you across restarts,
+compaction and a switch between Claude and Codex. Use it for facts that
+must outlive this session: decisions, standing instructions from the
+owner, and handoff context. Task notes for this working directory stay in
+`docs/`.
+
+- Read `MEMORY.md` there before you start; it indexes one note per file.
+- To remember something, write one Markdown file per fact in that
+  directory, then add a one-line pointer to `MEMORY.md`:
+  `- [Title](file.md) — one-line hook`.
+- Update a note instead of adding a duplicate; delete a note that is wrong.
+- Never store secrets or credentials there.
+
+`MEMORY.md` when this session started (the file is the source of truth):
+
+# Memory
+
+One line per note: `- [Title](file.md) — one-line hook`.
+<!-- END remuda-butler:managed id=memory -->

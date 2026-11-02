@@ -1,4 +1,12 @@
 local config = assert(remuda._butler_mail_config)
+
+-- Diagnostics are observational: unavailable/broken recording cannot affect mail or control.
+local function diagnostic(outcome, reason, correlation)
+  local diagnostics = remuda._butler_diagnostics
+  if diagnostics and type(diagnostics.record) == "function" then
+    pcall(diagnostics.record, "mail", outcome, reason, correlation)
+  end
+end
 local bus = assert(config.bus)
 -- Trust words are bound at load (main.lua execs matrix_request before
 -- this file), so a later redefinition of the public entry cannot change them.
@@ -136,6 +144,8 @@ local function envelope_json(message, object)
   if message.matrix then
     local media = {}
     for i, url in ipairs(message.matrix.media or {}) do media[i] = config.json_quote(url) end
+    local mentions = {}
+    for i, user_id in ipairs(message.matrix.mentions or {}) do mentions[i] = config.json_quote(user_id) end
     matrix = ',"matrix":{"sender":' .. config.json_quote(message.matrix.sender)
       .. ',"room_id":' .. config.json_quote(message.matrix.room_id)
       .. (message.matrix.room and ',"room":' .. config.json_quote(message.matrix.room) or "")
@@ -145,6 +155,7 @@ local function envelope_json(message, object)
       .. (message.matrix.in_reply_to and ',"in_reply_to":' .. config.json_quote(message.matrix.in_reply_to) or "")
       .. (message.matrix.room_kind and ',"room_kind":' .. config.json_quote(message.matrix.room_kind) or "")
       .. (message.matrix.mxc and ',"mxc":' .. config.json_quote(message.matrix.mxc) or "")
+      .. (message.matrix.mentions and ',"mentions":[' .. table.concat(mentions, ",") .. ']' or "")
       .. ',"media":[' .. table.concat(media, ",") .. ']}'
   end
   return '{"id":' .. config.json_quote(message.id) .. ',"from":' .. address_json(message.from)
@@ -218,11 +229,23 @@ local function load_message(disk, id)
       in_reply_to = matrix:match('"in_reply_to":"(.-)"'),
       room_kind = matrix:match('"room_kind":"(.-)"'),
       mxc = matrix:match('"mxc":"(.-)"'),
-      media = {},
+      media = {}, mentions = {},
     }
     local media = matrix:match('"media":(%b[])')
     if media then
       for url in media:gmatch('"(.-)"') do message.matrix.media[#message.matrix.media + 1] = url end
+    end
+    if type(remuda.json) == "table" and type(remuda.json.decode) == "function" then
+      local decoded_ok, decoded = pcall(remuda.json.decode, envelope)
+      local decoded_mentions = decoded_ok and type(decoded) == "table"
+        and type(decoded.matrix) == "table" and decoded.matrix.mentions or nil
+      if type(decoded_mentions) == "table" then
+        for _, user_id in ipairs(decoded_mentions) do
+          if type(user_id) == "string" and #user_id <= 255 then
+            message.matrix.mentions[#message.matrix.mentions + 1] = user_id
+          end
+        end
+      end
     end
   end
   bus.messages[id] = message
@@ -288,7 +311,10 @@ local function load_inbox(name)
         bus.mail_unreadable[name] = unreadable
         local known = false
         for _, seen in ipairs(unreadable) do known = known or seen == id end
-        if not known then unreadable[#unreadable + 1] = id end
+        if not known then
+          diagnostic("error", "envelope_read", id)
+          unreadable[#unreadable + 1] = id
+        end
       end
     end
   end
@@ -395,22 +421,23 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
       room = matrix.room or matrix.room_kind, thread_id = matrix.thread_id,
       thread_root = matrix.thread_root, in_reply_to = matrix.in_reply_to,
       room_kind = matrix.room_kind,
-      mxc = matrix.mxc, media = matrix.media or {},
+      mxc = matrix.mxc, media = matrix.media or {}, mentions = matrix.mentions or {},
     } or nil }
   local disk = paths(recipient_id)
   if disk then
     local ready, ready_err = prepare_storage()
-    if not ready then return nil, "cannot prepare Butler mail storage: " .. tostring(ready_err) end
+    if not ready then diagnostic("error", "storage_prepare", id); return nil, "cannot prepare Butler mail storage: " .. tostring(ready_err) end
     local wrote, err = write_atomic(disk.objects .. object_id, body, true)
-    if not wrote then return nil, "cannot write Butler mail body: " .. tostring(err) end
+    if not wrote then diagnostic("error", "body_write", id); return nil, "cannot write Butler mail body: " .. tostring(err) end
     wrote, err = write_atomic(disk.messages .. id .. ".json", envelope_json(message, object), true)
-    if not wrote then return nil, "cannot write Butler mail envelope: " .. tostring(err) end
+    if not wrote then diagnostic("error", "envelope_write", id); return nil, "cannot write Butler mail envelope: " .. tostring(err) end
     wrote, err = append(disk.inbox, '{"message_id":' .. config.json_quote(id) .. '}\n')
-    if not wrote then return nil, "cannot deliver Butler mail: " .. tostring(err) end
+    if not wrote then diagnostic("error", "inbox_append", id); return nil, "cannot deliver Butler mail: " .. tostring(err) end
   end
   bus.objects[object_id], bus.messages[id] = object, message
   mailbox(recipient_id)[#mailbox(recipient_id) + 1] = id
   mark_delivered(recipient_id, id)
+  diagnostic("delivered", "delivery_ok", id)
   return message
 end
 
@@ -635,7 +662,7 @@ local function inbox(name)
       if matrix_line ~= "" then lines[#lines + 1] = MATRIX_BODY_MARK end
       lines[#lines + 1] = object.content
       out[#out + 1] = table.concat(lines, "\n")
-      read[id], shown[#shown + 1] = true, id
+      shown[#shown + 1] = id
     end
   end
   for _, id in ipairs(unreadable) do
@@ -644,8 +671,10 @@ local function inbox(name)
   local disk = paths(name)
   if disk and #shown > 0 then
     local wrote, err = append(disk.read, table.concat(shown, "\n") .. "\n")
-    if not wrote then return "mail read-state was not saved: " .. tostring(err) end
+    if not wrote then diagnostic("error", "read_state_write", shown[1]); return "mail read-state was not saved: " .. tostring(err) end
   end
+  -- Preserve the in-memory unread state when saving the read log fails.
+  for _, id in ipairs(shown) do read[id] = true end
   bus.inboxes[name] = {}
   return table.concat(out, "\n")
 end

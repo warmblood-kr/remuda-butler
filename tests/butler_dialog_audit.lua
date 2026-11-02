@@ -39,7 +39,7 @@ assert(lines:find('"dialog_id":"unknown_choice"', 1, true), 'state id persisted'
 assert(lines:find('"handler_version":"1"', 1, true) and lines:find('"action":"stop"', 1, true))
 assert(lines:find('"owner_event_id":"$owner-answer"', 1, true) and lines:find('"id":"REQUEST"', 1, true),
   'owner/request provenance persisted')
-local stats = G.run({'guard', 'stats'})
+local stats = G.run('stats')
 for _, event in ipairs(events) do assert(stats:find('event ' .. event .. ': 1', 1, true), 'enumerated stats: ' .. event) end
 -- Writer failure must be observable by the dispatcher, even when guard is off.
 remuda.fs.write_atomic = function() return false, 'disk full' end

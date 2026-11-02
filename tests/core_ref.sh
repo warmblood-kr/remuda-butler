@@ -1,6 +1,7 @@
 # Core version shared by the shell, Rust, golden guidance, and contract checks.
 # Bump deliberately; a core change must not redden Butler PRs.
-CORE_REF=${CORE_REF:-97d79d2f56e4f949cccd5b271f14311f78665109}
+# Merged core #726 supplies the version-1 instance-bound text/key provider.
+CORE_REF=${CORE_REF:-ae9ce9513941cd71e3f9ddb71b7f39adab79a63f}
 
 core_ref_check() {
   local remuda_bin=${REMUDA_BIN:-remuda}

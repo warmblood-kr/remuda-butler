@@ -16,7 +16,7 @@ local function bounded(value, limit)
   return type(value) == 'string' and value ~= '' and #value <= limit and not value:find('%c')
 end
 
-local function snapshot(name, descriptor_id)
+local function snapshot(name, descriptor_id, observed)
   local bus = remuda._butler_bus or {}
   local agent = (bus.agents or {})[name]
   if not agent then
@@ -28,9 +28,15 @@ local function snapshot(name, descriptor_id)
       or not bounded(agent.session_start_marker, 256) then return nil end
   local startup = (remuda._butler_agent_startup or {})[agent.kind] or {}
   if #(startup.dialog_approvals or {}) == 0 then return nil end
-  local checked, _, state = pcall(butler.dialogs.check, name)
-  if not checked or not state or state.agent ~= agent or state.instance ~= agent.instance_id
-      or not state.blocked or state.id ~= 'unknown_choice' or state.captures < 2 then return nil end
+  local state = observed
+  if not state then
+    local checked, ready
+    checked, ready, state = pcall(butler.dialogs.check, name)
+    if not checked then return nil end
+  end
+  if not state or state.agent ~= agent or state.instance ~= agent.instance_id
+      or not state.blocked or state.captures < 2 or type(state.entry) ~= 'table'
+      or state.entry.response ~= 'approval' or state.entry.action_scope ~= 'once' then return nil end
   local listed, rows = pcall(remuda.ls)
   if not listed or type(rows) ~= 'table' then return nil end
   local live
@@ -44,7 +50,8 @@ local function snapshot(name, descriptor_id)
   local captured, screen = pcall(remuda.capture, name)
   if not captured or type(screen) ~= 'string' then return nil end
   for _, descriptor in ipairs(startup.dialog_approvals or {}) do
-    if (not descriptor_id or descriptor.id == descriptor_id) and bounded(descriptor.id, 128)
+    if (not descriptor_id or descriptor.id == descriptor_id) and descriptor.state_id == state.id
+        and bounded(descriptor.id, 128)
         and bounded(descriptor.version, 64) and bounded(descriptor.fixture, 512)
         and descriptor.action_scope == 'once'
         and (descriptor.category == 'permission' or descriptor.category == 'acknowledgement')
@@ -85,8 +92,8 @@ local function audit(data, event, outcome, rec)
   return ok and wrote == true
 end
 
-function M.consider(name)
-  local data, state = snapshot(name)
+function M.consider(name, observed)
+  local data, state = snapshot(name, nil, observed)
   if not data or state.approval_attempted == data.signature_hash then return end
   -- A denial/expiry/posting failure does not silently create another request.
   state.approval_attempted = data.signature_hash

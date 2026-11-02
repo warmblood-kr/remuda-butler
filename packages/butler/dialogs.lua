@@ -2,6 +2,7 @@
 -- pure screen matchers: { id, risk = "report", match(screen, probes) -> signature }.
 -- No descriptor is allowed to write input. Existing startup/compaction handlers
 -- retain their policy; all managed writes pass through a fresh screen/audit gate.
+-- Unknown screens allow input; only identified exceptions block the screen gate.
 local butler = assert(remuda.butler)
 local bus = assert(remuda._butler_bus)
 local M = {}
@@ -40,25 +41,38 @@ local function audit(name, agent, state, event, action, outcome)
   return ok and wrote == true
 end
 
-local function report(name, agent, alias, state)
-  if state.reported or state.reporting then return end
+local HINT = {
+  approval = 'Approval required: the owner must answer it in the pane; Butler chooses no option.',
+  report = 'It needs a decision in the pane; Butler chooses no option.',
+}
+
+local function notify(name, agent, alias, text)
   local leader = agent.parent or 'butler'
   -- The root cannot send itself a report without producing another notice to
   -- its blocked pane; its durable audit and operator log remain the fallback.
-  local text = 'Butler stopped writes: agent=' .. agent.kind .. ' session=' .. name
-    .. ' kind=unknown state=' .. state.id
-    .. '. Waiting for owner review; no input was sent.'
-    .. (state.audited and '' or ' Audit unavailable; writes remain stopped.')
   local ok, sent
-  state.reporting = true
   if leader ~= alias and type(remuda._butler_send) == 'function' then
     ok, sent = pcall(remuda._butler_send, alias, leader, text)
   elseif type(remuda.log) == 'function' then
     ok, sent = pcall(remuda.log, 'warn', text)
     sent = ok
   end
+  return ok and sent ~= false and sent ~= nil
+end
+
+local function report(name, agent, alias, state)
+  if state.reported or state.reporting then return end
+  local response = state.entry and state.entry.response or 'report'
+  if response == 'auto' then response = 'report' end -- only after the automatic answer failed
+  local text = 'Butler stopped writes: agent=' .. agent.kind .. ' session=' .. name
+    .. ' state=' .. state.id .. ' response=' .. response .. '. '
+    .. (state.auto_failed and 'Its automatic answer did not take effect. ' or '')
+    .. HINT[response] .. ' No input was sent.'
+    .. (state.audited and '' or ' Audit unavailable; writes remain stopped.')
+  state.reporting = true
+  local sent = notify(name, agent, alias, text)
   state.reporting = nil
-  if ok and sent ~= false and sent ~= nil then
+  if sent then
     state.reported = true
     audit(name, agent, state, 'dialog_reported', 'report', 'queued')
   end
@@ -97,14 +111,8 @@ local function startup_owned(name, agent, screen, signature)
     end
     return true
   end
-  -- Teach's exact informational options still belong to its defer-only launch
-  -- handler; a historical title cannot bless any other choice block.
-  if agent.kind == 'claude' and full and full.title == 'Teach auto mode' then
-    for _, label in ipairs(labels) do
-      if label ~= 'not now' and label ~= "don't show again" then return false end
-    end
-    return true
-  end
+  -- Teach auto mode is answered by the dispatcher (claude_teach_auto_mode);
+  -- launch only defers the first task while it is on screen.
   return false
 end
 
@@ -122,63 +130,330 @@ local function legacy_owned(name, agent, screen, signature)
     and startup.owned_picker(screen, signature, operation) == true
 end
 
+-- Match current modal context, not a box/menu alone or a title in scrollback.
+-- Provenance for the supported UI strings is in docs/concepts/input-screen-policy.md.
+local function current_geometry(screen, geometry)
+  if type(screen) ~= 'string' or not geometry then return nil end
+  local lines = {}
+  for line in (screen .. '\n'):gmatch('(.-)\n') do lines[#lines + 1] = line end
+  -- A composer below the old choices makes them transcript, not the current
+  -- interaction. Check this before picker/modal detection as well.
+  local saw_choices, in_quote, selected = false, false, nil
+  for index, line in ipairs(lines) do
+    local trimmed = line:match('^%s*(.-)%s*$')
+    if trimmed:match('^```') then in_quote = not in_quote end
+    if not in_quote then
+      local number, _, marked = remuda._butler_compaction.numbered_option(line)
+      if number then saw_choices = true end
+      if marked then selected = index end
+    end
+    if saw_choices and not remuda._butler_compaction.numbered_option(line) then
+      if trimmed:sub(1, 3) == '❯' or trimmed:sub(1, 3) == '›'
+          or trimmed == '>' or trimmed:match('^> ') or trimmed:find('Ask Codex to do anything', 1, true) == 1 then
+        saw_choices, selected = false, nil
+      end
+    end
+  end
+  if not saw_choices then
+    -- Box-only modal recognition still requires a supported title below.
+    local signature = geometry(screen)
+    if signature and (signature:sub(1, 3) == '╭' or signature:sub(1, 3) == '┌' or signature:sub(1, 3) == '╔') then
+      local start = screen:find(signature, 1, true)
+      local prefix = start and screen:sub(1, start - 1) or ''
+      local quoted = false
+      for line in (prefix .. '\n'):gmatch('(.-)\n') do
+        if line:match('^%s*```') then quoted = not quoted end
+      end
+      if quoted then return nil end
+      local suffix = start and screen:sub(start + #signature) or ''
+      if suffix:find('❯', 1, true) or suffix:find('›', 1, true) then return nil end
+      return signature
+    end
+    return nil
+  end
+  if not selected then return nil end
+  local first, last = selected, selected
+  while first > 1 and remuda._butler_compaction.numbered_option(lines[first - 1]) do first = first - 1 end
+  while last < #lines and remuda._butler_compaction.numbered_option(lines[last + 1]) do last = last + 1 end
+  local current = {}
+  for index = first, last do current[#current + 1] = lines[index] end
+  return table.concat(current, '\n')
+end
+
+-- The agent file's dialog_states list (agents/claudecode.lua, agents/codex.lua)
+-- names each recognised state and its response; docs/butler.md lists them.
+local function state_for(kind, heading, signature, context)
+  local startup = (remuda._butler_agent_startup or {})[kind] or {}
+  local labels = {}
+  for line in (signature .. '\n'):gmatch('(.-)\n') do
+    local _, label = remuda._butler_compaction.numbered_option(line)
+    if label then labels[#labels + 1] = label:gsub('%s+$', '') end
+  end
+  for _, entry in ipairs(startup.dialog_states or {}) do
+    if not entry.screen then
+      local hit = (entry.heading == nil or entry.heading == heading)
+        and (entry.requires == nil or signature:find(entry.requires, 1, true) ~= nil)
+      if hit and entry.match then
+        local ok, value = pcall(entry.match, heading, context, labels)
+        hit = ok and value == true
+      end
+      if hit then return entry end
+    end
+  end
+end
+
+local function scan_heading(kind, lower)
+  local startup = (remuda._butler_agent_startup or {})[kind] or {}
+  for _, entry in ipairs(startup.dialog_states or {}) do
+    if entry.scan and entry.heading == lower then return true end
+  end
+end
+
+-- Returns signature, state id and its dialog_states entry (nil for startup
+-- dialogs owned by the launch flow's own parsers).
+local function exception_signature(kind, screen, signature)
+  if not signature then return nil end
+  local start, from = nil, 1
+  while true do
+    local found = screen:find(signature, from, true)
+    if not found then break end
+    start, from = found, found + 1
+  end
+  if not start then return nil end
+  local prefix = screen:sub(1, start - 1)
+  local heading = prefix:match('([^\n]+)%s*$') or ''
+  -- A known modal may put its title inside its border rather than above it.
+  if signature:sub(1, 3) == '╭' or signature:sub(1, 3) == '┌' or signature:sub(1, 3) == '╔' then
+    local first = true
+    for line in (signature .. '\n'):gmatch('(.-)\n') do
+      if first then first = false
+      else
+        local title = line:gsub('│', ''):gsub('║', ''):match('^%s*(.-)%s*$')
+        if title ~= '' then heading = title; break end
+      end
+    end
+  end
+  heading = heading:match('^%s*(.-)%s*$'):lower()
+  local compaction = remuda._butler_compaction
+  if kind == 'codex' then
+    local tail = compaction.bottom_screen_lines(prefix, 32)
+    for i = #tail, 1, -1 do
+      local line = tail[i]:match('^%s*(.-)%s*$')
+      local lower = line:lower()
+      if scan_heading(kind, lower) then heading = lower; break end
+      -- Recognized approval header fields and command/diff rows may separate
+      -- the title from choices. A new unrelated heading ends the search.
+      if line ~= '' and not line:match('^Reason:') and not line:match('^Thread:')
+          and not line:match('^Environment:') and not line:match('^Permission rule:')
+          and not line:match('^Description:') and not line:match('^Destination:')
+          and not line:match('^%$ ') and not line:match('^[+%-@]')
+          and not line:match('^%d+%s') and not line:match('^%d+%s*[+%-]') then break end
+    end
+  end
+  local lines = compaction and compaction.bottom_screen_lines
+  local context = lines and table.concat(lines(prefix, 6), '\n') .. '\n' .. signature or signature
+  local entry = state_for(kind, heading, signature, context)
+  if entry then return heading .. '\n' .. signature, entry.id, entry end
+  -- Trust/update screens have established, agent-specific parsers. Check
+  -- the current choice segment plus nearby context, never the full scrollback.
+  local startup = (remuda._butler_agent_startup or {})[kind] or {}
+  local chooser = remuda._butler_chooser
+  local modal = chooser and chooser.startup_modal and chooser.startup_modal(startup, context)
+  if modal and modal.trust and chooser.trust_plan(modal, context) then
+    return context, kind .. '_trust', { id = kind .. '_trust', response = 'approval' }
+  end
+  if modal and modal.update then
+    local count = 0
+    for line in (signature .. '\n'):gmatch('(.-)\n') do
+      local _, label = compaction.numbered_option(line)
+      if label then
+        label, count = label:lower():gsub('%s+$', ''), count + 1
+        if label ~= 'skip' and not label:match('^skip ') and not label:match('^update now') then return nil end
+      end
+    end
+    if count > 0 then return context, 'codex_update', { id = 'codex_update', response = 'report' } end
+  end
+end
+
+-- Screen-only states (no numbered choice block), checked on the bottom lines.
+local function screen_state(kind, screen)
+  local startup = (remuda._butler_agent_startup or {})[kind] or {}
+  local tail = remuda._butler_compaction.bottom_screen_lines(screen, 16)
+  for _, entry in ipairs(startup.dialog_states or {}) do
+    if entry.screen then
+      local ok, hit = pcall(entry.match, tail)
+      if ok and hit == true then return entry.id, table.concat(tail, '\n'), entry end
+    end
+  end
+end
+
 local function classify(name, agent, screen)
+  if type(screen) ~= 'string' then return nil, nil, true end
   local startup = (remuda._butler_agent_startup or {})[agent.kind] or {}
   local compaction = remuda._butler_compaction
-  local probes = { unknown = compaction and compaction.unknown_dialog_signature }
-  local signature = probes.unknown and probes.unknown(screen)
+  local geometry = compaction and compaction.unknown_dialog_signature
+  local signature = current_geometry(screen, geometry)
+  local probes = { unknown = function(current)
+    return (exception_signature(agent.kind, current, current_geometry(current, geometry)))
+  end }
   if legacy_owned(name, agent, screen, signature) then return nil, nil, true end
+  local picker = signature and startup.picker and startup.picker(screen)
+  if picker then return "codex_" .. picker.kind .. "_picker", picker.signature end
+  local current, id, entry = exception_signature(agent.kind, screen, signature)
+  if current then return id, current, nil, entry end
+  id, current, entry = screen_state(agent.kind, screen)
+  if id then return id, current, nil, entry end
   for _, descriptor in ipairs(startup.blocking or {}) do
     assert(descriptor.risk == 'report' and type(descriptor.id) == 'string'
       and type(descriptor.match) == 'function', 'invalid reporting-only dialog descriptor')
     local signature = descriptor.match(screen, probes)
     if type(signature) == 'string' and signature ~= '' then return descriptor.id, signature end
   end
-  local working = startup.working and startup.working(screen)
-    or screen:find('esc to interrupt', 1, true) ~= nil
-  local ready = startup.ready and startup.ready(screen)
-  -- Notice/compaction already use this stricter composer parser, including
-  -- core-specific layouts. Unknown dialogs above always take precedence.
-  local empty = remuda._butler_prompt_is_empty and remuda._butler_prompt_is_empty(agent.kind, screen) == 'EMPTY'
-  return nil, nil, working == true or ready == true or empty == true
+  -- Screen recognition is not an authorization requirement. Only a positively
+  -- detected exceptional state stops input, including a nonempty composer after
+  -- type_text whose first Return was dropped. An unrecognised current numbered
+  -- choice is returned separately: it is reported, but input stays allowed.
+  local choice = signature and not (signature:sub(1, 3) == '╭' or signature:sub(1, 3) == '┌'
+    or signature:sub(1, 3) == '╔') and signature or nil
+  return nil, nil, true, nil, choice
 end
 
-local function observe(name, agent, alias, instance, screen, failure)
+-- Answer a recognised harmless dialog (response = "auto") by the text of its
+-- `choose` option: arrow keys onto it, then Return once a later capture shows
+-- it selected. Each key is audited first and the state rechecked after the
+-- audit. After AUTO_LIMIT tries the state is reported like any other.
+M.auto_limit = 4
+local function choice_plan(screen, choose)
+  local geometry = remuda._butler_compaction.unknown_dialog_signature
+  local block = current_geometry(screen, geometry)
+  if not block then return nil end
+  local labels, marked, target = {}, nil, nil
+  for line in (block .. '\n'):gmatch('(.-)\n') do
+    local number, label, selected = remuda._butler_compaction.numbered_option(line)
+    if number then
+      labels[#labels + 1] = label
+      if selected then marked = #labels end
+      if label:gsub('%s+$', ''):lower() == choose:lower() then
+        if target then return nil end
+        target = #labels
+      end
+    end
+  end
+  if not marked or not target then return nil end
+  local moves = {}
+  for _ = 1, math.abs(target - marked) do moves[#moves + 1] = target > marked and '<down>' or '<up>' end
+  return { moves = moves, selected = target == marked }
+end
+
+local function auto_answer(name, agent, alias, state, screen)
+  local entry = state.entry
+  if type(remuda._butler_human_active) == 'function' then
+    local ok, active = pcall(remuda._butler_human_active, name)
+    if ok and active then return end -- someone is typing in the pane: leave it to them
+  end
+  state.auto_steps = (state.auto_steps or 0) + 1
+  local plan = state.auto_steps <= M.auto_limit and choice_plan(screen, entry.choose)
+  local originals = remuda._butler_dialog_originals
+  if not plan or not originals or not originals.key then
+    state.auto_failed = true
+    return report(name, agent, alias, state)
+  end
+  local keys = plan.selected and { 'RET' } or plan.moves
+  for _, key in ipairs(keys) do
+    local action = 'key/' .. key
+    if not audit(name, agent, state, 'dialog_action', action, 'auto:' .. entry.choose) then
+      state.auto_failed = true
+      return report(name, agent, alias, state)
+    end
+    -- The audit can yield: the same dialog must still be current.
+    local captured, now = pcall(remuda.capture, name)
+    local ok, id, signature = pcall(classify, name, agent, captured and now or nil)
+    if not ok or id ~= state.id or signature ~= state.signature or states[name] ~= state then
+      audit(name, agent, state, 'dialog_action_result', action, 'not_written')
+      return
+    end
+    local sent, result = pcall(originals.key, name, key)
+    local written = sent and result ~= false
+    audit(name, agent, state, 'dialog_action_result', action, written and 'returned' or 'not_written')
+    if not written then return end
+  end
+  if plan.selected and type(remuda.log) == 'function' then
+    pcall(remuda.log, 'info', 'Butler answered ' .. state.id .. ' in ' .. name .. ': ' .. entry.choose)
+  end
+end
+
+-- An unrecognised current choice does not stop input (owner decision
+-- 2026-10-15), but one that stays unchanged is reported once: the session
+-- may be waiting for an answer nobody sees.
+M.unknown_report_seconds = 60
+M.clock = os.time
+local function watch_unknown(name, agent, alias, state, choice)
+  if not choice then state.unknown = nil; return end
+  local seen = state.unknown
+  if not seen or seen.signature ~= choice then
+    state.unknown = { signature = choice, since = M.clock() }
+    return
+  end
+  if seen.reported or M.clock() - seen.since < M.unknown_report_seconds then return end
+  local record = { instance = state.instance, id = 'unknown_choice', signature = choice }
+  audit(name, agent, record, 'dialog_reported', 'report', 'unrecognised_choice_input_allowed')
+  seen.reported = notify(name, agent, alias, 'Butler sees an unrecognised choice dialog: agent=' .. agent.kind
+    .. ' session=' .. name .. ' state=unknown_choice response=report. It has not changed for '
+    .. M.unknown_report_seconds .. ' seconds; the session may be waiting for an answer.'
+    .. ' Input is not stopped and Butler chooses no option.')
+end
+
+local function observe(name, agent, alias, instance, screen, failure, ticking)
   local state = states[name]
   if not state or state.instance ~= instance or state.agent ~= agent then
     state = { instance = instance, agent = agent, captures = 0 }
     states[name] = state
   end
-  local ok, id, signature, resolved
+  local ok, id, signature, resolved, entry, choice
   if failure then
     ok, id, signature = true, failure, failure
   else
-    ok, id, signature, resolved = pcall(classify, name, agent, screen)
+    ok, id, signature, resolved, entry, choice = pcall(classify, name, agent, screen)
   end
-  if not ok then id, signature = 'detection_unavailable', 'detection_unavailable' end
+  if not ok then id, signature, resolved, entry, choice = nil, nil, true, nil, nil end
+  watch_unknown(name, agent, alias, state, not id and choice or nil)
   if id then
+    if state.id ~= id then state.auto_steps, state.auto_failed = nil, nil end
     if state.id ~= id or state.signature ~= signature then
-      state.id, state.signature, state.captures = id, signature, 0
+      state.id, state.signature, state.captures, state.entry = id, signature, 0, entry
       state.audited, state.reported = nil, nil
       state.approval_attempted = nil
+      local diagnostics = remuda._butler_diagnostics
+      if diagnostics and type(diagnostics.record) == 'function' then
+        local reason = (id == 'capture_unavailable' or id == 'session_unavailable'
+            or id == 'session_replaced' or id == 'detection_unavailable') and id
+          or 'heuristic_dialog'
+        pcall(diagnostics.record, 'control', 'stopped', reason, agent.id)
+      end
     end
     state.captures = state.captures + 1
     state.blocked = true -- stop on the first capture, not after debounce
     if state.captures >= 2 then
       if not state.audited then state.audited = audit(name, agent, state, 'dialog_blocked') end
-      report(name, agent, alias, state)
+      if entry and entry.response == 'auto' and not state.auto_failed and state.audited then
+        -- Only the periodic tick answers; a writer's gate check never sends keys.
+        if ticking then auto_answer(name, agent, alias, state, screen) end
+      else
+        report(name, agent, alias, state)
+      end
     end
   elseif state.blocked and resolved then
-    if audit(name, agent, state, 'dialog_resolved', 'wait', 'ready_or_workflow_owned') then
-      state.id, state.signature, state.blocked = nil, nil, nil
+    if audit(name, agent, state, 'dialog_resolved', 'wait', 'no_exception_detected') then
+      state.id, state.signature, state.blocked, state.entry = nil, nil, nil, nil
       state.captures, state.reported, state.audited = 0, nil, nil
       state.approval_attempted = nil
+      state.auto_steps, state.auto_failed = nil, nil
     end
   end
   return not state.blocked, state
 end
 
-function M.check(name)
+local function check(name, ticking)
   local agent, alias = agent_for(name)
   if not agent then return true end
   -- ls exposes instance_id on the core versions used by launch's identity gate;
@@ -193,9 +468,12 @@ function M.check(name)
   if not session then failure = 'session_unavailable'
   elseif agent.instance_id and session.instance_id ~= agent.instance_id then failure = 'session_replaced' end
   local captured, screen = pcall(remuda.capture, name)
-  if not failure and (not captured or type(screen) ~= 'string') then failure = 'capture_unavailable' end
-  return observe(name, agent, alias, instance, screen, failure)
+  -- Missing/malformed captures are unknown screens, not identified modals.
+  -- Session availability and instance fencing above remain mandatory.
+  if not captured or type(screen) ~= 'string' then screen = nil end
+  return observe(name, agent, alias, instance, screen, failure, ticking)
 end
+function M.check(name) return check(name, false) end
 
 function M.tick()
   local listed, sessions = pcall(remuda.ls)
@@ -205,17 +483,142 @@ function M.tick()
     if session.alive then
       live[session.name] = true
       if agent_for(session.name) then
-        M.check(session.name)
-        if butler.dialog_approval then butler.dialog_approval.consider(session.name) end
+        local _, observed = check(session.name, true)
+        if butler.dialog_approval then butler.dialog_approval.consider(session.name, observed) end
       end
     end
   end
   for name in pairs(states) do if not live[name] then states[name] = nil end end
 end
 
-local function gated_write(original, operation, name, ...)
+-- Notice deferral is specifically a picker wait, not the general write gate:
+-- verification of already submitted mail must still observe subsequent dialogs.
+function M.picker_pending(name)
   local agent = agent_for(name)
-  if not agent then return original(name, ...) end
+  if not agent or agent.kind ~= "codex" then return false end
+  local startup = (remuda._butler_agent_startup or {}).codex or {}
+  if type(startup.picker) ~= "function" then return false end
+  local captured, screen = pcall(remuda.capture, name)
+  if not captured or type(screen) ~= "string" then return true end
+  return startup.picker(screen) ~= nil
+end
+
+-- Explicit owner recovery cancels only a complete known Codex picker. It
+-- never lends general write authority to the reporting gate or changes models.
+local recovering = {}
+function M.source_refresh_busy() return next(recovering) ~= nil end
+function M.recover_input(name, done)
+  local agent, alias = agent_for(name)
+  if not agent or agent.kind ~= "codex" then return done("Recovery refused: target is not a managed Codex session.") end
+  if recovering[name] then return done("Recovery already pending for " .. name .. ".") end
+  local lifecycle = remuda._butler_state or remuda._butler_compaction_state or {}
+  local member = (lifecycle.compaction_members or {})[agent.id or name]
+  if member and (member.compaction_in_progress or member.dialog_operation) then
+    return done("Recovery refused: a compaction workflow still owns this session. Wait for its bounded cleanup.")
+  end
+  local startup = (remuda._butler_agent_startup or {}).codex or {}
+  local function snapshot()
+    if butler.dialogs ~= M or agent_for(name) ~= agent then return nil end
+    local lifecycle = remuda._butler_state or remuda._butler_compaction_state or {}
+    local member = (lifecycle.compaction_members or {})[agent.id or name]
+    if member and (member.compaction_in_progress or member.dialog_operation) then return nil end
+    local ok, sessions = pcall(remuda.ls)
+    local instance
+    for _, row in ipairs(ok and sessions or {}) do
+      if row.name == name and row.alive and type(row.instance_id) == "string" and row.instance_id ~= "" then
+        instance = row.instance_id
+      end
+    end
+    if not instance or (agent.instance_id and agent.instance_id ~= instance) then return nil end
+    local captured, screen = pcall(remuda.capture, name)
+    if not captured or type(screen) ~= "string" then return nil end
+    return {instance=instance, screen=screen, picker=startup.picker and startup.picker(screen)}
+  end
+  local initial = snapshot()
+  if not initial or not initial.picker then return done("Recovery refused: no complete known Codex model/effort picker. No input was sent.") end
+  local telemetry = remuda._butler_telemetry_for and remuda._butler_telemetry_for(agent) or {}
+  local initial_model = type(telemetry.model) == "string" and telemetry.model:match("^gpt%-[%w%.%-]+$") and telemetry.model or "unknown"
+  local token = {instance=initial.instance, escapes=0}
+  recovering[name] = token
+  local handle, finished
+  local function finish(reason, final)
+    if finished then return end
+    finished = true
+    if handle and handle.cancel then handle:cancel() end
+    if recovering[name] == token then recovering[name] = nil end
+    local text = "Input recovery " .. name .. ": " .. reason .. ". Initial actual model=" .. initial_model
+      .. "; initial effort=unknown; picker=" .. initial.picker.kind
+      .. (initial.picker.model and ("/" .. initial.picker.model) or "")
+      .. "; ESC sent=" .. token.escapes .. "."
+    if final then text = text .. " Current model/effort=" .. final .. "." end
+    done(text .. " No model was selected; intended settings were not inferred. Queued inbox mail is retained.")
+  end
+  local function current()
+    local now = snapshot()
+    if not now or now.instance ~= token.instance or recovering[name] ~= token then return nil end
+    return now
+  end
+  local step
+  step = function(observed)
+    local now = current()
+    if not now then return finish("stopped: session changed or capture unavailable") end
+    if not now.picker then
+      local unknown = remuda._butler_compaction and remuda._butler_compaction.unknown_dialog_signature
+      local empty = remuda._butler_prompt_is_empty and remuda._butler_prompt_is_empty("codex", now.screen) == "EMPTY"
+      local model, effort = now.screen:match("(GPT%-[%w%.%-]+)%s+(%a+)%s+·")
+      if empty and model and effort and not (unknown and unknown(now.screen)) then
+        if not M.check(name) then return finish("stopped: resolution audit unavailable") end
+        return finish("completed; composer is safe", model:lower() .. " " .. effort:lower())
+      end
+      return finish("stopped: picker disappeared without a verified safe composer")
+    end
+    if now.picker.signature ~= observed.picker.signature or now.picker.kind ~= observed.picker.kind then
+      return finish("stopped: dialog changed before cancellation")
+    end
+    if token.escapes >= 2 then return finish("stopped: cancellation limit reached") end
+    local decision = {instance=token.instance, id="codex_picker_cancel", signature=now.picker.signature}
+    if not audit(name, agent, decision, "dialog_action", "key/ESC", "owner_recovery") then
+      return finish("stopped: audit unavailable")
+    end
+    local checked = current()
+    if not checked or not checked.picker or checked.picker.signature ~= now.picker.signature then
+      return finish("stopped: session or dialog changed during audit")
+    end
+    local originals = remuda._butler_dialog_originals
+    if not originals or not originals.key then return finish("stopped: original key API unavailable") end
+    local sent, result = pcall(originals.key, name, "ESC")
+    audit(name, agent, decision, "dialog_action_result", "key/ESC", sent and result ~= false and "returned" or "not_written")
+    if not sent or result == false then return finish("stopped: cancellation refused") end
+    token.escapes = token.escapes + 1
+    local previous = now.picker
+    local ok, next_handle = pcall(remuda.expect, name, {{id="owner-picker-cancel", match=function()
+      local next = current()
+      return not next or not next.picker or next.picker.signature ~= previous.signature
+    end, action=function()
+      if handle and handle.cancel then handle:cancel() end
+      local next = current()
+      if not next then return finish("stopped: session changed") end
+      -- ESC must make the observed effort picker go back to model, or close
+      -- the model picker. Any other transition ends this one-shot authority.
+      if next.picker and (previous.kind ~= "effort" or next.picker.kind ~= "model") then
+        return finish("stopped: unexpected picker transition")
+      end
+      step(next)
+    end}}, {timeout=5, interval=0.1,
+      on_timeout=function() finish("stopped: cancellation timed out; reissue a fresh owner command after review") end,
+      on_error=function() finish("stopped: cancellation watcher failed") end}, false)
+    if not ok then return finish("stopped: cancellation watcher unavailable") end
+    handle = next_handle
+  end
+  step(initial)
+end
+
+local function gated_write_with_hooks(original, operation, name, hooks, ...)
+  local agent = agent_for(name)
+  if not agent then
+    if hooks then error("Butler queue target is not registered", 0) end
+    return original(name, ...)
+  end
   local allowed, state = M.check(name)
   if not allowed then error('Butler dialog blocked; waiting for owner review', 0) end
   -- No prepared text or arbitrary key strings enter the log.
@@ -232,6 +635,28 @@ local function gated_write(original, operation, name, ...)
     audit(name, agent, state, 'dialog_action_result', action, 'not_written')
     error('Butler dialog blocked or session changed during audit', 0)
   end
+  if hooks then
+    local marked, accepted = pcall(hooks.before)
+    if not marked or accepted ~= true then
+      audit(name, agent, state, 'dialog_action_result', action, 'not_written')
+      error('Butler queue dispatch marker refused', 0)
+    end
+    -- Marker persistence can yield. Any refusal here is after dispatch intent
+    -- and must remain uncertain in the queue; never replay it as unattempted.
+    local checked, valid = pcall(hooks.recheck)
+    allowed = checked and valid == true and M.check(name)
+    if not allowed or states[name] ~= state or agent_for(name) ~= agent then
+      audit(name, agent, state, 'dialog_action_result', action, 'not_written')
+      error('Butler queue target or admission changed after marker', 0)
+    end
+  end
+  if hooks then
+    local checked, valid = pcall(hooks.identity)
+    if not checked or valid ~= true then
+      audit(name, agent, state, 'dialog_action_result', action, 'not_written')
+      error('Butler queue final identity fence refused', 0)
+    end
+  end
   local result = pack(pcall(original, name, ...))
   local outcome = not result[1] and 'error' or result[2] == false and 'refused' or 'returned'
   audit(name, agent, state, 'dialog_action_result', action, outcome)
@@ -239,7 +664,47 @@ local function gated_write(original, operation, name, ...)
   return unpack_args(result, 2, result.n)
 end
 
+local function gated_write(original, operation, name, ...)
+  return gated_write_with_hooks(original, operation, name, nil, ...)
+end
+-- Hand the guarded writer to the owner adapter once, never from input payloads.
+-- No arbitrary original/raw writer or approval authority is handed out.
+local queue_writer_registered = false
+function M.register_queue_writer(register)
+  if queue_writer_registered or type(register) ~= 'function' or not M._installed then return false end
+  queue_writer_registered = true
+  -- Only an internally installed, instance-bound provider may drain a queue.
+  -- Existing name-only core words are not an identity-fenced fallback.
+  local provider = remuda._butler_queue_bound_provider
+  if provider == nil and remuda._input_instance_bound_version == 1
+      and type(remuda._input_type_text_if_instance) == 'function'
+      and type(remuda._input_key_if_instance) == 'function' then
+    -- Capture the complete versioned capability; never infer support from a
+    -- single word or fall back to name-only calls after any bound failure.
+    provider = {identity_fenced=true, type_text=remuda._input_type_text_if_instance,
+      key=remuda._input_key_if_instance}
+  end
+  if type(provider) ~= 'table' or provider.identity_fenced ~= true
+      or type(provider.type_text) ~= 'function' or type(provider.key) ~= 'function' then
+    register(nil)
+    return true
+  end
+  register(function(operation, name, hooks, ...)
+    if butler.dialogs ~= M or not M._installed then error('Butler queue writer generation changed', 0) end
+    if operation ~= 'type_text' and operation ~= 'key' then error('Unsupported queue operation', 0) end
+    if type(hooks) ~= 'table' or type(hooks.before) ~= 'function' or type(hooks.recheck) ~= 'function' or type(hooks.identity) ~= 'function' or type(hooks.expected_instance) ~= 'string' then
+      error('Butler queue writer requires internal callbacks', 0)
+    end
+    local function bound(target, ...)
+      return provider[operation](target, hooks.expected_instance, ...)
+    end
+    return gated_write_with_hooks(bound, operation, name, hooks, ...)
+  end)
+  return true
+end
+
 function M.install()
+  M._installed = true
   -- Reload replaces this module but retains the original core functions once.
   local originals = remuda._butler_dialog_originals
   if not originals then
@@ -260,6 +725,7 @@ function M.install()
 end
 M.write = gated_write
 function M.stop()
+  M._installed = false
   if butler.dialogs ~= M then return end -- retiring activation cannot unwrap its replacement
   local originals = remuda._butler_dialog_originals
   if originals then

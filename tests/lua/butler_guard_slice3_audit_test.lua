@@ -74,6 +74,7 @@ T.test("a registered member cannot switch guard on when the audit write, flush, 
   start_butler()
   for _, stage in ipairs({ "write", "flush", "close" }) do
     T.eval("remuda._t_dir('g3-switch-audit-" .. stage .. "')")
+    T.eval("remuda.butler.guard_policy.set(false)") -- guard is on by default; start from an explicit off
     local result = T.eval(([=[
       local gp, original, stage = remuda.butler.guard_policy, io.open, %q
       io.open = function(path, mode)

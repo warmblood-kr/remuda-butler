@@ -4,6 +4,7 @@ local used, used_pct, busy, composer_empty, session_failure, attached, queued, m
   "?", nil, false, true, false, false, false, false
 local screen = "mock idle screen"
 remuda = {
+  cli = { parse = function() error("this lifecycle fixture must not invoke CLI parsing") end },
   _butler_test_mode = true,
   _butler_compaction_config = {
     watch = 400000, warn = 600000, critical = 800000, critical_pct = 90,

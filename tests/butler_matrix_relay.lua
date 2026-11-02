@@ -41,6 +41,8 @@ end
 dofile("packages/butler/guard_policy.lua")
 dofile("packages/butler/guard_grants.lua")
 dofile("packages/butler/guard_approval.lua")
+dofile("packages/butler/matrix_delivery_policy.lua")
+dofile("packages/butler/matrix_mentions.lua")
 local relay_module = dofile("packages/butler/matrix_relay.lua")
 
 local function remove_dir(dir)
@@ -115,7 +117,8 @@ end
 
 local function test_typed_line_switches_and_non_candidates()
   with_typed_line_stubs(function(typed, keys)
-    local dir, config_path = fixture()
+    -- The switches default on; this case needs them explicitly off.
+    local dir, config_path = fixture("typed_lines=false\nshell_lines=false\n")
     local client, delivered = scripted_client(), {}
     local relay = relay_module.new({ config_path = config_path, matrix = client,
       deliver = function(event) delivered[#delivered + 1] = event return true end })
@@ -136,7 +139,7 @@ local function test_typed_line_switches_and_non_candidates()
       ["!room:example.org"] = { timeline = { limited = true,
         events = { typed_line_event("$off-nonlive", "!hi") } } },
     } } } })
-    assert(#typed == 0, "both typed-line switches default off")
+    assert(#typed == 0, "both typed-line switches explicitly off type nothing")
     local delivered_ids = {}
     for _, event in ipairs(delivered) do delivered_ids[event.event_id] = true end
     for _, event_id in ipairs({ "$off-multiline", "$off-stale", "$off-triple", "$off-nonlive" }) do
@@ -170,8 +173,8 @@ local function test_typed_line_switches_and_non_candidates()
       if tostring(request.path):find("/send/m.reaction/", 1, true) then success_reactions = success_reactions + 1 end
     end
     assert(success_reactions == 1, "a successfully typed line should get one success reaction")
-    assert(#delivered == 1 and delivered[1].event_id == "$ordinary",
-      "messages without a leading bang must continue through the mail path")
+    assert(#delivered == 2 and delivered[1].event_id == "$ordinary" and delivered[2].event_id == "$on",
+      "ordinary messages and typed owner lines both continue through the mail path")
     relay:stop()
     cleanup_fixture(dir, config_path)
 
@@ -188,8 +191,8 @@ local function test_typed_line_switches_and_non_candidates()
     } } } })
     assert(#typed == 2 and typed[2].session == "butler" and typed[2].text == "ls",
       "with shell lines off, !! must not type while a plain ! line still types")
-    assert(#delivered == 1 and delivered[1].event_id == "$shell-off",
-      "a shell line refused by its switch should remain ordinary mail")
+    assert(#delivered == 2 and delivered[1].event_id == "$shell-off" and delivered[2].event_id == "$plain-on",
+      "a shell line refused by its switch stays ordinary mail and a typed plain line is also mailed")
     for _, request in ipairs(client.requests) do
       assert(not tostring(request.path):find("/send/m.room.message/", 1, true),
         "a shell line refused by its switch must not get a refusal thread line")
@@ -303,6 +306,58 @@ local function test_shell_line_uses_selected_kind_for_root()
   end)
 end
 
+function test_typed_line_bang_forms_reach_the_write_boundary_exactly()
+  -- Owner "! ! text" must reach the writer as exactly "! text" (no leading space) on both delivery paths.
+  local cases = {
+    { "! ! text", "! text" }, { "! !text", "!text" }, { "! text", "text" }, { "!text", "text" },
+    { "!! text", "! text" }, { "!!text", "!text" },
+  }
+  local function run_cases(label, capture, plain_only)
+    for index, case in ipairs(cases) do
+     if not (plain_only and case[1]:sub(1, 2) == "!!") then -- shell lines never enter the owner queue
+      local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+      local client = scripted_client()
+      local relay = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
+      relay:start()
+      client:complete(1, { json = { next_batch = "s0" } })
+      client:complete(2, { json = { next_batch = "s1", rooms = { join = { ["!room:example.org"] = { timeline = { events = {
+        typed_line_event("$bang-form-" .. index, case[1]) } } } } } } })
+      local got = capture()
+      assert(got[#got] == case[2], label .. ": " .. string.format("%q", case[1]) .. " must write "
+        .. string.format("%q", case[2]) .. " but wrote " .. string.format("%q", tostring(got[#got])))
+      relay:stop()
+      cleanup_fixture(dir, config_path)
+     end
+    end
+  end
+  local old_bus = remuda._butler_bus
+  remuda._butler_bus = { agents = { butler = { session_name = "butler", kind = "claude" } } }
+  with_typed_line_stubs(function(typed)
+    run_cases("fallback type_text", function()
+      local texts = {}
+      for _, entry in ipairs(typed) do texts[#texts + 1] = entry.text end
+      return texts
+    end)
+  end)
+  local old_butler = remuda.butler
+  local queued = {}
+  remuda.butler = { owner_input = { accept_line = function(session, text)
+    queued[#queued + 1] = text
+    return { id = "iq-" .. #queued, status = "queued" }
+  end } }
+  local ok, err = pcall(function()
+    with_typed_line_stubs(function(typed)
+      run_cases("durable queue", function() return queued end, true)
+      for _, entry in ipairs(typed) do
+        error("queued forms must not also type directly: " .. entry.text, 0)
+      end
+    end)
+  end)
+  remuda.butler = old_butler
+  remuda._butler_bus = old_bus
+  if not ok then error(err, 0) end
+end
+
 function test_typed_line_target_routing()
   with_typed_line_stubs(function(typed)
     local old_bus, old_selected = remuda._butler_bus, remuda._butler_selected_agent
@@ -376,6 +431,45 @@ local function test_typed_line_refusals_are_rate_limited()
   end)
 end
 
+function test_bang_passthrough_types_and_still_mails()
+  with_typed_line_stubs(function(typed, keys)
+    local dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
+    local client, delivered = scripted_client(), {}
+    local relay = relay_module.new({ config_path = config_path, matrix = client,
+      deliver = function(event) delivered[#delivered + 1] = event return true end })
+    relay:start()
+    client:complete(1, { json = { next_batch = "s0" } })
+    local function from(id, sender, body)
+      local event = typed_line_event(id, body)
+      event.sender = sender
+      return event
+    end
+    client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+      ["!room:example.org"] = { timeline = { events = {
+        from("$bang-owner", "@alice:example.org", "!echo hi there"),
+        from("$bang-stranger", "@mallory:example.org", "!rm -rf /"),
+        from("$bang-butler", "@bot:example.org", "!from butler"),
+        from("$bang-agent", "@agent-x:example.org", "!from agent"),
+        from("$bang-only", "@alice:example.org", "!"),
+        from("$bang-blank", "@alice:example.org", "!   "),
+      } } },
+    } } } })
+    assert(#typed == 1 and typed[1].session == "butler" and typed[1].text == "echo hi there",
+      "only the owner line with text after the bang is typed, verbatim")
+    assert(#keys == 1 and keys[1].key == "RET", "the typed owner line submits Return once")
+    local ids = {}
+    for _, event in ipairs(delivered) do ids[event.event_id] = (ids[event.event_id] or 0) + 1 end
+    assert(ids["$bang-owner"] == 1, "the typed owner line is also delivered to the inbox exactly once")
+    assert(ids["$bang-stranger"] == 1, "a non-owner bang line keeps ordinary inbox delivery and is not typed")
+    assert(ids["$bang-only"] == 1 and ids["$bang-blank"] == 1,
+      "empty bang lines are not typed and keep ordinary inbox delivery")
+    assert(not ids["$bang-butler"], "events sent by Butler itself are never typed or relayed")
+    assert(#typed == 1, "agent senders are never typed")
+    relay:stop()
+    cleanup_fixture(dir, config_path)
+  end)
+end
+
 local function test_typed_line_gate_error_is_contained_and_processed()
   with_typed_line_stubs(function(typed)
     local old_gate = remuda.butler.typed_lines.gate
@@ -398,8 +492,8 @@ local function test_typed_line_gate_error_is_contained_and_processed()
     } } } })
     assert(gate_calls == 1 and #typed == 0,
       "a gate exception should be contained without typing or aborting the batch")
-    assert(#delivered == 1 and delivered[1].event_id == "$after-gate-error",
-      "the ordinary event after a gate exception should still reach mail")
+    assert(#delivered == 2 and delivered[1].event_id == "$gate-error" and delivered[2].event_id == "$after-gate-error",
+      "a gate exception types nothing but both events still reach mail")
     client:complete(3, { json = { next_batch = "s2", rooms = { join = {
       ["!room:example.org"] = { timeline = { events = { failed } } },
     } } } })
@@ -846,6 +940,9 @@ local function test_matrix_download_explicit_output_without_home()
 end
 
 local function test_state_restart_corruption_and_processed_cap()
+  -- A restart re-reads mention permission state, filtered to create and power
+  -- levels in the configured room so a large room cannot overflow the response cap.
+  local RESTART_STATE = "&full_state=true&filter=%7B%22room%22%3A%7B%22state%22%3A%7B%22types%22%3A%5B%22m.room.create%22%2C%22m.room.power_levels%22%5D%2C%22rooms%22%3A%5B%22%21room%3Aexample.org%22%5D%7D%7D%7D"
   local dir, config_path = fixture()
   local client = scripted_client()
   local state_path = config_path .. ".since"
@@ -864,7 +961,7 @@ local function test_state_restart_corruption_and_processed_cap()
   assert(relay:state().pending["$pending"].references == nil,
     "invalid saved references should be discarded when pending state loads")
   relay:start()
-  assert(client.requests[1].path == "/_matrix/client/v3/sync?since=persisted&timeout=30000",
+  assert(client.requests[1].path == "/_matrix/client/v3/sync?since=persisted&timeout=30000" .. RESTART_STATE,
     "restart must resume the stored cursor without running a baseline")
   relay:stop()
 
@@ -872,7 +969,7 @@ local function test_state_restart_corruption_and_processed_cap()
   local legacy = relay_module.new({ config_path = config_path, matrix = client, deliver = function() return true end })
   assert(legacy:state().since == "legacy-cursor", "old cursor-only state must remain readable")
   legacy:start()
-  assert(client.requests[2].path == "/_matrix/client/v3/sync?since=legacy-cursor&timeout=30000")
+  assert(client.requests[2].path == "/_matrix/client/v3/sync?since=legacy-cursor&timeout=30000" .. RESTART_STATE)
   legacy:stop()
 
   local bad = assert(io.open(state_path, "wb")); bad:write("{broken"); bad:close()
@@ -899,6 +996,8 @@ local function test_state_restart_corruption_and_processed_cap()
 end
 
 local function test_pending_delivery_retries_safely_after_restart()
+  -- Same filtered restart snapshot as test_state_restart_corruption_and_processed_cap.
+  local RESTART_STATE = "&full_state=true&filter=%7B%22room%22%3A%7B%22state%22%3A%7B%22types%22%3A%5B%22m.room.create%22%2C%22m.room.power_levels%22%5D%2C%22rooms%22%3A%5B%22%21room%3Aexample.org%22%5D%7D%7D%7D"
   local dir, config_path = fixture()
   local first_client, second_client = scripted_client(), scripted_client()
   local successes = 0
@@ -924,7 +1023,7 @@ local function test_pending_delivery_retries_safely_after_restart()
   assert(successes == 1, "restart must retry the pending envelope")
   assert(restarted:state().pending["$pending-restart"] == nil)
   assert(restarted:state().processed["$pending-restart"])
-  assert(second_client.requests[1].path == "/_matrix/client/v3/sync?since=s1&timeout=30000")
+  assert(second_client.requests[1].path == "/_matrix/client/v3/sync?since=s1&timeout=30000" .. RESTART_STATE)
   second_client:complete(1, { json = { next_batch = "s2", rooms = { join = {
     ["!room:example.org"] = { timeline = { events = {
       { type = "m.room.message", event_id = "$pending-restart", sender = "@alice:example.org",
@@ -1119,7 +1218,7 @@ local function test_cli_matrix_mail_replies_keep_room_and_relation()
   local dir, config_path = fixture()
   local config = assert(io.open(config_path, "w"))
   config:write("http://matrix.invalid\n", home_room, "\n@bot:example.org\n@alice:example.org\n",
-    "false\n30000\nroom=", joined_room, " how=operator\n")
+    "false\n30000\nroom=", joined_room, " how=operator\nnotify_room=", joined_room, " mode=all\n")
   config:close()
   local token_path = config_path .. ".token"
   local token = assert(io.open(token_path, "w")); token:write("fake-token"); token:close()
@@ -1483,8 +1582,20 @@ end
 local function test_typed_line_config_is_strict_and_off_by_default()
   local dir, path = fixture()
   local conf = assert(matrix.read_config(path))
-  assert(conf.typed_lines == false and conf.shell_lines == false,
-    "typed-line switches must default to false")
+  assert(conf.typed_lines == true and conf.shell_lines == true and conf.approve_text == true,
+    "typed-line switches must default to true")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("typed_lines=false\nshell_lines=false\napprove_text=false\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.typed_lines == false and conf.shell_lines == false and conf.approve_text == false,
+    "explicit false must turn the switches off")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("typed_lines=maybe\nshell_lines=maybe\napprove_text=maybe\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.typed_lines == false and conf.shell_lines == false and conf.approve_text == false,
+    "an unreadable value must turn the switches off")
   assert(conf.approval_room == "all", "approval_room must default to all")
   cleanup_fixture(dir, path)
 
@@ -1594,7 +1705,7 @@ end
 local function owner_message(room, id)
   return { [room] = { timeline = { events = {
     { type = "m.room.message", event_id = id, sender = OWNER,
-      content = { msgtype = "m.text", body = "hello from " .. room } },
+      content = { msgtype = "m.text", body = "@bot:example.org hello from " .. room } },
   } } } }
 end
 
@@ -1621,7 +1732,7 @@ local function test_owner_invite_joins_writes_line_and_notices_once()
     "a repeated owner invite for a configured room must retry join without repeating the notice")
   client:sync({ json = { next_batch = "s3", rooms = { join = owner_message(NEW, "$in-new") } } })
   assert(delivered_ids(delivered, "$in-new"),
-    "a later owner message in the joined room must become mail (HOME rules)")
+    "a later mention in the joined room must become mail under the default notification policy")
   relay:stop()
   remove_dir(dir)
 end
@@ -2193,7 +2304,7 @@ local function test_open_mode_sender_allowlist_still_quarantines()
   client:sync({ json = { next_batch = "s1", rooms = { join = {
     [NEW] = { timeline = { events = {
       { type = "m.room.message", event_id = "$open-blocked", sender = STRANGER,
-        content = { msgtype = "m.text", body = "not allowed" } },
+        content = { msgtype = "m.text", body = "@bot:example.org not allowed" } },
     } } },
   } } } })
   local item
@@ -2608,27 +2719,17 @@ function ctx_tests.test_matrix_thread_cli_parser_contract()
     end
 
     check("thread --help", { "matrix", "thread", "--help" }, function(help)
-      local expected_help = [[Show every reply in a Matrix thread
-
-Usage: remuda butler matrix thread [OPTIONS] EVENT_ID
-
-Arguments:
-  EVENT_ID  Event that starts the thread, e.g. $abc123, or a Butler mail id (01M...)
-
-Options:
-      --room ROOM  Room ID, alias or name (default: the configured room)
-      --json       Print machine-readable JSON
-  -h, --help       Print help
-
-Next: remuda butler matrix reply EVENT_ID TEXT]]
-      assert(help and help.code == 0 and help.stdout == expected_help and help.stderr == "",
-        "must show the exact per-verb help and exit 0; got: " .. tostring(help and help.stdout or help))
+      assert(help and help.code == 0 and help.stderr == ""
+        and help.stdout:find("Usage: remuda butler matrix thread", 1, true)
+        and help.stdout:find("EVENT_ID", 1, true) and help.stdout:find("--json", 1, true)
+        and help.stdout:find("--room", 1, true) and help.stdout:find("Example:", 1, true),
+        "must show detailed declared per-verb help and exit 0")
     end)
 
     check("thread --jsno", { "matrix", "thread", "--jsno", "$abc" }, function(bad_option)
       local expected_error = "remuda: butler matrix thread: unknown option '--jsno'. Did you mean '--json'?\n"
         .. "Usage: remuda butler matrix thread [OPTIONS] EVENT_ID\n"
-        .. "Next: remuda butler matrix thread --help\n"
+        .. "Next: remuda butler matrix --help\n"
       assert(bad_option and bad_option.code == 2 and bad_option.stderr == expected_error
         and bad_option.stdout == "", "must suggest --json, show Usage and Next, and exit 2; got: "
           .. tostring(bad_option and bad_option.stderr or bad_option))
@@ -2657,8 +2758,8 @@ Next: remuda butler matrix reply EVENT_ID TEXT]]
     end)
 
     check("matrix -n history extra", { "matrix", "-n", "5", "history", "extra" }, function(result)
-      assert(result and result.code == 0 and result.stdout == matrix.cli_usage() and result.stderr == "",
-        "an invalid history invocation must keep the legacy full-usage response")
+      assert(result and result.code == 2 and result.stderr:find("unexpected argument", 1, true),
+        "an invalid history invocation must fail with declared-parser usage")
     end)
     check("matrix help", { "matrix", "help" }, function(result)
       assert(result and result.code == 0 and result.stdout == matrix.cli_usage() and result.stderr == "",
@@ -2671,8 +2772,8 @@ Next: remuda butler matrix reply EVENT_ID TEXT]]
     local old_core = capture_matrix_cli({ "matrix", "thread", "$abc" })
     remuda.cli = old_cli
     local ok, err = pcall(function()
-      assert(old_core and old_core.code == 0 and old_core.stdout == "No Matrix events\n"
-        and #calls == before + 1, "without remuda.cli, thread must keep the old parser and request path")
+      assert(old_core and old_core.code ~= 0 and old_core.stderr:find("requires remuda.cli.parse", 1, true)
+        and #calls == before, "without remuda.cli, thread must refuse without a request")
     end)
     if not ok then failures[#failures + 1] = "old core fallback: " .. tostring(err) end
     assert(#failures == 0, table.concat(failures, "\n"))
@@ -2754,17 +2855,11 @@ local function test_join_leave_missing_room_guidance()
   with_operator_config(path, 200, function(calls)
     for _, verb in ipairs({ "join", "leave" }) do
       local result = capture_matrix_cli({ "matrix", verb })
-      local example = verb == "join"
-        and "Next: remuda butler matrix join #alias:server"
-        or "Next: remuda butler matrix leave '!room:server'"
-      assert(result and result.code == 1
-        and result.stderr:match("^[^\n]+\nNext: [^\n]+\n$") ~= nil,
-        "matrix " .. verb .. " without ROOM must print one error and one Next line: "
-          .. tostring(result and result.stderr))
-      assert(result.stderr:find("matrix " .. verb .. " requires ROOM", 1, true)
-        and result.stderr:find(example, 1, true)
-        and not result.stderr:find("Usage", 1, true),
-        "matrix " .. verb .. " without ROOM must give a concise example, not usage: " .. result.stderr)
+      assert(result and result.code == 2 and result.stdout == ""
+        and result.stderr:find("missing required argument <ROOM>", 1, true)
+        and result.stderr:find("Usage: remuda butler matrix " .. verb, 1, true)
+        and result.stderr:find("Next:", 1, true),
+        "matrix " .. verb .. " without ROOM must report declared-parser usage")
     end
     assert(#calls == 0, "missing-room commands must not make HTTP calls")
   end)
@@ -3491,12 +3586,13 @@ remuda._test_create_symlink = function(target, link)
   assert(result and result.code == 0, "could not create symlink: " .. tostring(result and result.stderr))
 end
 
--- Receive rules (notes/rx-design.md, PR 1). One accept rule in every room:
--- root, followed thread, or mention. Non-allowlisted senders arrive with a marker.
+-- Receive rules: each room's notification policy chooses all, mentions/follows,
+-- or none. Non-allowlisted senders that pass that policy arrive with a marker.
 local RX_BUTLER, RX_ALLY, RX_PREFIX = "@helper:example.org", "@agent-ally:example.org", "@agent-evil:evil.example"
 
-local function rx_fixture()
-  return invite_fixture(OWNER .. "," .. RX_ALLY, "butler_senders=" .. RX_BUTLER .. "\nroom=" .. NEW .. "\n")
+local function rx_fixture(extra)
+  return invite_fixture(OWNER .. "," .. RX_ALLY,
+    "butler_senders=" .. RX_BUTLER .. "\nroom=" .. NEW .. "\n" .. (extra or ""))
 end
 
 local function rx_frame(sender)
@@ -3628,11 +3724,13 @@ local function test_rx_agent_root_without_mention()
       rx_msg("$ally-root", RX_ALLY, "status: started"), rx_msg("$prefix-root", RX_PREFIX, "status: hi") })
     rx_sync(client, NEW, { rx_msg("$helper-new", RX_BUTLER, "joined-room status") })
     rx_sync(client, ALL, { rx_msg("$helper-all", RX_BUTLER, "all-room status") })
-    for _, id in ipairs({ "$helper-root", "$ally-root", "$prefix-root", "$helper-new", "$helper-all" }) do
+    for _, id in ipairs({ "$helper-root", "$ally-root", "$prefix-root" }) do
       local event = rx_find(delivered, id)
       assert(event, id .. ": a Butler's root post must be delivered without a mention")
       assert(event.from_agent == true, id .. ": a Butler root keeps from_agent=true")
     end
+    assert(not rx_find(delivered, "$helper-new") and not rx_find(delivered, "$helper-all"),
+      "additional rooms default to mentions-followed, including ALL-BUTLERS")
     assert(rx_find(delivered, "$ally-root").trusted ~= false, "an allowlisted Butler is trusted")
     assert(rx_find(delivered, "$helper-root").trusted == false, "butler_senders alone is not the owner allowlist")
     relay:stop()
@@ -3669,13 +3767,134 @@ local function test_rx_thread_reply_needs_follow_home_joined()
     assert(not rx_followed(relay, HOME, "$root-home"), "delivery in HOME does not follow the thread")
     -- A joined room delivers a thread reply only in a followed thread.
     rx_sync(client, NEW, { rx_msg("$root-new", OWNER, "root"),
-      rx_msg("$root-new-t1", OWNER, "reply", rx_thread("$root-new")) })
-    assert(rx_find(delivered, "$root-new"), "a joined room delivers a root")
-    assert(not rx_find(delivered, "$root-new-t1"), "a joined room does not deliver an unfollowed thread reply")
-    relay:subscribe_thread(NEW, "$root-new")
-    rx_sync(client, NEW, { rx_msg("$root-new-t2", OWNER, "reply", rx_thread("$root-new")) })
+      rx_msg("$root-new-m", OWNER, "@bot:example.org please see"),
+      rx_msg("$root-new-t1", OWNER, "reply", rx_thread("$root-new-m")) })
+    assert(not rx_find(delivered, "$root-new"), "a joined room does not deliver an unmentioned root")
+    assert(rx_find(delivered, "$root-new-m"), "a mention in a new room is delivered")
+    assert(rx_followed(relay, NEW, "$root-new-m"), "a mention in a root post auto-follows that thread")
+    assert(rx_find(delivered, "$root-new-t1"), "a joined room delivers replies after a root mention")
+    relay:subscribe_thread(NEW, "$root-new-m")
+    rx_sync(client, NEW, { rx_msg("$root-new-t2", OWNER, "reply", rx_thread("$root-new-m")) })
     assert(rx_find(delivered, "$root-new-t2"), "a joined room delivers a followed thread reply")
+    relay:unsubscribe_thread(NEW, "$root-new-m")
+    rx_sync(client, NEW, { rx_msg("$root-new-t3", OWNER, "reply after unfollow", rx_thread("$root-new-m")) })
+    assert(not rx_find(delivered, "$root-new-t3"), "unfollow immediately stops later thread mail")
     relay:stop()
+  end)
+end
+
+function test_rx_room_notification_modes()
+  dofile("packages/butler/matrix_write.lua")
+  local dir, path = rx_fixture()
+  local conf = assert(matrix.read_config(path))
+  assert(matrix.notification_mode(conf, HOME) == "all", "HOME defaults to all notifications")
+  assert(matrix.notification_mode(conf, NEW) == "mentions-followed",
+    "an invited room defaults to mentions and followed threads")
+  assert(matrix.notification_mode(conf, ALL) == "mentions-followed",
+    "ALL-BUTLERS is an additional room and defaults to mentions and followed threads")
+  assert(matrix.config_set_notification_mode(path, NEW, "none"), "an owner can save a room's none policy")
+  conf = assert(matrix.read_config(path))
+  assert(matrix.notification_mode(conf, NEW) == "none", "the explicit none policy is parsed")
+  assert(matrix.config_set_notification_mode(path, NEW, "mentions-followed"),
+    "restoring the default policy should succeed")
+  conf = assert(matrix.read_config(path))
+  assert(conf.room_notifications[NEW] == nil and matrix.notification_mode(conf, NEW) == "mentions-followed",
+    "writing the room default removes its redundant override")
+  local unknown_ok, unknown_error = matrix.config_set_notification_mode(path, "!foreign:example.org", "none")
+  assert(not unknown_ok and tostring(unknown_error):find("not a configured Matrix room", 1, true),
+    "notification policy cannot be set for an unconfigured room")
+  remove_dir(dir)
+
+  dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    local old_instance = relay_module.instance
+    relay_module.instance = relay
+    local old_config, old_paths = remuda._butler_matrix_config, remuda._butler_matrix_paths
+    remuda._butler_matrix_config = { config_path = path }
+    remuda._butler_matrix_paths = remuda._butler_matrix_config
+    local changed = capture_matrix_cli({ "matrix", "--room", NEW, "notifications", "all" })
+    assert(changed and changed.code == 0 and changed.stdout:find("Notifications for " .. NEW .. ": all", 1, true),
+      "the owner can change a room's policy through the Matrix CLI")
+    remuda._butler_matrix_config, remuda._butler_matrix_paths = old_config, old_paths
+    rx_sync(client, NEW, { rx_msg("$all-root", OWNER, "unmentioned root"),
+      rx_msg("$all-reply", OWNER, "unfollowed reply", rx_thread("$never-followed")) })
+    assert(rx_find(delivered, "$all-root") and rx_find(delivered, "$all-reply"),
+      "all mode delivers all room messages regardless of mention or follow")
+    relay_module.instance = old_instance
+    relay:stop()
+  end)
+
+  dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    local old_instance = relay_module.instance
+    relay_module.instance = relay
+    relay:subscribe_thread(NEW, "$followed")
+    local old_config, old_paths = remuda._butler_matrix_config, remuda._butler_matrix_paths
+    remuda._butler_matrix_config = { config_path = path }
+    remuda._butler_matrix_paths = remuda._butler_matrix_config
+    local changed = capture_matrix_cli({ "matrix", "--room", NEW, "notifications", "none" })
+    assert(changed and changed.code == 0 and changed.stdout:find(": none", 1, true),
+      "the owner can suppress all notifications in a room")
+    remuda._butler_matrix_config, remuda._butler_matrix_paths = old_config, old_paths
+    rx_sync(client, NEW, { rx_msg("$none-root", OWNER, "@bot:example.org mentioned"),
+      rx_msg("$none-reply", OWNER, "followed reply", rx_thread("$followed")) })
+    assert(not rx_find(delivered, "$none-root") and not rx_find(delivered, "$none-reply"),
+      "none mode suppresses mentions and followed thread replies")
+    relay:subscribe_thread(NEW, "$none-mentioned-root")
+    relay:unsubscribe_thread(NEW, "$none-mentioned-root")
+    rx_sync(client, NEW, { rx_msg("$none-mentioned", OWNER, "@bot:example.org mention after unfollow",
+      rx_thread("$none-mentioned-root")) })
+    assert(not rx_find(delivered, "$none-mentioned"), "none mode still suppresses the mention's inbox delivery")
+    assert(rx_followed(relay, NEW, "$none-mentioned-root"),
+      "a trusted mention auto-follows even while room notifications are none")
+
+    remuda._butler_matrix_config = { config_path = path }
+    remuda._butler_matrix_paths = remuda._butler_matrix_config
+    local following = capture_matrix_cli({ "matrix", "--room", NEW, "notifications", "mentions-followed" })
+    assert(following and following.code == 0, "the owner can restore mentions-followed mode")
+    rx_sync(client, NEW, { rx_msg("$none-mentioned-reply", OWNER, "followed after mode restore",
+      rx_thread("$none-mentioned-root")) })
+    assert(rx_find(delivered, "$none-mentioned-reply"),
+      "the mention received while none was active still follows the thread")
+
+    relay:stop()
+    local pending, pending_client, pending_delivered = rx_relay(path)
+    relay_module.instance = pending
+    local queued = capture_matrix_cli({ "matrix", "--room", NEW, "notifications", "mentions-followed" })
+    assert(queued and queued.code == 0, "mentions-followed mode can be set before queueing")
+    rx_sync(pending_client, NEW, {
+      rx_msg("$pending-unfollow", OWNER, "@bot:example.org wait for context", rx_thread("$pending-unfollow-root")) }, true)
+    assert(not rx_find(pending_delivered, "$pending-unfollow"), "the context fetch holds the mail pending")
+    assert(rx_followed(pending, NEW, "$pending-unfollow-root"), "the mention follows before context completes")
+    pending:unsubscribe_thread(NEW, "$pending-unfollow-root")
+    rx_context(pending_client, true)
+    assert(not rx_find(pending_delivered, "$pending-unfollow"),
+      "a pending mention is suppressed if its thread is unfollowed before delivery")
+
+    pending:subscribe_thread(NEW, "$pending-reply-root")
+    rx_sync(pending_client, NEW, {
+      rx_msg("$pending-reply", OWNER, "unmentioned reply while context is loading",
+        rx_thread("$pending-reply-root")) }, true)
+    assert(not rx_find(pending_delivered, "$pending-reply"), "the followed reply waits for context")
+    pending:unsubscribe_thread(NEW, "$pending-reply-root")
+    rx_context(pending_client, true)
+    assert(not rx_find(pending_delivered, "$pending-reply"),
+      "an unmentioned pending reply is suppressed if its thread is unfollowed before delivery")
+
+    rx_sync(pending_client, NEW, {
+      rx_msg("$pending-none", OWNER, "@bot:example.org switch to none while waiting",
+        rx_thread("$pending-none-root")) }, true)
+    assert(not rx_find(pending_delivered, "$pending-none"), "the second context fetch holds mail pending")
+    local suppress = capture_matrix_cli({ "matrix", "--room", NEW, "notifications", "none" })
+    assert(suppress and suppress.code == 0, "none mode can be selected while a mail is pending")
+    rx_context(pending_client, true)
+    assert(not rx_find(pending_delivered, "$pending-none"),
+      "a queued mail is suppressed when the current room policy changes to none")
+    pending:stop()
+    remuda._butler_matrix_config, remuda._butler_matrix_paths = old_config, old_paths
+    relay_module.instance = old_instance
   end)
 end
 
@@ -3720,7 +3939,7 @@ local function test_rx_follow_unfollow_verbs()
 
       result = capture_matrix_cli({ "matrix", "follow" })
       assert(result and result.code ~= 0
-        and result.stderr:find("remuda butler matrix [--json] [--room ROOM] follow EVENT_ID", 1, true)
+        and result.stderr:find("Usage: remuda butler matrix follow", 1, true)
         and not result.stderr:find("upload PATH", 1, true),
         "a follow parse error shows only the follow usage")
     end)
@@ -3734,7 +3953,7 @@ local function test_rx_reply_follows_thread_all_room_kinds()
     local relay, client, delivered = rx_relay(path)
     for _, room in ipairs({ HOME, NEW, ALL }) do
       local root, sent = "$rr-" .. room:sub(2, 4), "$sent-" .. room:sub(2, 4)
-      rx_sync(client, room, { rx_msg(root, OWNER, "question") })
+      rx_sync(client, room, { rx_msg(root, OWNER, "@bot:example.org question") })
       assert(rx_find(delivered, root), room .. ": root delivered")
       assert(relay:record_outgoing_reply(root, sent), room .. ": the reply is recorded")
       assert(rx_followed(relay, room, root), room .. ": a reply must follow its thread")
@@ -3784,7 +4003,7 @@ local function test_rx_mention_follows_thread()
 end
 
 local function test_rx_main_timeline_reply_is_root()
-  local dir, path = rx_fixture()
+  local dir, path = rx_fixture("notify_room=" .. ALL .. " mode=all\nnotify_room=" .. NEW .. " mode=all\n")
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
     local plain = { ["m.in_reply_to"] = { event_id = "$earlier" } }
@@ -3792,7 +4011,7 @@ local function test_rx_main_timeline_reply_is_root()
     rx_sync(client, NEW, { rx_msg("$plain-new", RX_BUTLER, "plain reply", plain) })
     for _, id in ipairs({ "$plain-all", "$plain-new" }) do
       local event = rx_find(delivered, id)
-      assert(event, id .. ": a plain m.in_reply_to without m.thread is a root and is delivered")
+      assert(event, id .. ": all mode delivers a plain m.in_reply_to without m.thread")
       assert(event.thread_root == nil and event.in_reply_to == "$earlier", id .. ": no thread root is invented")
     end
     relay:stop()
@@ -3825,13 +4044,14 @@ local function test_rx_allowlisted_human_unchanged()
       rx_sync(client, ALL, { rx_msg("$a-root", OWNER, "all root"),
         rx_msg("$a-m", OWNER, "@bot:example.org see", rx_thread("$a-thread")),
         rx_msg("$a-quiet", OWNER, "unfollowed", rx_thread("$other-thread")) })
-      for _, id in ipairs({ "$h-root", "$a-root", "$a-m" }) do
+      for _, id in ipairs({ "$h-root", "$a-m" }) do
         local message = rx_find(emitted, id)
         assert(message, id .. ": allowlisted human root or mention is delivered")
         assert(not message.text:find("not on the owner allowlist", 1, true), id .. ": allowlisted text has no marker")
         assert(message.matrix.trusted == true and message.matrix.from_agent == false
           and message.from.kind == "matrix", id .. ": allowlisted human is trusted, not an agent")
       end
+      assert(not rx_find(emitted, "$a-root"), "an unmentioned root in ALL-BUTLERS is not delivered by default")
       assert(rx_find(emitted, "$h-root").text == "plain owner text", "allowlisted body is unchanged")
       assert(not rx_find(emitted, "$a-quiet"), "an unfollowed thread reply in ALL stays filtered")
     end)
@@ -3899,8 +4119,8 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
     local relay, client, delivered = rx_relay(path)
     local events = { rx_msg("$u-img", STRANGER, "x.png", nil, "m.image") }
     for i = 1, 3 do events[#events + 1] = rx_msg("$u-thread" .. i, STRANGER, "unfollowed", rx_thread("$nope")) end
-    for i = 1, 5 do events[#events + 1] = rx_msg("$u" .. i, STRANGER, "root " .. i) end
-    events[#events + 1] = rx_msg("$u-owner", OWNER, "owner still arrives")
+    for i = 1, 5 do events[#events + 1] = rx_msg("$u" .. i, STRANGER, "@bot:example.org root " .. i) end
+    events[#events + 1] = rx_msg("$u-owner", OWNER, "@bot:example.org owner still arrives")
     rx_sync(client, NEW, events)
     assert(rx_find(delivered, "$u1") and rx_find(delivered, "$u2"),
       "the first 2 accepted untrusted roots are delivered (rejected and quarantined events do not count)")
@@ -3914,7 +4134,7 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
       rx_msg("$h2", STRANGER, "home thread", rx_thread("$nope")), rx_msg("$h3", STRANGER, "home 3") })
     assert(rx_find(delivered, "$h2") and not rx_find(delivered, "$h3"),
       "the cap is per room, and an unfollowed thread reply in HOME is accepted, so it counts")
-    rx_sync(client, NEW, { rx_msg("$u6", STRANGER, "still capped") })
+    rx_sync(client, NEW, { rx_msg("$u6", STRANGER, "@bot:example.org still capped") })
     assert(not rx_find(delivered, "$u6"), "the room stays capped within the hour")
     local warnings, new_warnings = 0, 0
     for _, line in ipairs(logs) do
@@ -3937,7 +4157,7 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
     assert(client:messages(HOME, summary .. NEW) == 1,
       "a second capped sync within 10 minutes posts no second summary for the room")
     now = now + 3601
-    rx_sync(client, NEW, { rx_msg("$u7", STRANGER, "an hour later") })
+    rx_sync(client, NEW, { rx_msg("$u7", STRANGER, "@bot:example.org an hour later") })
     assert(rx_find(delivered, "$u7"), "delivery works again after the hour")
     assert(client:messages(HOME, summary_line("1 message", NEW)) == 1,
       "the held count is posted by the first sync after the 10 minutes, even with nothing capped in it")
@@ -4225,17 +4445,32 @@ local function test_rx_b2b_turn_guard_home_line_once()
     rx_post_http(path, function(calls)
       rx_sync(client, HOME, { rx_msg("$gt", OWNER, "@bot:example.org and @agent-ally:example.org, talk") })
       relay:subscribe_thread(HOME, "$gt")
+      for i = 1, 8 do
+        local progress = rx_cli({ "matrix", "reply", "$gt", "progress " .. i })
+        assert(progress.code == 0, "our own progress reports must not exhaust the peer turn limit: "
+          .. tostring(progress.stderr))
+      end
+      assert(not relay:b2b_stopped(HOME, "$gt"), "our own reports do not start a peer-only streak")
+      assert(client:messages(HOME, line) + rx_http_texts(calls, line) == 0,
+        "normal progress reports do not announce a Butler ping-pong")
       for i = 1, 5 do rx_sync(client, HOME, { rx_msg("$gt-a" .. i, RX_ALLY, "@bot:example.org turn " .. i, rx_thread("$gt")) }) end
       assert(rx_find(delivered, "$gt-a5"), "Butler turns in a followed thread are delivered")
       local result = rx_cli({ "matrix", "reply", "$gt-a5", "my turn" })
-      assert(result.code == 0, "turn 6 (our own reply to a Butler) is allowed once the B2B block is lifted: "
+      assert(result.code == 0, "a reply after five peer turns is allowed: "
         .. tostring(result.stderr))
       result = rx_cli({ "matrix", "reply", "$gt-a5", "one more" })
+      assert(result.code == 0 and not relay:b2b_stopped(HOME, "$gt"),
+        "our own replies neither increment nor reset the five peer turns")
+      rx_sync(client, HOME, { rx_msg("$gt-a6", RX_ALLY, "@bot:example.org turn 6", rx_thread("$gt")) })
+      result = rx_cli({ "matrix", "reply", "$gt-a6", "past the peer limit" })
       assert(result.code ~= 0 and (result.stderr .. result.stdout):find("Reply not sent: stopped replying in thread $gt ("
         .. HOME .. "): 6 Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\nNext: remuda butler matrix --room '"
         .. HOME .. "' thread '$gt'", 1, true),
         "after 6 Butler-only turns a reply into the thread is refused and says it was not sent, got: "
           .. result.stderr .. result.stdout)
+      result = rx_cli({ "matrix", "reply", "$gt", "progress for the owner" })
+      assert(result.code == 0 and relay:b2b_stopped(HOME, "$gt"),
+        "a verified human can receive progress without resetting a stopped peer loop")
       rx_sync(client, HOME, { rx_msg("$gt-a7", RX_ALLY, "@bot:example.org turn 7", rx_thread("$gt")) })
       result = rx_cli({ "matrix", "reply", "$gt-a7", "again" })
       assert(result.code ~= 0, "the thread stays stopped while only Butlers talk")
@@ -4289,8 +4524,8 @@ local function test_rx_untrusted_room_cap_summary_no_quarantine()
     local relay, client, delivered = rx_relay(path)
     local events = {}
     for i = 1, 3 do events[#events + 1] = rx_msg("$u-thread" .. i, STRANGER, "unfollowed", rx_thread("$nope")) end
-    for i = 1, 5 do events[#events + 1] = rx_msg("$u" .. i, STRANGER, "root " .. i) end
-    events[#events + 1] = rx_msg("$u-owner", OWNER, "owner still arrives")
+    for i = 1, 5 do events[#events + 1] = rx_msg("$u" .. i, STRANGER, "@bot:example.org root " .. i) end
+    events[#events + 1] = rx_msg("$u-owner", OWNER, "@bot:example.org owner still arrives")
     rx_sync(client, NEW, events)
     assert(rx_find(delivered, "$u1") and rx_find(delivered, "$u2"), "the first 2 untrusted roots are delivered")
     for i = 3, 5 do
@@ -4303,7 +4538,7 @@ local function test_rx_untrusted_room_cap_summary_no_quarantine()
       .. " were not passed to the Butler (hourly rate cap). Next: remuda butler matrix --room '" .. NEW .. "' history"
     assert(client:messages(HOME, line) == 1,
       "ONE exact HOME summary for the sync, the room shell-quoted in Next (unaccepted events do not count)")
-    rx_sync(client, NEW, { rx_msg("$u-owner2", OWNER, "quiet sync") })
+    rx_sync(client, NEW, { rx_msg("$u-owner2", OWNER, "@bot:example.org quiet sync") })
     assert(client:messages(HOME, "non-allowlisted senders in ") == 1, "no summary for a sync with nothing capped")
     relay:stop()
   end)
@@ -4323,7 +4558,7 @@ local function test_rx_untrusted_room_cap_summary_floor_10min()
       local events = {}
       for _ = 1, count do
         seq = seq + 1
-        events[#events + 1] = rx_msg("$f" .. seq, sender, "root " .. seq)
+        events[#events + 1] = rx_msg("$f" .. seq, sender, "@bot:example.org root " .. seq)
       end
       rx_sync(client, room, events)
     end
@@ -4449,11 +4684,22 @@ local function test_rx_mail_reply_turn_guard()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
     local line = "Two Butlers talked 2 turns without a human, so I paused thread $mt (" .. HOME .. ") to avoid ping-pong. No action needed; reply in that thread only if you want it to continue."
-    rx_sync(client, HOME, { rx_msg("$mt", RX_ALLY, "@bot:example.org ping") })
-    local mail = rx_mail_id(delivered, "$mt")
-    assert(mail, "a Butler's root post is delivered")
+    rx_sync(client, HOME, { rx_msg("$mt", OWNER, "@bot:example.org report progress") })
+    local human_mail = rx_mail_id(delivered, "$mt")
+    for i = 1, 8 do
+      local admitted, why = relay:queue_mail_reply({ mail_id = human_mail,
+        reply_mail_id = "P" .. i, text = "normal progress " .. i })
+      assert(admitted, "normal mail progress must not count toward the peer limit: " .. tostring(why))
+    end
+    assert(not relay:b2b_stopped(HOME, "$mt") and client:messages(HOME, line) == 0,
+      "our own mail reports do not start or announce a peer loop")
+    rx_sync(client, HOME, { rx_msg("$mt-a1", RX_ALLY, "@bot:example.org ping", rx_thread("$mt")) })
+    local mail = rx_mail_id(delivered, "$mt-a1")
+    assert(mail, "a Butler's reply is delivered")
     local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
-    assert(ok, "turn 2 of 2 (our mail reply to a Butler) is queued: " .. tostring(err))
+    assert(ok and not relay:b2b_stopped(HOME, "$mt"),
+      "our reply leaves the single peer turn unchanged: " .. tostring(err))
+    rx_sync(client, HOME, { rx_msg("$mt-a2", RX_ALLY, "@bot:example.org again", rx_thread("$mt")) })
     ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
     assert(ok == nil and tostring(err):find("Reply not sent: stopped replying in thread $mt (" .. HOME
       .. "): 2 Butler-only turns. A reply in that thread from a person on the allowlist resumes it.", 1, true),
@@ -4463,14 +4709,17 @@ local function test_rx_mail_reply_turn_guard()
     assert(client:messages(HOME, "reply-two") == 0 and relay:state().reply_outbox["R2"] == nil,
       "a refused mail reply is neither queued nor posted")
     assert(client:messages(HOME, line) == 1, "exactly ONE HOME line for the stopped thread")
+    ok, err = relay:queue_mail_reply({ mail_id = human_mail, reply_mail_id = "PH", text = "owner progress" })
+    assert(ok and relay:b2b_stopped(HOME, "$mt") and client:messages(HOME, "owner progress") == 1,
+      "mail to a verified human remains available and does not reset peer protection: " .. tostring(err))
     relay:stop()
   end)
 end
 
 -- Live path: the daemon's relay sends a queued mail reply through api.reply, the
 -- REAL matrix.reply (the tests above give the relay a scripted client as api).
--- The reply that reaches b2b_max_turns was allowed by queue_mail_reply, so it
--- must be posted; only the next one is refused.
+-- A reply accepted before the peer limit must still be posted after another
+-- peer message stops the thread; subsequent peer replies are refused.
 local function test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply()
   local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
   rx_with_dir(dir, function()
@@ -4496,14 +4745,18 @@ local function test_rx_mail_reply_limit_turn_is_posted_through_matrix_reply()
         local mail = rx_mail_id(delivered, "$lt")
         assert(mail, "a Butler's root post is delivered")
         local queued, queue_error = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
-        assert(queued, "turn 2 of 2 (our mail reply to a Butler) is queued: " .. tostring(queue_error))
+        assert(queued, "our reply is queued without consuming a peer turn: " .. tostring(queue_error))
+        assert(not relay:b2b_stopped(HOME, "$lt"), "our reply leaves the peer count below the limit")
+        relay._response({ next_batch = "s2", rooms = { join = { [HOME] = { timeline = { events = {
+          rx_msg("$lt-a2", RX_ALLY, "peer followup", rx_thread("$lt")) } } } } } }, sync)
+        assert(relay:b2b_stopped(HOME, "$lt"), "the second peer message stops the thread")
         for _ = 1, 4 do
           if rx_http_texts(calls, "reply-one") > 0 then break end
           tick_timers(1)
         end
         local held = relay:state().reply_outbox["R1"]
         assert(rx_http_texts(calls, "reply-one") == 1,
-          "the reply that reaches the limit is POSTED through matrix.reply, not refused after it was allowed; outbox error: "
+          "the accepted reply is POSTED through matrix.reply after the peer limit; outbox error: "
             .. tostring(held and held.last_error))
         queued, queue_error = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R2", text = "reply-two" })
         assert(queued == nil and tostring(queue_error):find("2 Butler-only turns", 1, true),
@@ -4956,7 +5209,7 @@ function ctx_tests.test_matrix_thread_takes_room_from_route()
   rx_with_dir(dir, function()
     local relay, client = rx_relay(path)
     relay_module.instance = relay
-    rx_sync(client, NEW, { rx_msg("$t-joined", OWNER, "a root in the joined room") })
+    rx_sync(client, NEW, { rx_msg("$t-joined", OWNER, "@bot:example.org a root in the joined room") })
     local urls = {}
     with_alias_http(path, function(spec)
       urls[#urls + 1] = tostring(spec.url or spec.path)
@@ -5362,7 +5615,7 @@ function ctx_tests.test_ctx_lines_do_not_count_as_turns_or_against_the_rate_cap(
     local relay = relay_module.instance
     assert(not relay:b2b_stopped(NEW, "$cnt-root"), "3 Butler context lines are not turns (b2b_max_turns=2)")
     assert(#relay:quarantine_list() == 0, "context lines are not quarantined")
-    ctx.sync(NEW, { ctx_event("$cnt-s", STRANGER, "a real root from the stranger", 10) })
+    ctx.sync(NEW, { ctx_event("$cnt-s", STRANGER, "@bot:example.org a real root from the stranger", 10) })
     assert(ctx.mail("$cnt-s"), "2 stranger context lines do not use up untrusted_per_room_hour=1")
     assert(#ctx.emitted == 2, "context lines are not delivered as mail of their own, got " .. #ctx.emitted .. " mails")
   end)
@@ -5442,8 +5695,153 @@ end
 -- once; each waiting mail goes out when ITS fetch answers or fails.
 
 rx_tests = {
+  { "test_rx_structured_room_mentions_and_permission_state", function()
+    local dir, path = rx_fixture()
+    rx_with_dir(dir, function()
+      local relay, client, delivered = rx_relay(path)
+      local cursor = 0
+      local function power(level, threshold)
+        return { type = "m.room.power_levels", state_key = "", sender = OWNER,
+          content = { users = { [OWNER] = level }, notifications = { room = threshold } } }
+      end
+      local function mention(id, metadata, body)
+        local event = rx_msg(id, OWNER, body or "announcement")
+        event.content["m.mentions"] = metadata == nil and { room = true } or metadata
+        return event
+      end
+      local function sync(events, states, room, limited, kind)
+        cursor = cursor + 1
+        client:sync({ json = { next_batch = "roommention" .. cursor, rooms = {
+          [kind or "join"] = { [room or NEW] = {
+            state = states and { events = states } or nil,
+            timeline = { events = events, limited = limited } } } } } })
+        rx_context(client, true)
+      end
+      sync({ mention("$unknown") })
+      assert(not rx_find(delivered, "$unknown"), "unknown state fails closed")
+      sync({ mention("$positive") }, { power(50, 50) })
+      assert(rx_find(delivered, "$positive"), "structured room mention needs no literal text")
+      assert(not rx_followed(relay, NEW, "$positive"), "room mentions never auto-follow")
+      sync({ mention("$before"), power(0, 50), mention("$after"),
+        power(50, 50), mention("$restored") })
+      assert(rx_find(delivered, "$before") and not rx_find(delivered, "$after")
+        and rx_find(delivered, "$restored"), "power changes apply at the message point")
+      sync({ mention("$gap") }, { power(0, 50) }, NEW, true)
+      assert(not rx_find(delivered, "$gap"), "limited timeline applies state delta first")
+      sync({ mention("$gap-restored") }, { power(50, 50) }, NEW, true)
+      assert(rx_find(delivered, "$gap-restored"), "known delta permits limited timeline mention")
+      for index, metadata in ipairs({ { room = false }, { room = "true" }, { room = 1 }, "true", {} }) do
+        sync({ mention("$malformed" .. index, metadata, "@room @roommate #alias:example.org") })
+        assert(not rx_find(delivered, "$malformed" .. index), "only boolean true is a room mention")
+      end
+      local html = mention("$html", {}, "#alias:example.org")
+      html.content.format, html.content.formatted_body = "org.matrix.custom.html",
+        "<a href='https://matrix.to/#/#alias:example.org'>@room</a>"
+      sync({ html, rx_msg("$substring", OWNER, "@roommate"), rx_msg("$legacy", OWNER, "@room") })
+      assert(not rx_find(delivered, "$html") and not rx_find(delivered, "$substring")
+        and not rx_find(delivered, "$legacy"), "text and room links never imply structured broadcast")
+      sync({ mention("$badpower") }, { power("50", 50) })
+      assert(not rx_find(delivered, "$badpower"), "malformed power state fails closed")
+      sync({ mention("$foreign") }, { power(100, 50) }, "!foreign:example.org")
+      sync({ mention("$invited") }, { power(100, 50) }, NEW, false, "invite")
+      sync({ mention("$postinvite") })
+      assert(not rx_find(delivered, "$foreign") and not rx_find(delivered, "$invited")
+        and not rx_find(delivered, "$postinvite"), "only configured joined rooms grant permission")
+      sync({ mention("$rejoined") }, { power(50, 50) })
+      sync({}, nil, NEW, false, "leave")
+      sync({ mention("$afterleave") })
+      assert(rx_find(delivered, "$rejoined") and not rx_find(delivered, "$afterleave"),
+        "leave clears permission before rejoin")
+      sync({ mention("$none") }, { power(50, 50) })
+      relay:set_notification_mode(NEW, "none")
+      sync({ mention("$none-suppressed") })
+      assert(not rx_find(delivered, "$none-suppressed"), "none mode suppresses room mentions")
+      relay:set_notification_mode(NEW, "mentions-followed")
+      sync({ rx_msg("$direct-unchanged", OWNER, "@bot:example.org hello"),
+        rx_msg("$follow-unchanged", OWNER, "reply", rx_thread("$direct-unchanged")) })
+      sync({ rx_msg("$home-unchanged", OWNER, "plain") }, nil, HOME)
+      assert(rx_find(delivered, "$direct-unchanged") and rx_find(delivered, "$follow-unchanged")
+        and rx_find(delivered, "$home-unchanged"), "direct, followed and HOME delivery unchanged")
+      relay:stop()
+      relay, client, delivered = rx_relay(path)
+      assert(client.requests[1].path:find("full_state=true&filter=", 1, true)
+        and client.requests[1].path:find("m.room.power_levels", 1, true),
+        "restart requests a full state snapshot filtered to permission state")
+      sync({ mention("$restart-unknown") })
+      assert(not rx_find(delivered, "$restart-unknown"), "restart never trusts persisted privilege")
+      sync({ mention("$restart-known") }, { power(50, 50) })
+      assert(rx_find(delivered, "$restart-known"), "fresh permission state enables notification")
+      relay:stop()
+      relay:start()
+      assert(client.requests[#client.requests].path:find("full_state=true&filter=", 1, true),
+        "stop/start also clears cached permission and fetches full state")
+      sync({ mention("$same-instance-restart") })
+      assert(not rx_find(delivered, "$same-instance-restart"), "stop/start cannot retain permission")
+      relay:stop()
+      client, delivered = invite_client(), {}
+      relay = relay_module.new({ config_path = path, matrix = client,
+        deliver = function(event) delivered[#delivered + 1] = event return { id = "default" } end })
+      relay:start()
+      local create = { type = "m.room.create", state_key = "", sender = OWNER,
+        content = { creator = OWNER, room_version = "10" } }
+      sync({ mention("$default-creator") }, { create })
+      assert(rx_find(delivered, "$default-creator"), "complete state without power levels gives creator 100")
+      local stranger = mention("$default-stranger")
+      stranger.sender = STRANGER
+      sync({ stranger })
+      assert(not rx_find(delivered, "$default-stranger"), "noncreator default 0 cannot notify room")
+      sync({ mention("$old-creator-zero") }, { power(0, 50) })
+      assert(not rx_find(delivered, "$old-creator-zero"), "old creator obeys explicit power levels")
+      create.content = { room_version = "12" }
+      sync({ mention("$v12-creator") }, { create, power(0, 50) })
+      assert(rx_find(delivered, "$v12-creator"), "v12 creator has infinite power")
+      -- Decode real JSON: the core preserves the distinction between [] and {}.
+      local invalid_power = {
+        '[]', 'null',
+        '{"notifications":[],"users_default":50}',
+        '{"users":[],"users_default":50}',
+        '{"notifications":null,"users_default":50}',
+        '{"users":null,"users_default":50}',
+        '{"users_default":null}',
+        '{"users_default":1e20}',
+        '{"users_default":9007199254740992}',
+        '{"users_default":-9007199254740992}',
+        '{"notifications":{"room":-9007199254740992},"users_default":50}',
+        '{"notifications":{"room":9007199254740992},"users_default":50}',
+        '{"users":{"' .. OWNER .. '":1e20}}',
+      }
+      for index, raw in ipairs(invalid_power) do
+        local event = power(50, 50)
+        event.content = remuda.json.decode(raw)
+        sync({ mention("$json-invalid" .. index) }, { event })
+        assert(not rx_find(delivered, "$json-invalid" .. index), "malformed decoded power fails closed: " .. raw)
+      end
+      local valid_power = {
+        '{"notifications":{},"users":{},"users_default":50}',
+        '{"notifications":{"room":9007199254740991},"users_default":9007199254740991}',
+        '{"notifications":{"room":-9007199254740991},"users_default":-9007199254740991}',
+      }
+      for index, raw in ipairs(valid_power) do
+        local event = power(50, 50)
+        event.content = remuda.json.decode(raw)
+        sync({ mention("$json-valid" .. index) }, { event })
+        assert(rx_find(delivered, "$json-valid" .. index), "valid decoded objects and integer bounds work")
+      end
+      local missing = power(100, 50)
+      missing.content = nil
+      sync({ mention("$missing-power-content") }, { missing })
+      assert(not rx_find(delivered, "$missing-power-content"), "malformed power is not absent power")
+      sync({}, nil, NEW, false, "leave")
+      create.content = { creator = OWNER, room_version = "10" }
+      sync({ mention("$rejoin-default") }, { create })
+      assert(rx_find(delivered, "$rejoin-default"), "rejoin full state restores absent-power defaults")
+      relay:stop()
+    end)
+  end },
+
   { "test_typed_line_switches_and_non_candidates", test_typed_line_switches_and_non_candidates },
   { "test_typed_line_replay_after_restart_and_history_are_not_typed", test_typed_line_replay_after_restart_and_history_are_not_typed },
+  { "test_typed_line_bang_forms_reach_the_write_boundary_exactly", test_typed_line_bang_forms_reach_the_write_boundary_exactly },
   { "test_typed_line_target_routing", test_typed_line_target_routing },
   { "test_shell_line_uses_selected_kind_for_root", test_shell_line_uses_selected_kind_for_root },
   { "test_typed_line_refusals_are_rate_limited", test_typed_line_refusals_are_rate_limited },
@@ -5599,6 +5997,7 @@ rx_tests = {
       remuda._butler_bus = old_bus
     end)
   end },
+  { "test_bang_passthrough_types_and_still_mails", test_bang_passthrough_types_and_still_mails },
   { "test_typed_line_gate_error_is_contained_and_processed", test_typed_line_gate_error_is_contained_and_processed },
   { "test_typed_line_persist_failure_fails_closed", test_typed_line_persist_failure_fails_closed },
   { "test_typed_line_return_failure_warns_text_may_remain", test_typed_line_return_failure_warns_text_may_remain },
@@ -5607,6 +6006,7 @@ rx_tests = {
   { "test_rx_agent_root_without_mention", test_rx_agent_root_without_mention },
   { "test_rx_prefix_stranger_gets_marker", test_rx_prefix_stranger_gets_marker },
   { "test_rx_thread_reply_needs_follow_home_joined", test_rx_thread_reply_needs_follow_home_joined },
+  { "test_rx_room_notification_modes", test_rx_room_notification_modes },
   { "test_rx_follow_unfollow_verbs", test_rx_follow_unfollow_verbs },
   { "test_rx_reply_follows_thread_all_room_kinds", test_rx_reply_follows_thread_all_room_kinds },
   { "test_rx_send_follows_own_root", test_rx_send_follows_own_root },
@@ -5653,13 +6053,46 @@ rx_tests = {
         assert(result.code == 0 and n == 1 and body:find("from file /in.md", 1, true)
           and not body:find('"--file', 1, true), "reply --file posts the file text, got " .. tostring(result.stderr))
         result, n = posted({ "matrix", "reply", "$q", "--fiel", "x" })
-        assert(result.code ~= 0 and n == 0 and result.stderr:find("matrix reply EVENT_ID --file PATH", 1, true),
+        assert(result.code ~= 0 and n == 0 and result.stderr:find("unknown reply option --fiel", 1, true),
           "a mistyped reply option never posts, got " .. tostring(result.stderr))
+        result, n, body = posted({ "matrix", "reply", "$q", "--", "--fiel", "x" })
+        assert(result.code == 0 and n == 1 and body:find("--fiel x", 1, true), "reply text after -- stays literal")
       end)
       relay:stop()
     end)
   end },
   { "test_rx_mention_follows_thread", test_rx_mention_follows_thread },
+  { "test_rx_pill_mention_without_m_mentions", function()
+    local dir, path = rx_fixture()
+    rx_with_dir(dir, function()
+      local relay, client, delivered = rx_relay(path)
+      -- Element autocomplete pill: body has only the display name, no m.mentions.
+      local function pill(id, href)
+        local ev = rx_msg(id, OWNER, "bot \240\159\146\149: hello")
+        ev.content.format = "org.matrix.custom.html"
+        ev.content.formatted_body = '<a href="https://matrix.to/#/' .. href .. '">@bot:example.org</a>: hello'
+        return ev
+      end
+      rx_sync(client, NEW, { pill("$pill-plain", "@bot:example.org") })
+      assert(rx_find(delivered, "$pill-plain"), "a matrix.to pill mentions the butler")
+      rx_sync(client, NEW, { pill("$pill-enc", "%40bot%3Aexample.org") })
+      assert(rx_find(delivered, "$pill-enc"), "a percent-encoded pill mentions the butler")
+      rx_sync(client, NEW, { pill("$pill-other", "@bot:example.org.evil") })
+      assert(not rx_find(delivered, "$pill-other"), "a longer mxid is not this butler")
+      local reply = pill("$pill-reply", "@bot:example.org")
+      reply.content.formatted_body = "<mx-reply><blockquote>" .. reply.content.formatted_body
+        .. "</blockquote></mx-reply>plain reply"
+      rx_sync(client, NEW, { reply })
+      assert(not rx_find(delivered, "$pill-reply"), "a pill quoted in an mx-reply fallback is not a mention")
+      local text = pill("$pill-text", "@bot:example.org")
+      text.content.formatted_body = "see <code>https://matrix.to/#/@bot:example.org</code> and matrix.to/#/@bot:example.org"
+      rx_sync(client, NEW, { text })
+      assert(not rx_find(delivered, "$pill-text"), "a bare or code matrix.to URL is not an href pill")
+      rx_sync(client, NEW, { pill("$pill-x", "@notbot:example.org") })
+      assert(not rx_find(delivered, "$pill-x"), "another user's pill is not a mention")
+      relay:stop()
+    end)
+  end },
   { "test_rx_main_timeline_reply_is_root", test_rx_main_timeline_reply_is_root },
   { "test_rx_in_thread_reply_unfollowed_not_delivered", test_rx_in_thread_reply_unfollowed_not_delivered },
   { "test_rx_follow_guard_refuses_and_warns_no_trim", test_rx_follow_guard_refuses_and_warns_no_trim },
@@ -5707,6 +6140,15 @@ rx_tests = {
   { "test_ctx_only_the_root_line_when_the_delivered_message_is_the_only_reply", ctx_tests.test_ctx_only_the_root_line_when_the_delivered_message_is_the_only_reply },
   { "test_ctx_restart_between_fetch_and_delivery", ctx_tests.test_ctx_restart_between_fetch_and_delivery },
 }
+
+-- The main chunk already uses Lua's 200-local budget; register in a function.
+do (function(cases)
+  for _, case in ipairs(cases) do rx_tests[#rx_tests + 1] = case end
+end)(dofile("tests/helpers/matrix_delivery_policy.lua")({
+  matrix = matrix, relay_module = relay_module, fixture = rx_fixture, with_dir = rx_with_dir,
+  relay = rx_relay, sync = rx_sync, msg = rx_msg, thread = rx_thread,
+  context = rx_context, find = rx_find, home = HOME, room = NEW, owner = OWNER,
+})) end
 
 -- A live reload keeps the old relay instance, so the relay object may be from an
 -- older load and lack newer methods. ONE check at the top of the reply path: the
@@ -6191,17 +6633,17 @@ end }
       assert(result and result.code ~= 0 and result.stderr:find(text, 1, true),
         table.concat(args, " ") .. " should fail with " .. text .. ", got: " .. tostring(result and result.stderr))
     end
-    failed({ "matrix", "upload", "--thread" }, "--thread requires a value")
-    failed({ "matrix", "upload", "--thread", "$e", "--caption" }, "--caption requires a value")
+    failed({ "matrix", "upload", "--thread" }, "--thread <EVENT_ID>")
+    failed({ "matrix", "upload", "--thread", "$e", "--caption" }, "--caption <TEXT>")
     local function usage_shown(args)
       local result = capture_matrix_cli(args)
-      assert(result and result.code == 0 and result.stdout:find("upload [--thread EVENT_ID] [--caption TEXT] PATH", 1, true),
+      assert(result and result.code == 2 and result.stderr:find("Usage: remuda butler matrix upload", 1, true),
         table.concat(args, " ") .. " should print the usage, got: " .. tostring(result and result.stdout))
     end
     usage_shown({ "matrix", "upload", "--thread", "$e" })
     usage_shown({ "matrix", "upload", "--bogus", "/x" })
     usage_shown({ "matrix", "upload", "--caption", "c" })
-    failed({ "matrix", "send", "--thread", "$e", "hi" }, "unknown option --thread")
+    failed({ "matrix", "send", "--thread", "$e", "hi" }, "unknown option '--thread'")
   end }
 end)()
 
@@ -6313,7 +6755,8 @@ end)()
       assert(result.code == 1 and result.stderr:find("is not a Matrix message, so a file cannot be attached", 1, true)
         and result.stderr:find("Next: remuda butler reply " .. plain .. " TEXT", 1, true),
         "non-Matrix mail: " .. tostring(result.stderr))
-      assert(run_reply({ "reply", plain, "--attach" }) == nil, "--attach without a path gets the usage")
+      local missing = run_reply({ "reply", plain, "--attach" })
+      assert(missing and missing.code == 2 and missing.stderr:find("--attach <PATH>", 1, true), "--attach without a path fails with declared usage")
       assert(#requests == 0, "nothing is sent")
     end)
   end }
@@ -6508,8 +6951,8 @@ rx_tests[#rx_tests + 1] = { "test_ctx_pending_fetch_does_not_hold_back_other_mai
     local relay, client, delivered = rx_relay(path)
     rx_sync(client, NEW, {
       rx_msg("$hold-a", OWNER, "@bot:example.org first thread", rx_thread("$hold-root-a")),
-      rx_msg("$hold-root", OWNER, "a root post"),
-      rx_msg("$hold-s", STRANGER, "a stranger's root post"),
+      rx_msg("$hold-root", OWNER, "@bot:example.org a root post"),
+      rx_msg("$hold-s", STRANGER, "@bot:example.org a stranger's root post"),
       rx_msg("$hold-sm", STRANGER, "@bot:example.org a stranger's mention in a thread", rx_thread("$hold-root-s")),
       rx_msg("$hold-b", OWNER, "@bot:example.org second thread", rx_thread("$hold-root-b")),
     }, true)
@@ -6771,6 +7214,61 @@ local function rx_check(name, test)
   local ok, err = pcall(test)
   if not ok then rx_failures[#rx_failures + 1] = name .. ": " .. tostring(err) end
 end
+
+rx_check("confirmed mentions through relay", function()
+  local dir, config_path = fixture()
+  local client, delivered, held_for_restart = scripted_client(), {}, false
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function(event)
+      if event.event_id == "$mention-pills" and not held_for_restart then
+        held_for_restart = true
+        error("hold for restart")
+      end
+      delivered[#delivered + 1] = event
+      return true
+    end,
+  })
+  assert(relay:start())
+  client:complete(1, { json = { next_batch = "s0" } })
+  client:complete(2, { json = { next_batch = "s1", rooms = { join = {
+    ["!room:example.org"] = { timeline = { events = {
+      { type = "m.room.message", event_id = "$mention-pills", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "Hello Alice and Alice",
+          format = "org.matrix.custom.html",
+          formatted_body = "Hello <a href='https://matrix.to/#/@alice:example.org'>Alice</a> and "
+            .. '<a href="https://matrix.to/#/@ally:example.org">Alice</a>',
+          ["m.mentions"] = { user_ids = { "@alice:example.org", "@ally:example.org" } } } },
+      { type = "m.room.message", event_id = "$mention-plain", sender = "@alice:example.org",
+        content = { msgtype = "m.text", body = "Alice" } },
+      { type = "m.room.message", event_id = "$mention-media", sender = "@alice:example.org",
+        content = { msgtype = "m.file", body = "file.txt", filename = "file.txt",
+          url = "mxc://example.org/file" } },
+    } } },
+  } } } })
+  local first_attempts = {}
+  for _, event in ipairs(delivered) do first_attempts[event.event_id] = event end
+  assert(not first_attempts["$mention-pills"], "mention delivery should remain pending for restart")
+  relay:stop()
+  local resumed_client = scripted_client()
+  relay = relay_module.new({ config_path = config_path, matrix = resumed_client,
+    deliver = function(event) delivered[#delivered + 1] = event return true end,
+  })
+  assert(relay:start())
+  local by_id = {}
+  for _, event in ipairs(delivered) do by_id[event.event_id] = event end
+  assert(by_id["$mention-pills"] and by_id["$mention-pills"].body == "Hello @Alice and @Alice",
+    "confirmed pills should normalize at the relay delivery boundary")
+  assert(by_id["$mention-pills"].normalized_mentions[1] == "@alice:example.org"
+      and by_id["$mention-pills"].normalized_mentions[2] == "@ally:example.org",
+    "same-display-name pills should retain their distinct MXIDs in occurrence order")
+  assert(by_id["$mention-plain"] and by_id["$mention-plain"].body == "Alice"
+      and by_id["$mention-plain"].normalized_mentions == nil,
+    "plain display-name text must not be rewritten or marked as a mention")
+  assert(by_id["$mention-media"] and by_id["$mention-media"].normalized_mentions == nil,
+    "media events must not receive mention metadata")
+  relay:stop()
+  cleanup_fixture(dir, config_path)
+end)
 
 rx_check("test_baseline_resume_filters_and_envelope", test_baseline_resume_filters_and_envelope)
 rx_check("test_allowlisted_media_types_and_sender_filter", test_allowlisted_media_types_and_sender_filter)
@@ -7161,8 +7659,8 @@ local function test_agent_join_files_request_and_does_not_join()
     local before = read_text(env.path)
     local posts_before = #home_posts(env, "Butler wants to join")
     local missing_room = agent_cli_join(env, nil, ASKER)
-    assert(missing_room.code == 1 and missing_room.stderr
-      == "matrix join requires ROOM.\nNext: remuda butler matrix join #alias:server\n",
+    assert(missing_room.code == 2 and missing_room.stderr:find("missing required argument <ROOM>", 1, true)
+      and missing_room.stderr:find("Usage: remuda butler matrix join", 1, true),
       "an agent join without ROOM must receive the same missing-room error: "
         .. tostring(missing_room.stdout) .. tostring(missing_room.stderr))
     assert(#home_posts(env, "Butler wants to join") == posts_before
@@ -7511,7 +8009,7 @@ end
 
 local function with_approved_text_stubs(run)
   local old_type, old_key, old_policy, old_trace = remuda.type_text, remuda.key,
-    remuda._butler_notify_policy, remuda._butler_session_trace
+    remuda._butler_approved_text_policy, remuda._butler_session_trace
   local old_ls, old_session, old_bus = remuda.ls, remuda.session, remuda._butler_bus
   local typed, keys, traces = {}, {}, {}
   local safe = true
@@ -7523,14 +8021,14 @@ local function with_approved_text_stubs(run)
     keys[#keys + 1] = { session = session, key = key }
     return true
   end
-  remuda._butler_notify_policy = function() return safe end
+  remuda._butler_approved_text_policy = function() return safe, "composer_nonempty" end
   remuda._butler_bus = { agents = { butler = { id = "butler", session_name = "butler", session_start_marker = "butler-start" } } }
   remuda.ls = function() return { { name = "butler", alive = true, attached = false } } end
   remuda.session = function() return { attached = false } end
   remuda._butler_session_trace = function(kind, detail) traces[#traces + 1] = { kind, detail } end
   local ok, err = pcall(run, typed, keys, traces, function(value) safe = value end)
   remuda.type_text, remuda.key = old_type, old_key
-  remuda._butler_notify_policy, remuda._butler_session_trace = old_policy, old_trace
+  remuda._butler_approved_text_policy, remuda._butler_session_trace = old_policy, old_trace
   remuda.ls, remuda.session, remuda._butler_bus = old_ls, old_session, old_bus
   if not ok then error(err, 0) end
 end
@@ -7844,11 +8342,11 @@ local function test_approved_text_cancel_and_failed_delivery_are_one_shot()
       local cancel_id = assert(remuda.butler.approve_text.request("butler", "cancel me", ASKER))
       env.client:pump()
       local cancelled = env.relay:state().approvals[cancel_id]
-      remuda._butler_notify_policy = function() return false end
+      remuda._butler_approved_text_policy = function() return false end
       room_events(env, { text_event("$approve-busy", OWNER, "yes", cancelled.event_id) })
       assert(cancelled.status == "approved" and #typed == 0,
         "a pre-write busy refusal stays retryable")
-      remuda._butler_notify_policy = function() return true end
+      remuda._butler_approved_text_policy = function() return true end
       room_events(env, { reaction("$cancel-approved", OWNER, cancelled.event_id, CROSS) })
       assert(cancelled.status == "denied" and #typed == 0,
         "an owner cross cancels an approved-but-undelivered request")
@@ -7888,7 +8386,7 @@ local function test_approved_text_refusal_stays_approved_for_owner_retry()
       room_events(env, { text_event("$busy-answer", OWNER, "yes " .. id, rec.event_id) })
       assert(rec.status == "approved" and #typed == 0 and #keys == 0,
         "busy target remains approved but undelivered")
-      assert(thread_replies(env, rec.event_id, "refused: pane_busy") == 1,
+      assert(thread_replies(env, rec.event_id, "refused: composer_nonempty") == 1,
         "owner gets the refusal reason")
       set_safe(true)
       room_events(env, { text_event("$retry-answer", OWNER, "yes", rec.event_id) })
@@ -7908,7 +8406,7 @@ local function test_approved_text_switch_off_keeps_reply_on_mail_path()
       local config = file:read("a")
       file:close()
       file = assert(io.open(env.path, "wb"))
-      file:write((config:gsub("approve_text=true\n", "")))
+      file:write((config:gsub("approve_text=true\n", "approve_text=false\n")))
       file:close()
       room_events(env, { text_event("$switch-off-reply", OWNER, "yes " .. id, rec.event_id) })
       assert(#typed == 0 and rec.status == "open" and delivered_ids(env.delivered, "$switch-off-reply"),
@@ -7925,7 +8423,7 @@ local function test_approved_text_registration_refuses_when_switch_is_off()
       assert(id == nil and tostring(why):find("Prepared text approvals are off", 1, true)
         and #home_posts(env, "Approve prepared text for") == before,
         "switch-off registration must report a clear refusal without a HOME post")
-    end)
+    end, "approve_text=false\n")
   end)
 end
 
@@ -7992,7 +8490,7 @@ remuda._t359.with_guard = with_guard
 local function guard_request(env, replies, command, alias, request_room)
   request_room = request_room or HOME
   local before = #remuda._t359.room_posts(env, request_room, "Butler approval")
-  remuda.butler.guard_policy.run({ "guard" }, { kind = "session", session = "s-ssa", stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
+  remuda.butler.guard_policy.run(nil, nil, { kind = "session", session = "s-ssa", stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
     tool_name = "Bash", tool_input = { command = command or "git push origin main" }, cwd = "/p/w" }) })
   env.client:pump()
   local posts = remuda._t359.room_posts(env, request_room, "Butler approval")
@@ -8164,7 +8662,7 @@ end
 local CYCLE = "\240\159\148\132"
 local function guard_fetch(env, replies, host)
   local before = #remuda._t359.room_posts(env, HOME, "Butler approval")
-  remuda.butler.guard_policy.run({ "guard" }, { kind = "session", session = "s-ssa", stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
+  remuda.butler.guard_policy.run(nil, nil, { kind = "session", session = "s-ssa", stdin = remuda.json.encode({ hook_event_name = "PermissionRequest",
     tool_name = "WebFetch", tool_input = { url = "https://" .. host .. "/" }, cwd = "/p/w" }) })
   env.client:pump()
   local posts = remuda._t359.room_posts(env, HOME, "Butler approval")
@@ -8422,3 +8920,94 @@ for _, case in ipairs({
 end
 assert(#approval_failures == 0, #approval_failures .. " approval tests failed:\n" .. table.concat(approval_failures, "\n"))
 print("ok: agent join approvals")
+
+-- Owner recovery is an authenticated code route even when typed lines are off.
+do
+  local previous = remuda.butler.dialogs
+  local calls = {}
+  approval_env(OWNER .. ',@agent-x:example.org', function(env)
+    remuda.butler.dialogs = {recover_input=function(name, done)
+      local f=assert(io.open(env.path..'.since'));local data=f:read('*a');f:close()
+      assert(data:find('$recover-ok',1,true), 'owner event must persist before cancellation')
+      calls[#calls+1]=name
+      done('Input recovery '..name..': synthetic completed')
+    end}
+    local edited=text_event('$recover-edited',OWNER,'!recover-input codex')
+    edited.content['m.new_content']={msgtype='m.text',body='!recover-input codex'}
+    room_events(env, {
+      text_event('$recover-stranger',STRANGER,'!recover-input codex'),
+      text_event('$recover-agent','@agent-x:example.org','!recover-input codex'),
+      text_event('$recover-old',OWNER,'!recover-input codex',nil,ts(-400000)),
+      text_event('$recover-future',OWNER,'!recover-input codex',nil,ts(120000)), edited,
+    })
+    room_events(env,{text_event('$recover-wrong-room',OWNER,'!recover-input codex')},ALL)
+    assert(#calls==0,'nonowner, member, stale/future, edited and wrong room cannot cancel')
+    restart_relay(env)
+    room_events(env,{text_event('$recover-not-live',OWNER,'!recover-input codex')})
+    assert(#calls==0,'first nonlive sync cannot cancel')
+    room_events(env,{text_event('$recover-ok',OWNER,'!recover-input codex')})
+    assert(#calls==1 and calls[1]=='codex','fresh live owner command reaches recovery despite typed-lines off')
+    assert(#home_posts(env,'synthetic completed')==1,'result returns through independent Matrix thread')
+    room_events(env,{text_event('$recover-ok',OWNER,'!recover-input codex')})
+    assert(#calls==1,'same event never replays cancellation')
+    local write=remuda.fs.write_atomic
+    remuda.fs.write_atomic=function(path,...)
+      if path==env.path..'.since' then return nil,'synthetic disk full' end
+      return write(path,...)
+    end
+    room_events(env,{text_event('$recover-disk',OWNER,'!recover-input codex')})
+    remuda.fs.write_atomic=write
+    assert(#calls==1,'failed durable consume cannot cancel')
+  end)
+  remuda.butler.dialogs=previous
+end
+print('ok: Matrix owner input recovery route')
+
+-- Durable adapter contract at the actual relay boundary. Store durability and
+-- authenticated adapter behavior are exercised separately by Lua harness tests.
+do
+  local previous=remuda.butler.owner_input
+  local ok,err=pcall(function()
+    with_typed_line_stubs(function(typed,keys)
+      approval_env(nil,function(env)
+        local accepted,calls={},0
+        local refusal=true
+        remuda.butler.owner_input={
+          lookup_owner=function(event)return accepted[event.event_id]end,
+          accept_line=function(session,text,event,room,live)
+            calls=calls+1
+            assert(live and room==HOME and event.sender==OWNER)
+            if refusal then return nil,'storage_busy'end
+            local old=accepted[event.event_id]
+            if old then return{id=old.id,status=old.status,duplicate=true}end
+            local receipt={id='fixture-'..event.event_id,status='queued',text=text,session=session}
+            accepted[event.event_id]=receipt
+            return receipt
+          end,
+        }
+        room_events(env,{text_event('$queue-retry',OWNER,'!first')})
+        assert(not env.relay:state().processed['$queue-retry'],'no consumed marker before durable acceptance')
+        assert(#home_posts(env,'Queued input')==0,'storage refusal never reports accepted')
+        refusal=false
+        room_events(env,{text_event('$queue-retry',OWNER,'!first'),text_event('$queue-2',OWNER,'!second'),
+          text_event('$queue-3',OWNER,'!third')})
+        assert(accepted['$queue-retry'] and accepted['$queue-2'] and accepted['$queue-3'])
+        assert(#home_posts(env,'Queued input')==3,'all three get explicit queued receipts')
+        assert(#typed==0 and #keys==0,'acceptance never writes directly through legacy transport')
+        local before=calls
+        room_events(env,{text_event('$queue-2',OWNER,'!second')})
+        assert(calls==before,'persisted processed event does not enqueue again')
+        room_events(env,{text_event('$queue-evil',STRANGER,'!bad')})
+        assert(not accepted['$queue-evil'],'untrusted event never reaches accepted queue')
+      end,'typed_lines=true\nshell_lines=false\n')
+    end)
+  end)
+  remuda.butler.owner_input=previous
+  assert(ok,err)
+end
+print('ok: Matrix durable owner plaintext admission contract')
+
+-- Keep the isolated mail persistence fixture after all relay tests: it loads
+-- mail.lua with a temporary bus/config and should not affect their globals.
+dofile("packages/butler/matrix_mentions.lua")
+dofile("tests/fixtures/matrix-mention-normalization.lua")

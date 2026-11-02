@@ -9,20 +9,36 @@ doctor.probe()
 doctor.render()
 
 ### remuda butler "doctor" "--help"
-exit: 2
+exit: 0
 stdout:
+Check the Butler installation. Example: remuda butler doctor
+
+Usage: remuda butler doctor
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler doctor
 
 stderr:
-<GLOBAL-USAGE>
+
 actions:
 (none)
 
 ### remuda butler "doctor" "-h"
-exit: 2
+exit: 0
 stdout:
+Check the Butler installation. Example: remuda butler doctor
+
+Usage: remuda butler doctor
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler doctor
 
 stderr:
-<GLOBAL-USAGE>
+
 actions:
 (none)
 
@@ -63,11 +79,19 @@ actions:
 (none)
 
 ### remuda butler "doctor" "--help" "extra"
-exit: 2
+exit: 0
 stdout:
+Check the Butler installation. Example: remuda butler doctor
+
+Usage: remuda butler doctor
+
+Options:
+  -h, --help  Print help
+
+Next: remuda butler doctor
 
 stderr:
-<GLOBAL-USAGE>
+
 actions:
 (none)
 

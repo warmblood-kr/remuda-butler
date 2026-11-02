@@ -2,11 +2,13 @@
 local screen, instance, attached = 'SYNTHETIC acknowledge once', 'instance-1', false
 local writes, audits, posts, fail_audit, fail_persist, after_audit = 0, {}, {}, false, false
 local agent = { id = 'agent-1', kind = 'claude', instance_id = instance, session_start_marker = 'launch-1' }
-local blocked = { blocked = true, id = 'unknown_choice', captures = 2, instance = instance, signature = screen, agent = agent }
+local state_entry = { id = 'synthetic_ack', response = 'approval', action_scope = 'once' }
+local blocked = { blocked = true, id = 'synthetic_ack', captures = 2, instance = instance,
+  signature = screen, agent = agent, entry = state_entry }
 local store = { approvals = {} }
 _G.remuda = {
   butler = {}, _butler_bus = { agents = { child = agent }, dialog_states = { child = blocked } },
-  _butler_agent_startup = { claude = { dialog_approvals = {} } },
+  _butler_agent_startup = { claude = { dialog_states = { state_entry }, dialog_approvals = {} } },
   capture = function() return screen end,
   ls = function() return {{ name = 'child', alive = true, instance_id = instance, attached = attached }} end,
   random_bytes = function(n) return string.rep(string.char(#posts + 1), n) end,
@@ -31,7 +33,7 @@ local function attach()
 end
 attach()
 local D = dofile('packages/butler/dialog_approval.lua')
-local descriptor = { id = 'synthetic_ack', version = '1', category = 'acknowledgement',
+local descriptor = { id = 'synthetic_ack', state_id = 'synthetic_ack', version = '1', category = 'acknowledgement',
   action_scope = 'once',
   fixture = 'tests/fixtures/butler-dialog-synthetic-ack.txt',
   match = function(value)
@@ -44,7 +46,7 @@ local descriptor = { id = 'synthetic_ack', version = '1', category = 'acknowledg
 remuda._butler_agent_startup.claude.dialog_approvals = { descriptor }
 local function ask()
   screen, instance, attached = 'SYNTHETIC acknowledge once', 'instance-1', false
-  blocked.signature, blocked.captures, blocked.instance = screen, 2, instance
+  blocked.signature, blocked.captures, blocked.instance, blocked.entry = screen, 2, instance, state_entry
   blocked.approval_attempted = nil
   D.consider('child')
   local record

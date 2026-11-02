@@ -1,0 +1,10 @@
+  There is a particular kind of structure that exists only because the land
+  ends. A lighthouse makes no sense in the middle of a continent. It has meaning
+
+❯ QUEUED-PROBE-A                                                                
+  ctrl+enter to send now
+
+────────────────────────────────────────────────────────────────────────────────
+❯ Press up to edit queued messages
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on · ← 2 agents

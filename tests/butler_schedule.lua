@@ -294,7 +294,7 @@ ok("remove of an absent name is nil", not schedule.remove(list, "a"))
 -- Firing, with an injected clock and mail stubs.
 local fire_path = os.tmpname()
 local sent, events, files_at_send = {}, {}, {}
-local unread_ids, absent, send_error = {}, {}, nil
+local unread_ids, absent, send_error, target_ids = {}, {}, nil, {}
 local function env()
   return {
     path = fire_path, fields = utc_fields,
@@ -303,6 +303,7 @@ local function env()
       if absent[target] then error("unknown member: " .. target, 0) end
       return target
     end,
+    resolve_id = function(alias) return target_ids[alias] end,
     unread = function(_, id) return unread_ids[id] == true end,
     send = function(...)
       local file = assert(io.open(fire_path, "rb"))
@@ -315,7 +316,7 @@ local function env()
   }
 end
 local function reset(entries)
-  sent, events, files_at_send, unread_ids, absent, send_error = {}, {}, {}, {}, {}, nil
+  sent, events, files_at_send, unread_ids, absent, send_error, target_ids = {}, {}, {}, {}, {}, nil, {}
   local list = {}
   for _, e in ipairs(entries) do assert(schedule.add(list, e)) end
   assert(schedule.save(fire_path, list))
@@ -376,6 +377,26 @@ eq("an absent target sends nothing", schedule.tick(env(), noon), 0)
 eq("no mail", #sent, 0)
 ok("it is traced as schedule_target_absent", events[#events]:find("^schedule_target_absent a %-> butler"))
 eq("the slot is spent", stored("a").last_fired, slot_1007)
+
+-- A member-created schedule is bound to the original durable identity. Reusing
+-- its alias cannot inherit delivery after that member has exited.
+do
+  local member = hourly_entry("member-job")
+  member.target, member.created_by, member.recipient_id = "dev-1", "01HALICE", "01HALICE"
+  reset({ member })
+  target_ids["dev-1"] = "01HNEWID"
+  eq("same-alias reincarnation receives no delivery", schedule.tick(env(), noon), 0)
+  eq("replacement receives no schedule mail", #sent, 0)
+  ok("identity mismatch is traced", events[#events]:find("^schedule_target_identity_mismatch member%-job"))
+  eq("mismatched recipient slot is spent", stored("member-job").last_fired, slot_1007)
+  target_ids["dev-1"] = nil
+  reset({ member })
+  eq("missing current identity also fails closed", schedule.tick(env(), noon), 0)
+  eq("missing identity sends nothing", #sent, 0)
+  reset({ member })
+  target_ids["dev-1"] = "01HALICE"
+  eq("original identity still receives delivery", schedule.tick(env(), noon), 1)
+end
 
 -- An unread previous message from the same schedule suppresses the next one.
 reset({ hourly_entry("a") })

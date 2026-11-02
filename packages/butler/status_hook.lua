@@ -3,6 +3,14 @@
 -- writes `<word> <unix time>` to `STATUS_PATH.state`; hook text is never kept.
 -- The path rule is statusline's: absolute and ending in `.status`.
 local M = {}
+local STATUS_HOOK_CLI_SPEC = {
+  name = "remuda butler",
+  verbs = { ["status-hook"] = {
+    about = "Record a supported Claude Code hook event. Example: remuda butler status-hook /home/you/.cache/remuda.status",
+    args = { { name = "PATH", help = "Butler status file path" } },
+    next = "remuda butler statusline [PATH]",
+  } },
+}
 
 local NOTIFICATION = { permission_prompt = "needs you", elicitation_dialog = "needs you", idle_prompt = "idle" }
 local EVENTS = { UserPromptSubmit = "working", Stop = "idle" }
@@ -20,11 +28,14 @@ function M.word(hook)
 end
 
 function M.run(args, caller)
+  local report = remuda.cli.parse(STATUS_HOOK_CLI_SPEC, args or {})
+  if report.kind == "help" then return report.text end
+  if not report.ok then return remuda.fail(report.text, report.code) end
   local principal = remuda._butler_caller_principal and remuda._butler_caller_principal.resolve(caller)
   if not principal or principal.tag ~= "member" then
     return "Butler cannot identify this caller for status telemetry. Next: run from a registered Butler session or upgrade Remuda core."
   end
-  local path, input = args[2], caller and caller.stdin
+  local path, input = report.values.PATH, caller and caller.stdin
   local absolute = type(path) == "string" and (path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\"
     or (path:match("^%a:") ~= nil and (path:sub(3, 3) == "/" or path:sub(3, 3) == "\\")))
   -- A "." or ".." component would let the written file land beside another status file.

@@ -1,0 +1,17 @@
+› Write a 1200-word essay about lighthouses. No tools.
+
+› Butler message <id> from <sender> arrived. Read it:
+  MCP butler_inbox (or remuda butler inbox)
+
+ 
+• Working (3s • esc to interrupt)
+ 
+• Messages to be submitted after next tool call (press esc to interrupt and send
+  immediately)
+  ↳ QUEUED-PROBE-C
+
+ 
+› Ask Codex to do anything
+
+  GPT-6.1-Sol low · ~/.local/share/remuda/butler/sessions/probe-codex
+  ? for shortcuts

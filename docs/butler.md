@@ -157,6 +157,42 @@ must report `--done` again. A report without `--done`, or an MCP report with
 `done: false` or `done` omitted, creates no new auto-close request and does not
 cancel an earlier request. The root and leader-less rows are never closed this way.
 
+## Daemon reload (`remuda reload`)
+
+`remuda reload` (Remuda core, `docs/reload.md` there) moves the daemon onto
+another build. Host-backed sessions (`REMUDA_EXPERIMENTAL_SESSION_HOST=1`) keep
+running, but Butler starts again in a fresh Lua image. What Butler keeps:
+
+- **Ownership of the home.** While the replaced daemon is still exiting, Butler
+  waits for it (at most 30 s) and then takes the home locks. It waits only when
+  core says the socket was handed over by a reload and the lock holder is the
+  daemon that started this one; any other holder still means standby.
+- **The team.** Butler keeps a private roster, `roster.json` beside
+  `agents.jsonl` (0600; names, ids, leaders, directories, sandbox settings and
+  session instance ids; never a token or message text). A fresh image takes
+  back every session that is still the same live instance and whose identity is
+  still running, the root included, so the root is not restarted and members
+  stay known (mail, `sessions`, CLI caller identity, notices). A member whose
+  leader did not come back is handed to the root.
+- **Mail, schedules, approvals and the Matrix cursor.** These live on disk.
+  Unread mail is announced again in each member's pane.
+
+Known limits after a reload:
+
+- Codex members' MCP tools (`butler_*`) are refused until the member is
+  relaunched: the bridge's capability lived in the old image. The
+  `remuda butler` CLI keeps working.
+- A member's first task that was still being typed when the reload happened
+  may not arrive. The leader is not told; send the task again as mail.
+- `send-to-leader --done` requests are forgotten, so that member stays open
+  until it reports `--done` again.
+- A Codex update relaunch in progress is lost; relaunch the member by hand.
+- An open guard approval ends as expired ("daemon restarted"), as after any
+  restart; the agent asks again. A command still waiting for an answer (a
+  Matrix wizard, a typed-lines prompt) is told to run again.
+- A session that stopped during the reload is not taken back; its identity is
+  ended as `daemon_restart`.
+
 ## The root AGENTS.md
 
 Butler's own guidance in the root session's `AGENTS.md` sits between
@@ -166,6 +202,86 @@ kept; text inside is rewritten to Butler's current text. A file whose markers
 are damaged or doubled, a symlinked `AGENTS.md`, and a file mixing LF and CRLF
 line endings are left unchanged, and the trace names them. A file holding only an earlier Butler text is replaced by the
 marked form; any other unmarked file keeps its text and gets the block appended.
+
+## Your own guidance layers
+
+Rules of your own (local paths, team conventions, preferences) go in plain
+Markdown files outside Butler, not in Butler's code. Butler reads them in this
+order, and a later layer adds to or overrides an earlier one:
+
+1. **framework**: Butler's own text (built in).
+2. **cluster**: shared by every node of a cluster. It is the cluster file
+   `remuda:///butler/guidance/cluster.md` in Remuda's cluster file store
+   (warmblood-kr/remuda#742). Publish it once from any node with
+   `remuda vfs put cluster.md remuda:///butler/guidance/cluster.md`; every node
+   that has synced reads the same version. Butler reads only this node's copy and
+   never waits on the network. The layer is "not available" on a Remuda core
+   without the store, and on a node with no cluster identity. A version this
+   node knows of but has not copied yet is reported, not loaded. Its version is
+   `vN/sha256:` plus 12 hex digits, so each node shows which version it applied.
+3. **team**: `~/.config/remuda/butler/guidance/team.md`. To share it, make it a
+   symlink into a team repository.
+4. **personal**: `~/.config/remuda/butler/guidance/personal.md`. Keep it in
+   your dotfiles.
+5. **local**: `~/.config/remuda/butler/guidance/local.md`. Rules for this
+   machine only, like Emacs `custom.el`; keep it out of a shared dotfiles
+   repository.
+
+The directory follows `XDG_CONFIG_HOME`; `REMUDA_BUTLER_GUIDANCE_DIR`
+overrides it. A missing or empty file means "not loaded", and nothing fails.
+A file over 8 KiB, or one that cannot be read, is not loaded and is reported.
+
+Butler writes the layers into the agent's `AGENTS.md` as the managed block
+`guidance-layers`: a list of every layer with its status and version (the
+first 12 hex digits of the file's sha256), then the text of each loaded layer.
+A new member's welcome mail carries the same text. Edit the files, not the
+block: Butler rewrites it.
+
+Butler reads the files again when a session starts (a new launch, a relaunch,
+or a daemon restart that starts the root again) and just before it compacts a
+session, so the agent reloads the same rules after compaction or a rollout.
+It does not re-read them on every reconcile tick. For a member, Butler
+writes the block only in a directory it made itself. In your own project
+directory it refreshes the block only if Butler wrote it there before, and
+otherwise leaves your `AGENTS.md` alone.
+
+Each load is traced as `guidance_layers` in the session trace, for example
+`butler framework=sha256:1a2b3c4d5e6f cluster=unavailable team=missing
+personal=sha256:9f8e7d6c5b4a local=missing`, and `remuda butler doctor`
+shows the root Butler's last load on its `Guidance layers:` line.
+
+## Butler memory (shared by Claude and Codex)
+
+Each Butler has a memory directory owned by Butler, not by the agent:
+`~/.local/share/remuda/butler/memory/NAME/` (`NAME` is `butler` for the
+root, the member's name otherwise). The directory follows `XDG_DATA_HOME`, and
+`REMUDA_BUTLER_MEMORY_HOME` overrides the parent. It holds plain Markdown: an
+index `MEMORY.md` with one line per note (`- [Title](file.md) — one-line
+hook`) and one file per note. Butler creates the directory with an empty
+index the first time the Butler starts and never rewrites the index.
+
+The memory is keyed by the Butler's name, not by its agent or working
+directory. So a member relaunched under the same name, or switched from
+Claude to Codex, keeps its memory. Every agent is pointed at the same
+directory:
+
+- **Every agent**: `REMUDA_BUTLER_MEMORY_DIR` in its environment, and a managed
+  `memory` block in its `AGENTS.md` (next to `guidance-layers`). The block gives
+  the path and the rules and shows `MEMORY.md` as it was when the session
+  started (up to 8 KiB). The block is refreshed at the same times as the
+  guidance layers. A new member's welcome mail carries it too.
+- **Claude**: the per-launch settings set `autoMemoryDirectory` to the store,
+  so Claude's own auto memory reads and writes it. They also add the store to
+  `permissions.additionalDirectories` and allow `Read`/`Edit` there. The same
+  settings tell Claude to read `AGENTS.md` even where a `CLAUDE.md` exists
+  (`instructionFiles: claude-md-and-agents-md`), so Butler's blocks reach
+  Claude in any project.
+- **Codex**: the store is added to the sandbox's writable roots, on a core
+  whose `_codex_tui` accepts `-c` (on an older core Codex can read the block
+  but not write the store).
+
+Task notes for one working directory still belong in its `docs/`. Never put
+secrets in the memory store: it is plain text.
 
 ## Schedules
 
@@ -253,23 +369,46 @@ the verb or its positional arguments. `--json` selects machine-readable
 output. Verbs that accept `--room ROOM` require the configured HOME,
 ALL-BUTLERS, or a joined room.
 
+`remuda butler matrix --help` (also `matrix` or `matrix help`) prints the verbs
+in groups; `remuda butler matrix <verb> --help` shows one verb's arguments and
+options. `remuda butler help` only points there.
+
 ```text
-remuda butler matrix [--json] status
-remuda butler matrix [--json] rooms
-remuda butler matrix [--json] [--room ROOM] [-n N] history
-remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
-remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
-remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
-remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
-remuda butler matrix [--json] [-o PATH] download MXC
-remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
-remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
-remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
-remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
-remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
-remuda butler matrix [--json] join ROOM
-remuda butler matrix [--json] leave ROOM
-remuda butler matrix [--json] quarantine [--id EVENT_ID]
+Usage: remuda butler matrix [--json] [--room ROOM] <verb> [ARGS]
+Run `remuda butler matrix <verb> --help` for one verb's arguments and options.
+
+Read:
+  remuda butler matrix [--json] status
+  remuda butler matrix [--json] rooms
+  remuda butler matrix [--json] rooms --public [TERM]
+  remuda butler matrix [--json] [--room ROOM] [-n N] history
+  remuda butler matrix [--json] [--room ROOM] thread EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] event|get EVENT_ID
+  remuda butler matrix [--json] [-o PATH] download MXC
+
+Threads and notifications:
+  remuda butler matrix [--json] [--room ROOM] follow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] unfollow EVENT_ID
+  remuda butler matrix [--json] [--room ROOM] notifications [all|mentions-followed|none]
+
+Write:
+  remuda butler matrix [--json] [--room ROOM] send TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] reply EVENT_ID TEXT | - | --file PATH
+  remuda butler matrix [--json] [--room ROOM] react EVENT_ID KEY
+  remuda butler matrix [--json] [--room ROOM] upload [--thread EVENT_ID] [--caption TEXT] PATH
+  remuda butler matrix [--json] [--room ROOM] redact EVENT_ID [--reason TEXT]
+
+Rooms and moderation (operator):
+  remuda butler matrix [--json] join ROOM (ID, #alias, or public name; operator)
+  remuda butler matrix [--json] leave ROOM (operator)
+  remuda butler matrix [--json] mark-all ROOM (operator; ROOM is a joined room ID; reload with remuda exec butler)
+  remuda butler matrix [--json] quarantine [--id EVENT_ID] (operator)
+
+Setup (operator):
+  remuda butler matrix setup [OPTIONS]
+
+Example: remuda butler matrix setup --homeserver https://<homeserver> --owner @<owner>:<server> --bot @<bot>:<server> --password-file <path>
+Or end with --password-cmd PROG [ARG...] in place of --password-file to read the bot password from a program.
 ```
 
 `thread` takes an event ID or the ID of a Matrix mail (`01M...`). A mail ID
@@ -309,11 +448,12 @@ session PATH must also lie inside the session's working directory; with no
 `remuda butler shell-lines on|off` controls shell lines (`!!TEXT`). Shell lines
 require typed lines to be on; turning typed lines off also turns shell lines
 off. `remuda butler doctor` reports the current values as `Typed lines: on|off`
-and `Shell lines: on|off`. Both switches are off by default. When a switch is
-off, matching messages stay on the ordinary mail path.
+and `Shell lines: on|off`. Both switches are on by default (once Matrix is set up, and only for the owner allowlist); `typed-lines off`, `shell-lines off` or `typed_lines=false` / `shell_lines=false` in the Matrix config turn them off, and an unreadable value counts as off. When a switch is
+off, matching messages stay on the ordinary mail path. A line that is
+typed is also delivered to the inbox as ordinary mail, so typing is additive.
 These CLI gates do not defend against a hostile same-user agent that clears
-its identity (see Butler #264). The real protection is that both switches
-default off.
+its identity (see Butler #264). The real protection is the owner allowlist,
+the live-sync and rate checks below, and the explicit off switches.
 
 An enabled line must come from an allowlisted owner in a live Matrix sync, be
 no more than five minutes old, contain one line of at most 2000 bytes, and fit
@@ -355,7 +495,7 @@ Session binding uses the Butler session identity and a non-secret launch marker;
 the root Butler identity can survive a pane relaunch, so its fresh launch marker
 is what distinguishes that instance.
 `remuda butler approve-text on|off` is a terminal-only switch that asks for
-`yes` before enabling. It is off by default; with it off, replies stay on the
+`yes` before enabling. It is on by default (once Matrix is set up; `approve-text off` or `approve_text=false` turns it off); with it off, replies stay on the
 ordinary mail path. Registration is also refused in Matrix messages fallback
 mode because that mode cannot receive live owner approvals. Doctor reports
 `Approve text: on|off`.
@@ -407,18 +547,21 @@ or untrusted messages. If reading the thread fails or a request times out (10
 seconds each), the mail arrives with a short failure line and the original
 message. The fetch does not delay mail from other threads.
 
-Configure `b2b_max_turns` (default 6) for consecutive Butler-only turns in one
+Configure `b2b_max_turns` (default 6) for consecutive messages from other Butlers in one
 thread, `posts_per_hour` (default 30) for posts that are not a reply to a person
 on the allowlist, and
 `untrusted_per_room_hour` (default 20) for non-allowlisted messages delivered
-from each room. The Butler's own replies count as turns. These counters are held
+from each room. The Butler's own replies neither increment nor reset the peer
+counter, so normal progress reports do not exhaust it. Replies to verified
+people on the allowlist remain available even when peer replies are paused.
+These counters are held
 in memory and reset when the daemon restarts. `b2b_max_turns` and
 `untrusted_per_room_hour` are read when the relay starts, so restart the relay
 after changing either setting; `posts_per_hour` is read for every post. HOME
 notices, `upload`, and `react` do not take a post slot.
 
 When the Butler reaches the turn limit, it posts this line to HOME and stops
-replying in that thread until an allowlisted human replies:
+replying to peers in that thread until an allowlisted human replies:
 
 ```text
 Two Butlers talked N turns without a human, so I paused thread ROOT (ROOM) to avoid ping-pong. No action needed; reply in that thread only if you want it to continue.
@@ -473,8 +616,9 @@ replacing `PATH` with the chosen directory.
 
 `event` and `get` are aliases for the same read.
 The `remuda butler matrix rooms` command lists configured rooms, saved aliases,
-its kind, how it was added, and its inviter; it also shows the room mode and
-deny rules. Server-side memberships show in `remuda butler matrix status`.
+its kind, how it was added, its inviter, and its notification mode; it also
+shows the room mode and deny rules. Server-side memberships show in
+`remuda butler matrix status`.
 Use `remuda butler matrix rooms --public [TERM]` to browse up to 20 public
 rooms, optionally filtered by a search term.
 
@@ -491,6 +635,17 @@ ignored; a new invite can retry a configured room, subject to deny checks and
 the budget. Open mode allows at most 20 automatic join attempts per rolling
 day. Owner invites count toward the cap, and failed join attempts remain
 counted.
+
+Each room has an independent Matrix delivery policy. HOME defaults to `all`;
+ALL-BUTLERS and other joined rooms default to `mentions-followed`. The latter
+delivers a message that mentions this Butler or a reply in a followed thread;
+new unmentioned thread roots and replies to unfollowed threads stay out of the
+Butler inbox. `none` suppresses all room messages. Read or change the policy
+with `remuda butler matrix [--room ROOM] notifications [all|mentions-followed|none]`;
+without a mode, the command shows the current value. This is operator-only.
+Changing it applies to the running relay immediately. `follow` and `unfollow`
+control thread replies in `mentions-followed` rooms; `all` deliberately
+delivers every message regardless of follow state.
 
 Add `deny_room=!ROOM_ID` or `deny_room=#alias:server` for each denied room, and
 `deny_server=host` for each denied server. Room IDs, canonical aliases, room
@@ -645,6 +800,8 @@ file contains:
 6. Optional sync timeout in milliseconds; blank defaults to `30000`.
 7. Optional transport and room settings, one `key=value` per line:
    `all_room=ROOM_ID` configures the shared ALL-BUTLERS room;
+   `notify_room=ROOM_ID mode=all|mentions-followed|none` overrides the default
+   Matrix delivery policy for a configured room (repeat for different rooms);
    `rooms=open` or `rooms=allowlist` selects invite behavior, with allowlist as
    the default; repeat `deny_room=ROOM_ID`, `deny_room=#alias:server`, or
    `deny_server=host` lines to refuse matching invites;
@@ -652,7 +809,7 @@ file contains:
    (default 30; a Claude guard approval keeps its fixed 5 minute window);
    `approval_room=all|home` selects the joined ALL-BUTLERS room or HOME
    (default `all`);
-   `b2b_max_turns=N` sets the consecutive Butler-only thread turn limit
+   `b2b_max_turns=N` sets the consecutive messages from other Butlers limit per thread
    (default 6); `posts_per_hour=N` caps posts that are not a reply to a person
    on the allowlist (default 30);
    `untrusted_per_room_hour=N` sets the per-room non-allowlisted message limit
@@ -713,6 +870,12 @@ the state file is unreadable or has invalid field types, the relay starts from
 a fresh sync baseline; it does not replay room history, and pending deliveries
 in the damaged state cannot be recovered.
 
+Receive and pending-delivery notification decisions share the
+[`matrix_delivery_policy` interface](matrix-delivery-policy.md). That document
+describes composition, the pending unfollow recheck, and which code changes
+require a relay restart; extracting policy does not make existing closures
+reloadable.
+
 `remuda butler matrix reply EVENT_ID TEXT` sends a threaded reply. The relay
 records the returned event ID against the originating Butler mail. A human
 replying in that thread needs no mention: the event-to-mail correlation routes
@@ -732,8 +895,7 @@ also applies to delegates without an explicit kind. OpenCode is available
 explicitly with `remuda butler launch opencode NAME` or
 `remuda butler topic delegate NAME --agent opencode TASK`; members run its
 standalone TUI and receive a per-member Butler MCP config via
-`OPENCODE_CONFIG_CONTENT`; OpenCode's terminal UI is supported here, while its
-ACP stdio protocol still needs a Remuda core process/session transport. Butler's
+`OPENCODE_CONFIG_CONTENT`. Butler does not use OpenCode's ACP protocol. Its
 `--sandbox` and `--writable` controls do not apply to OpenCode; its permission
 policy remains OpenCode's own configuration. Each candidate waits up to
 15 seconds by default; set `REMUDA_BUTLER_READINESS_TIMEOUT` to change that
@@ -768,69 +930,111 @@ internal `remuda butler status-hook`, which stores only that word and a time in
 the screen probe decides. Codex has no status hooks yet and stays on the screen
 probe.
 
-Butler also checks managed Claude and Codex panes every second for unfamiliar
-boxed or numbered choice dialogs. The reporting-only dispatcher stops Butler
-input immediately, then reports `kind=unknown` to the member's leader after two
-matching captures. It reports once per stable signature and session instance;
-an ambiguous repaint keeps input stopped until a known ready or working screen
-appears. Capture or detector failure also stops input. This geometry check does
-not recognise every possible blocker and does not classify tool-result text,
-including Claude auto-mode denials. New semantic recognisers require an observed
-dialog-only fixture; no cache-invalidation or Codex denial signature is assumed.
+Butler also checks managed Claude and Codex panes every second for blocking
+dialogs. An unrecognised screen does not stop input (owner decision
+2026-10-15, docs/concepts/input-screen-policy.md). A recognised dialog stops
+Butler's own input on the first capture. After two matching captures Butler
+records `dialog_blocked` and applies the state's response:
 
-Existing launch trust, Codex update and Teach-auto-mode policies retain their
-handlers. Startup ownership requires the matching pending launch/update record
-and the current dialog's known options; historical startup markers alone never
-admit an unfamiliar choice. Model/effort dialogs belong to the existing compaction handler only
-while that member owns the compaction operation and its recorded picker phase
-and target match the current caption and option rows. Historical picker titles
-never establish ownership. The dispatcher sends no new
-automatic keys and creates no standing grant.
+- `approval`: the dialog asks for a permission or reports a classifier
+  decision. Butler reports it to the member's leader as
+  `state=<id> response=approval` and never chooses an option, switches mode or
+  sends a key. The owner answers in the pane.
+- `report`: the dialog needs a decision (model, limit, setup). Butler reports
+  `state=<id> response=report` and chooses nothing.
+- `auto`: a harmless confirmation. Butler moves to the named option by its
+  text with arrow keys, presses Return only after a later capture shows that
+  option selected, and audits each key. It does nothing while someone is
+  typing in the pane, and after four tries without effect it reports the state
+  like `report`.
 
-The `dialog_action` approval infrastructure is reserved for fixture-backed
-one-time permission choices or acknowledgements. **No concrete recognizers are
-enabled yet:** unknown panes stay report-only; classifier denials stop automation
-and are reported, never turned into an approval action. A future recognizer lives
-in that agent's `dialog_approvals` descriptor list in `agents/claudecode.lua` or
-`agents/codex.lua`. Before adding one, supply a sanitized real dialog-only fixture
-(never another session's transcript) and tests showing current option/target
-matching, changed target refusal and permission precedence. Synthetic fixtures
-exercise the infrastructure; they are not evidence of real agent UI signatures.
+Butler reports each state once per stable screen and session instance. It
+lifts its stop, with a `dialog_resolved` audit record, once no recognised state
+remains. A missing or replaced session also stops input and is reported.
 
-Each descriptor supplies `id`, `version`, `fixture`, `category` (`permission` or
-`acknowledgement`), `action_scope = 'once'`, a pure `match(screen)` returning
-`signature`, one `key` (a digit or `RET`), `label` and a non-sensitive `summary`,
-and a pure `verify(screen)` postcondition. Never register classifier denials,
-mode switches that evade a denial, blanket Always-allow choices or arbitrary key
-sequences. Increment the version whenever matching, option or verification
-semantics change. Match current dialog geometry and the complete action target;
-a historical title is insufficient. `RET` requires proof that the intended
-one-time option is currently selected. The ordinary unknown gate must already
-have stopped input with two matching captures before a request is eligible.
+### Recognised dialog states
 
-Owner answers use the strict live Matrix gate used by guarded tool calls:
-correct room, configured allowed human sender, event time/id, no edits, agent
-senders or replay. Configure allowed human senders to designate the owner.
-Terminal approval is refused; terminal denial may cancel. Requests bind the
-session instance and launch marker, descriptor version, signature hashes and
-exact one-time option. Audit failure, attachment, changed evidence, unavailable
-relay, expiry or restart leaves input stopped. The executor audits before input,
-persists a one-shot consumption marker, rechecks evidence after both operations,
-and sends only the recorded key. Failed or ambiguous postconditions never cause
-an automatic resend. Current verification is one immediate capture; slow UI
-repaints are reported as uncertain and require inspection.
+Matching uses the current choice block and the heading directly above it (or
+inside its box); a later composer or a fenced quote makes it history. The lists
+live in `dialog_states` in `packages/butler/agents/claudecode.lua` and
+`packages/butler/agents/codex.lua`; add a row here with every new entry.
 
-`guard stats` also counts `dialog_approval_requested`, `dialog_approval_answer`
-and `dialog_approval_closed`. Action audit rows include request and owner-event
-provenance without screens or task contents. Ordinary input remains gated until
-the dispatcher independently sees a known ready/working screen.
+Claude Code:
+
+| State | Recognised by | Response |
+| --- | --- | --- |
+| `claude_permission_prompt` | `Do you want to proceed?` | approval |
+| `claude_fetch_permission` | `Do you want to allow Claude to fetch this content?` | approval |
+| `claude_usage_limit` | `What do you want to do?` with `Stop and wait for limit to reset` | report |
+| `claude_model_confirm` | `Switch model?` | report; compaction answers its own |
+| `claude_effort_confirm` | `Change effort level?` | report; compaction answers its own |
+| `claude_teach_auto_mode` | `Teach auto mode about your environment?` with Yes / Not now / Don't show again | auto: `Not now` (#453) |
+| `claude_teach_auto_mode_setup` | the same title with `Also scan shell history` and `Enter to continue` | report |
+| `claude_trust` | `Quick safety check:` workspace trust | launch answers it for an eligible launch; otherwise approval |
+
+Codex:
+
+| State | Recognised by | Response |
+| --- | --- | --- |
+| `codex_command_approval` | `Would you like to run the following command?` | approval |
+| `codex_edit_approval` | `Would you like to make the following edits?` | approval |
+| `codex_permissions_approval` | `Would you like to grant these permissions?` | approval |
+| `codex_terminal_input_approval` | `Would you like to send input to the existing terminal?` | approval |
+| `codex_auto_review_refused` | `Automatic approval review rejected too many approval requests for this turn (…); interrupting the turn.` above a choice | approval |
+| `codex_proceed_confirm` | `Do you want to proceed?` | approval |
+| `codex_model_picker`, `codex_effort_picker` | a complete model or effort picker | report; compaction answers its own; `recover` closes it on request |
+| `codex_model_effort_dialog`, `codex_reasoning_dialog` | `Select Model and Effort`, `Select Reasoning Level for gpt-…` | report |
+| `codex_model_confirm`, `codex_effort_confirm` | `Switch model?`, `Change effort level?` | report |
+| `codex_update` | update available, options Update now / Skip | launch answers Skip; otherwise report |
+| `codex_trust` | `Trust this folder?` | launch answers it for an eligible launch; otherwise approval |
+
+Teach auto mode's `Yes` lets Claude Code scan the project, recent sessions,
+shell history and other repositories to tune auto mode's classifier, so Butler
+never chooses it or the follow-up `Continue`. `Not now` changes no setting and
+grants nothing. Claude auto-mode denials are tool-result text in the
+transcript, not dialogs; Butler does not act on them.
+
+`unknown_choice`: a current numbered choice that matches none of these does
+not stop input. If it stays unchanged for 60 seconds, Butler reports it once to
+the leader (`state=unknown_choice`, input not stopped) and records
+`dialog_reported`, because the session may be waiting for an answer. A box with
+no choices is not reported. Add a recognised state for a dialog that is
+reported this way only with a real capture of it.
+
+### One-time dialog approval infrastructure
+
+The one-time `dialog_action` path is available only for a fixture-backed
+descriptor tied to an already recognised blocking dialog state whose response
+is `approval` and whose `action_scope` is `once`. **No concrete action
+descriptors are enabled.** Unrecognised choices remain report-only and do not
+stop input. Classifier denials, mode switches, blanket allow choices and
+arbitrary key sequences must never be registered as actions.
+
+A future descriptor lives in that agent's `dialog_approvals` list and names its
+`state_id`, version, real sanitized dialog-only fixture, category (`permission`
+or `acknowledgement`), one key (`0`–`9` or `RET`), exact option label, safe
+summary, matcher and postcondition verifier. It must match current dialog
+geometry and the full action target; a historical title is insufficient.
+`RET` also requires proof that the intended option is selected. Increment the
+descriptor version whenever matching or verification semantics change.
+
+Only a live owner Matrix reaction or reply can approve the request. Terminal
+approval is refused. Each approval is bound to the session instance, launch
+marker, recognized state, descriptor version, dialog signature and exact
+one-time option. Audit failure, attachment, changed evidence, unavailable
+relay, expiry or restart leaves input stopped. The executor records consumption
+before the key, rechecks evidence, sends that key once, and verifies the next
+screen. Uncertain results are never retried. Synthetic fixtures test only the
+infrastructure; they do not establish a real agent dialog signature.
 
 Managed `key`, `type_text` and `send` calls append `dialog_action` to the private
 guard audit before input, even while guard observation is off. Failed audit
 writes refuse input. Butler rechecks the screen and session instance after the
 audit and records the returned outcome. The dispatcher does not retry an
 uncertain write. `guard stats` counts the `dialog_blocked`, `dialog_reported`,
-`dialog_resolved`, `dialog_action` and `dialog_action_result` events. Records carry
+`dialog_resolved`, `dialog_action`, `dialog_action_result`,
+`dialog_approval_requested`, `dialog_approval_answer` and
+`dialog_approval_closed` events. Records carry
 session-instance and descriptor metadata without storing screens or prepared
 text. A root blocker uses the operator log instead of mailing itself. This
 program-layer gate does not prevent direct input from an attached owner or
@@ -861,6 +1065,11 @@ expires, continues while status is 75, and stops on ready or failure. Bare
 inspect readiness.
 
 ## Guardrail grants (slice 3 design rules)
+
+Workdir client defaults for root and delegated agent starts are documented in
+[Client configuration at agent start](workdir-client-config.md). These client
+permissions preserve managed review, sandbox and daemon role restrictions;
+they do not change the guardrail grant rules below.
 
 These rules are final for slice 3 of the guardrails (#339). All of slice 3 sits
 behind one switch that is off by default, and with it off no grant exists and

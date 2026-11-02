@@ -93,7 +93,7 @@ T.test("every_mutating_command_refuses_every_unidentified_caller_before_mutation
       {"close", "alice", "--force"},
       {"compact", "alice", "--force"},
       {"send", "alice", "callback probe"},
-      {"send", "bob", "alice", "callback probe"},
+      {"send", "--from", "bob", "alice", "callback probe"},
       {"send-to-leader", "callback probe"},
       {"inbox", "alice"},
       {"reply", "missing-id", "callback probe"},

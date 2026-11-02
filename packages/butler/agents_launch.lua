@@ -468,6 +468,20 @@ task sent to this terminal. Your Butler identity is already in
 `REMUDA_BUTLER_AGENT_ID`, and your leader is in `REMUDA_BUTLER_LEADER_ID`.
 Start by running `remuda butler inbox` to read your welcome message.
 
+## Memory
+
+Keep useful notes under `docs/`. Put stable, reusable facts and decisions in
+`docs/concepts/`; put dated events, progress, and context that may expire in
+`docs/journal/YYYY-MM-DD.md`. Keep source files concise: each concepts file and
+daily note must stay at or below 5,000 characters. Use at most 50 concepts
+files; when full, delete low-value material, consolidate or compress existing
+notes, or decline lower-priority material.
+
+Summarize daily notes older than two ISO weeks into
+`docs/journal/YYYY-Www.md` (use the correct ISO week year and week number), then
+gzip the summarized daily files under `docs/journal/archive/`. These are
+manual file practices; do not assume a process performs them automatically.
+
 ]]
   end,
   prompt = function()
@@ -554,7 +568,7 @@ remuda._butler_contribute("butler.guidance", "delegation", { order = 40,
   agents_md = function()
     return [[You may create a Remuda-managed child team with `remuda butler topic delegate
 NAME TASK...` when useful. Internal agent subagents are separate from Butler
-team members. `remuda butler send FROM TO MESSAGE...` is an operator form, not
+team members. `remuda butler send --from FROM TO MESSAGE...` is an operator form, not
 the normal way for a member to communicate.
 ]]
   end })
@@ -581,6 +595,42 @@ local function write_agent_guidance(root, text, replace)
   -- mod's own. An AGENTS.md that is a link is read through, and when the text
   -- differs the atomic writer replaces the link with a plain file.
   assert(remuda._butler_permissions.write_if_changed(path, text, config.fs))
+end
+-- A member's managed blocks (#535): the user guidance layers, then its
+-- Butler-owned memory. A block that cannot be made is left out: a launch never
+-- fails over guidance.
+local function member_guidance_blocks(name, parent)
+  local blocks = {}
+  if remuda._butler_guidance_block then
+    local ok, block = pcall(remuda._butler_guidance_block, name, team_member_guidance(parent))
+    if ok and block then blocks[#blocks + 1] = block end
+  end
+  if remuda._butler_memory_block then
+    local ok, block = pcall(remuda._butler_memory_block, name)
+    if ok and block then blocks[#blocks + 1] = block end
+  end
+  return blocks
+end
+-- The blocks' text for the welcome mail.
+local function guidance_text(blocks)
+  local out = {}
+  for _, block in ipairs(blocks or {}) do out[#out + 1] = "\n" .. block.body end
+  return table.concat(out)
+end
+-- Writes the blocks into ROOT/AGENTS.md. With `only_if_present` it refreshes
+-- them only where Butler wrote one of them before, and leaves any other
+-- AGENTS.md (a user's own project) untouched.
+local function write_guidance_layers(root, blocks, only_if_present)
+  if not (root and blocks and #blocks > 0) then return end
+  local path = root .. "/AGENTS.md"
+  if only_if_present then
+    local text, ours = config.fs.read(path), false
+    for _, block in ipairs(blocks) do
+      if text and text:find("<!-- BEGIN remuda-butler:managed id=" .. block.id .. " -->", 1, true) then ours = true end
+    end
+    if not ours then return end
+  end
+  pcall(remuda._butler_guidance_blocks.sync, path, blocks, config.fs)
 end
 local _butler_session_trace -- defined below; the task poke fires later
 local function option_number(screen, matches)
@@ -729,7 +779,8 @@ trust_modal_state = function(modal, screen)
   end
   return plan.selected and "safe_selected" or "safe"
 end
--- A titled choice modal (Claude "Teach auto mode ..."): DETECTION ONLY, never answered.
+-- A titled choice modal (Claude "Teach auto mode ..."): launch only detects it and defers;
+-- dialogs.lua answers it "Not now" (claude_teach_auto_mode) once the member is registered.
 -- Quoted, drafted, partial or wrapped title text counts, so first-task delivery defers. Text is lowercased with punctuation/whitespace/borders
 -- collapsed so a wrapped title still matches. The title alone suffices; option text counts
 -- only with the title or the context phrase in the same capture (lone "Not now" is not it).
@@ -854,6 +905,9 @@ remuda._butler_chooser = {
   team_member_guidance = team_member_guidance,
   team_member_prompt = team_member_prompt,
   write_agent_guidance = write_agent_guidance,
+  member_guidance_blocks = member_guidance_blocks,
+  guidance_text = guidance_text,
+  write_guidance_layers = write_guidance_layers,
   option_number = option_number,
   codex_update_version = codex_update_version,
   skip_option_number = skip_option_number,

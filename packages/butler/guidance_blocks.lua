@@ -5,6 +5,9 @@
 local guidance_blocks = {}
 
 local MAX_BODY = 8192
+-- A block may ask for a larger cap (`max`), up to 64 KiB.
+local MAX_BODY_CEILING = 65536
+local function body_cap(block) return math.min(tonumber(block.max) or MAX_BODY, MAX_BODY_CEILING) end
 local function begin_line(id) return "<!-- BEGIN remuda-butler:managed id=" .. id .. " -->" end
 local function end_line(id) return "<!-- END remuda-butler:managed id=" .. id .. " -->" end
 
@@ -40,7 +43,7 @@ leader, when you have one, is `REMUDA_BUTLER_LEADER_ID`. Use the short forms:
 - `remuda butler send MEMBER MESSAGE...` to direct a member; your sender is inferred.
 - `remuda butler send-to-leader MESSAGE...` to report a completed work loop.
 
-`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+`remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 ]==],
   -- Legacy guidance below is matched verbatim for migration, never emitted.
@@ -64,7 +67,7 @@ caller-env forwarding: pass your id (`remuda butler inbox
 $REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
 `send` is attributed to "operator" rather than to you.
 
-`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+`remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 ]==],
   -- plus the long-body line
@@ -89,7 +92,7 @@ caller-env forwarding: pass your id (`remuda butler inbox
 $REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
 `send` is attributed to "operator" rather than to you.
 
-`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+`remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 ]==],
   -- long bodies via a file or a pipe
@@ -115,7 +118,7 @@ caller-env forwarding: pass your id (`remuda butler inbox
 $REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
 `send` is attributed to "operator" rather than to you.
 
-`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+`remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 ]==],
   -- Former root guidance: retained verbatim only to recognize and migrate old files.
@@ -141,7 +144,7 @@ caller-env forwarding: pass your id (`remuda butler inbox
 $REMUDA_BUTLER_AGENT_ID`) or use the MCP `butler_*` tools. On such a core,
 `send` is attributed to "operator" rather than to you.
 
-`remuda butler send FROM TO MESSAGE...` is an operator form for sending on
+`remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 ]==],
 }
@@ -194,12 +197,12 @@ end
 -- report: one { id, outcome } per block, in order. outcome is written,
 -- unchanged, appended, migrated, damaged, duplicated, mixed-eol (a file with
 -- both LF and CRLF line endings is refused) or dropped (bad id, a body over
--- 8 KiB, or a body holding a marker line). A CRLF file keeps its CRLF.
+-- its cap: 8 KiB, or the block's `max` up to 64 KiB; or a body holding a marker line). A CRLF file keeps its CRLF.
 function guidance_blocks.merge(text, blocks)
   local report, valid, seen = {}, {}, {}
   for _, block in ipairs(blocks or {}) do
     local id, body = block.id, block.body
-    if valid_id(id) and type(body) == "string" and #body <= MAX_BODY and not seen[id]
+    if valid_id(id) and type(body) == "string" and #body <= body_cap(block) and not seen[id]
       and not body:find("remuda%-butler:managed id=") then
       seen[id] = true
       valid[#valid + 1] = block

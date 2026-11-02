@@ -44,7 +44,7 @@ remuda.key = function(session, key)
   keys[#keys + 1] = { session = session, key = key }
   return true
 end
-remuda._butler_notify_policy = function() return true end
+remuda._butler_approved_text_policy = function() return true end
 remuda._butler_session_trace = function(kind, detail) traces[#traces + 1] = { kind, detail } end
 remuda.ls = function() return { { name = "agent-1", alive = true, attached = false } } end
 remuda.session = function() return { attached = false } end
@@ -65,25 +65,25 @@ assert(#traces == 1 and traces[1][2]:find("@alice:example.org", 1, true)
 
 remuda._butler_bus.pending_tasks["agent-1"] = true
 ok, reason = approve_text.type_text("agent-1", multiline, provenance)
-assert(ok == false and reason == "pane_busy" and #typed == 1,
-  "busy session refuses without typing")
+assert(ok == false and reason == "workflow_owned" and #typed == 1,
+  "an owned pending workflow refuses without typing")
 remuda._butler_bus.pending_tasks["agent-1"] = nil
-remuda._butler_notify_policy = function() return false end
+remuda._butler_approved_text_policy = function() return false end
 ok, reason = approve_text.type_text("agent-1", multiline, provenance)
-assert(ok == false and reason == "pane_busy" and #typed == 1,
+assert(ok == false and reason == "input_policy_denied" and #typed == 1,
   "an unsafe composer or dialog refuses without typing")
-remuda._butler_notify_policy = function() return true end
+remuda._butler_approved_text_policy = function() return true end
 remuda.ls = function() return { { name = "agent-1", alive = true, attached = true } } end
 local _, _, was_attached
 ok, reason, was_attached = approve_text.type_text("agent-1", multiline, provenance)
 assert(ok == true and reason == nil and was_attached == true and #typed == 2
   and traces[#traces][2]:find("attached=true", 1, true),
   "an attached supervisor does not block owner-approved text; the trace records it")
-remuda._butler_notify_policy = function() return false end
+remuda._butler_approved_text_policy = function() return false end
 ok, reason = approve_text.type_text("agent-1", multiline, provenance)
-assert(ok == false and reason == "pane_busy" and #typed == 2,
+assert(ok == false and reason == "input_policy_denied" and #typed == 2,
   "an attached pane with a draft in the composer still refuses")
-remuda._butler_notify_policy = function() return true end
+remuda._butler_approved_text_policy = function() return true end
 remuda.ls = function() return { { name = "agent-1", alive = false, attached = true } } end
 ok, reason = approve_text.type_text("agent-1", multiline, provenance)
 assert(ok == false and reason == "session_not_live" and #typed == 2, "a dead session still refuses")
@@ -123,7 +123,7 @@ do
   remuda.ls, request_spec = saved_ls, saved_spec
 end
 local applied
-remuda._butler_notify_policy = function() return true end
+remuda._butler_approved_text_policy = function() return true end
 request_handler.approve({ id = "ABCD", data = request_spec.data,
   answered_by = "@alice:example.org", answer_event_id = "$owner-answer" },
   function(ok, why) applied = { ok, why } end)

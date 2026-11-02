@@ -74,6 +74,51 @@ local function split_utf8(text)
   return chunks
 end
 
+-- Turn @localpart[:server] in text nodes into matrix.to pills (receiver needs the
+-- anchor AND m.mentions). Skips <a>/<code>/<pre>; unresolved names stay plain.
+local function pillify(html, resolve)
+  local ids, seen, out, at, skip = {}, {}, {}, 1, 0
+  local function link(text)
+    local pos, parts = 1, {}
+    while true do
+      local s, e, name = text:find("@([%w._=%-]+)", pos)
+      if not s then break end
+      name = name:gsub("[%.%-]+$", "")
+      e = s + #name
+      local server = text:match("^:([%w.%-]+)", e + 1)
+      if server then server = server:gsub("[%.%-]+$", "") end
+      local token_end = server and e + 1 + #server or e
+      local mxid = not (s > 1 and text:sub(s - 1, s - 1):match("[%w._=/%-:@]")) and #name > 0
+        and resolve(name, server)
+      parts[#parts + 1] = text:sub(pos, s - 1)
+      if mxid then
+        parts[#parts + 1] = '<a href="https://matrix.to/#/' .. mxid .. '">' .. text:sub(s, token_end) .. "</a>"
+        if not seen[mxid] then seen[mxid] = true; ids[#ids + 1] = mxid end
+      else
+        parts[#parts + 1] = text:sub(s, token_end)
+      end
+      pos = token_end + 1
+    end
+    parts[#parts + 1] = text:sub(pos)
+    return table.concat(parts)
+  end
+  while at <= #html do
+    local lt = html:find("<", at, true)
+    local text = html:sub(at, (lt or #html + 1) - 1)
+    out[#out + 1] = skip > 0 and text or link(text)
+    if not lt then break end
+    local gt = html:find(">", lt, true) or #html
+    local tag = html:sub(lt, gt)
+    local closing, tname = tag:match("^<(/?)(%a+)")
+    if tname == "a" or tname == "code" or tname == "pre" then
+      skip = math.max(0, skip + (closing == "/" and -1 or 1))
+    end
+    out[#out + 1] = tag
+    at = gt + 1
+  end
+  return table.concat(out), ids
+end
+
 local function send_chunks(room, text, relation, on_done, txn_prefix, plain)
   local done = once(on_done)
   if type(text) ~= "string" or text == "" then
@@ -97,6 +142,14 @@ local function send_chunks(room, text, relation, on_done, txn_prefix, plain)
       local ok, html = pcall(function() return remuda.butler.md2html.convert(chunks[index]) end)
       if ok and type(html) == "string" and html ~= "" and #html <= MAX_HTML_BYTES then
         content.format, content.formatted_body = "org.matrix.custom.html", html
+        local relay = matrix.relay and matrix.relay.instance
+        if relay and type(relay.resolve_mention) == "function" then
+          local linked, ids = pillify(html, function(l, s) return relay:resolve_mention(l, s) end)
+          if #ids > 0 and #linked <= MAX_HTML_BYTES then
+            content.formatted_body = linked
+            content["m.mentions"] = { user_ids = ids }
+          end
+        end
       end
     end
     if relation then content["m.relates_to"] = relation end
@@ -210,7 +263,7 @@ function matrix.reply(opts, on_done)
       .. " Butler-only turns. A reply in that thread from a person on the allowlist resumes it.\n"
       .. next_step
   end
-  if not opts.from_outbox and relay:b2b_stopped(room, root) then
+  if not opts.from_outbox and not allowlisted_human_reply and relay:b2b_stopped(room, root) then
     return error_result(done, stopped_error())
   end
   return same_room_then(room, opts.event_id, done, function(reply_done)
@@ -673,6 +726,48 @@ function matrix.mark_all(opts, on_done, agent)
   end
   local ok, mark_error = matrix.config_mark_all(paths.config_path, room)
   if not ok then error_result(done, mark_error) else done({ room_id = room }) end
+  return { cancel = function() end }
+end
+
+function matrix.notifications(opts, on_done, agent)
+  opts = opts or {}
+  local done = once(on_done)
+  if agent then
+    done({ error = "matrix notifications is operator-only\nNext: ask the owner to run remuda butler matrix notifications from their terminal" })
+    return { cancel = function() end }
+  end
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  local config_path = paths.config_path
+  if type(config_path) ~= "string" or config_path == "" then
+    error_result(done, "Matrix config path is unavailable")
+    return { cancel = function() end }
+  end
+  local conf, config_error = matrix.read_config(config_path)
+  if not conf then
+    error_result(done, config_error)
+    return { cancel = function() end }
+  end
+  local room = opts.room or conf.home_room
+  if conf.rooms[room] == nil then
+    error_result(done, tostring(room) .. " is not a configured Matrix room.\nNext: remuda butler matrix rooms")
+    return { cancel = function() end }
+  end
+  if opts.mode ~= nil then
+    local ok, write_error = matrix.config_set_notification_mode(config_path, room, opts.mode)
+    if not ok then
+      error_result(done, write_error)
+      return { cancel = function() end }
+    end
+    if matrix.relay and matrix.relay.instance and matrix.relay.instance.set_notification_mode then
+      matrix.relay.instance:set_notification_mode(room, opts.mode)
+    end
+    conf, config_error = matrix.read_config(config_path)
+    if not conf then
+      error_result(done, config_error)
+      return { cancel = function() end }
+    end
+  end
+  done({ status = 200, json = { room = room, mode = matrix.notification_mode(conf, room) } })
   return { cancel = function() end }
 end
 

@@ -153,6 +153,7 @@ local function json_quote(s)
 end
 remuda._butler_paths = {
   topic_config = topic_config,
+  default_config_home = default_config_home,
   data_home = data_home,
   -- Set when data made under the old rule is still in use; main.lua traces it once.
   data_home_note = data_home_note,

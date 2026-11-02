@@ -1,0 +1,188 @@
+# Client configuration at agent start
+
+Before starting a root or registered delegated Claude/Codex agent, Butler
+initializes both clients' configuration in that session's actual working
+directory:
+
+- `.claude/settings.local.json`: merges `Bash(remuda:*)` and `mcp__remuda__*`
+  into the allow list, preserving existing permissions, Skill entries and all
+  other JSON settings. An identical deny or ask entry withholds that grant.
+  More specific user restrictions remain present and are enforced by the client.
+- `.codex/config.toml`: fills missing fields of the Remuda MCP server with
+  `command="remuda"`, `args=["mcp"]`, environment variable names
+  `REMUDA_SESSION_CAPABILITY` and `REMUDA_RUNTIME_DIR`, `enabled=true`, and
+  `default_tools_approval_mode="approve"`. Existing fields, per-tool
+  prompt/disable policy, user/server restrictions and other config stay intact.
+- `.codex/rules/remuda.rules`: appends an attributable Butler block allowing
+  the `remuda` executable prefix. Existing custom rules are retained byte for
+  byte; their more restrictive decisions still take precedence. A modified or
+  duplicated Butler block is preserved and reported rather than overwritten.
+
+How Claude receives the defaults: every Butler-launched Claude session gets
+`Bash(remuda:*)` and `mcp__remuda__*` as an allow-only `permissions.allow` in
+its per-launch `--settings` file, beside the existing status line and hooks.
+The file lives in a fresh exclusive private (0700) directory owned by the
+daemon, is written with a checked private atomic write (0600), and holds the
+allow literals, the status line/hook commands (which embed the Butler server
+name and status path) and, when guard policy is on, the guard hook commands.
+No capability, token or identity value is added to it.
+If any step fails and guard policy is on, the Claude launch is refused (fail
+closed): the builder raises, the chooser records a `spawn_error` for that
+candidate and never starts Claude without its guard hooks. With guard policy
+off (guard is "on" only when its marker file is readable and its first line is exactly `on`; an I/O error counts as off) the same failure only loses the defaults and status telemetry: Claude
+starts with no `--settings` argument.
+`settings_not_written` is traced with the reason; there is no plain-write
+fallback or write into a checkout/HOME. The previous status and settings
+directories of a member are removed when that member is set up again
+(relaunch); directories of finished sessions and of a crashed daemon are not
+removed and can accumulate (best effort, private, small).
+
+Measured with claude 2.1.300, Bash tool, `-p --permission-mode default`,
+haiku (`docs/workdir-client-config-claude-evidence.txt`; the first sections loaded the
+user's global settings, the final "isolated" section excludes the user layer
+with `--setting-sources project,local`): a `--settings` allow works from the
+repo root, a subdirectory and a worktree; a project-root deny or ask rule
+still blocks the same command when `--settings` allows it. Not measured:
+managed settings, MCP tools, auto mode (the launcher's mode), other client
+versions or platforms, hook merging with enterprise settings. Managed-only
+permission rules can still ignore these grants. If the file disappears or is
+replaced while the client runs, nothing re-validates it.
+
+The workdir `.claude/settings.local.json` is written only outside any
+repository; at or below a `.git` entry (including one that cannot be read) it
+is withheld.
+
+Withheld defaults (reported in `withheld`/`blocked`, never silently widened):
+
+- Codex `enabled` and `default_tools_approval_mode` are not inserted when
+  Codex's own resolver lists a `remuda` server (this resolves escaped, quoted
+  and dotted key spellings), a user/ancestor layer is unreadable or non-empty
+  (an ancestor may be untrusted now and applied later), or Codex/its home
+  cannot be queried. A project layer outranks those layers. A named Codex
+  `--profile` is not selected by any Butler launch and is not consulted.
+- Each client is checked, read, validated, snapshotted and written inside its
+  own boundary: a link, unreadable or invalid file of one client blocks only
+  that client (`report.blocked`); only the launching client's own block is
+  `report.error`. Without Codex installed, Claude still initializes and fresh
+  Codex defaults are written without the policy fields.
+- The legacy root permission writer leaves an unreadable settings file alone
+  (`read_checked` is required of the filesystem adapter for this guarantee).
+
+Known limits (accepted, not solved):
+
+- The Remuda execpolicy `allow` rule lets matching commands run outside the
+  sandbox without a prompt (Codex rules semantics). Sandbox keys are left
+  unchanged; enforcement of those commands is not. This is the owner-authorized
+  broad grant and needs explicit activation.
+- Validation copies the complete existing TOML to a private (0700/0600)
+  temporary Codex home and removes it on a best-effort basis; a crash or a
+  failed removal can leave that copy. No new session secret is passed; a
+  pre-existing secret in that file is copied.
+- Writes are atomic per file, not across files, with no lock and no rollback;
+  an external writer between snapshot and write can be overwritten. A failed
+  second write leaves the earlier file and is reported.
+- The TOML merge is line based. Documents containing triple quotes (also in
+  comments) are refused; other shapes rely on native validation only. The
+  resolver's output is read as a list of server entries without a full schema
+  check.
+- Replacing an existing file uses a private 0600 mode (this can drop an
+  intentional read-only mode). Existing directory modes are not hardened.
+
+This broader scope follows the direct owner instruction in the coordinator's
+API conversation: “and, I want to allow every remuda tasks, `remuda` cli execution,
+or remuda mcp, no matter which tool in it.” It supersedes the earlier routine
+coordination-only proposal. Client grants do not change managed automatic
+review, sandbox settings, folder trust, daemon role restrictions, or the guards
+on operations that need separate approval. Other executables and MCP servers
+receive no grant. Explicit existing restrictions can still prevent an operation.
+
+Root candidate specs and the shared member launch function initialize before
+the agent's argv is built/spawned. Topic delegation with a supplied cwd uses
+that cwd, and relaunches reuse this path. Claude and Codex receive the same
+identity-free defaults, so different adapters sharing a workdir do not write
+another session's identity. Monocle and other adapters are skipped. Repeated
+launches leave unchanged files and their modification times alone; this is not
+a reconciliation timer or a retrofit of already-running sessions.
+
+The existing launcher MCP command/args and per-session capability overrides
+remain authoritative. The generator never receives a token or session identity
+and serializes only environment variable names. Existing inline capability
+assignments are preserved with a cleanup diagnostic rather than copied into
+validation fixtures or rewritten. The launcher's existing private bridge files
+and in-memory flags are unchanged by this feature.
+
+## Preservation and diagnostics
+
+Within one client the merger plans, validates and snapshots every target before writing any of them; the clients are processed one after the other (Claude, then Codex), so Claude files may be written before Codex validation runs.
+Unreadable files are not mistaken for missing files. Symlinks or uncertain link
+checks refuse writes. A changed snapshot during validation aborts the merge.
+Target writes use core private atomic writes; callbacks in one daemon serialize
+shared-workdir merges. This is not a multi-process filesystem lock or a
+three-file transaction: an I/O failure after a successful write may leave that
+earlier file initialized, and the diagnostic states this. There remains a
+check-to-write race against an external editor/link swap; core does not offer
+an open-beneath/CAS transaction here. No stronger guarantee is claimed.
+
+Claude JSON is decoded with core JSON and checked for permission shapes. Existing
+TOML and rules use the installed Codex CLI's offline config/execpolicy parsers
+in a freshly created, private temporary directory. These commands never start
+an MCP server, and their output is not forwarded or logged because it may
+contain user auth fields. Temporary directories are removed only if exclusive
+creation succeeded. Without Codex, the exact literal fresh generated documents
+remain supported; arbitrary existing/custom TOML/rules require Codex validation
+and otherwise produce a diagnostic without target edits.
+
+The TOML merge fills missing fields in the `[mcp_servers.remuda]` section
+(including simple quoted components/keys) and preserves original text.
+Escaped/dotted/inline representations that conflict with this conservative insertion are left unchanged after native
+validation fails. Existing explicit settings are never silently overwritten to
+force the default policy. Trace events `coordination_config_not_written` and
+`coordination_config_written` record safe outcomes. Doctor identifies missing,
+blocked, or initialized root defaults using a clearly labeled launch-time
+report; it does not claim that user/managed restrictions allow every operation.
+
+## Activation and validation
+
+This source patch does not change installed modules or any running workdir.
+An owner-controlled installation/activation is still required. It affects future
+actual starts, not an already-running root adopted on activation. Existing
+clients may need a restart/new session to load local configuration, and this
+feature does not trigger one. The separately rejected live HOME patch remains
+unapplied; there is no workaround through this local implementation.
+
+```sh
+REMUDA_BIN=/private/tmp/remuda-notify-policy/target/release/remuda bash tests/butler_coordination_config.sh
+REMUDA_BIN=/private/tmp/remuda-notify-policy/target/release/remuda bash tests/lua_tests.sh tests/lua/butler_coordination_launch_test.lua
+luajit tests/butler_permissions.lua
+luajit tests/butler_approve_text_syntax.lua
+```
+
+Fixture coverage includes both clients/adapters, separate and shared actual
+workdirs, root fallback specs, registered member starts/relaunches and delegated
+cwd overrides; capability non-persistence; repeats and custom settings;
+deny/prompt precedence; malformed JSON/TOML/rules; unreadability/link rejection;
+and exclusive temporary-directory cleanup. Spawn-boundary stubs stop before
+starting any real agent. The native parser uses installed Codex; tests require
+that executable even though fresh runtime defaults can be generated without it.
+
+Codex keys were verified against the
+[official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+## Test modes
+
+`tests/butler_coordination_config.sh` decides its mode once
+(`tests/lib/config_test_mode.sh`) and passes it to the Lua test as
+`BUTLER_CONFIG_TEST_MODE`; the Lua file never probes Codex. `full` runs the
+native Codex parser/execpolicy/resolver checks. `codexless` (Codex not
+installed) runs only a small subset, and the runner prints its
+`codexless subset` line even from a passing log. When Codex is installed, the
+probe requires `codex --version` to exit 0 within
+`BUTLER_CONFIG_TEST_PROBE_TIMEOUT` seconds (integer 1-60, no leading zero, default 10; anything
+else is a failure) and print exactly `codex[-cli] X.Y.Z[-pre][+build]` on its
+first line; a failing, hanging, exec-failing or garbage-printing
+Codex is a hard failure, never a subset. `REQUIRE_NATIVE_CODEX=1` makes an
+absent Codex a failure too. This checks only that a Codex-looking executable
+answers; a version string cannot authenticate a hostile PATH shim, so the
+native assertions on a trusted PATH are the real check. CI without Codex
+therefore only gets the subset: the native gate is a local/QA requirement.
+Whether CI should provision Codex is an open decision for the maintainers.
