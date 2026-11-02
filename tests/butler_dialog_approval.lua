@@ -7,6 +7,7 @@ local blocked = { blocked = true, id = 'synthetic_ack', captures = 2, instance =
   signature = screen, agent = agent, entry = state_entry }
 local store = { approvals = {} }
 _G.remuda = {
+  cli = { parse = function() error('no CLI invocation permitted') end },
   butler = {}, _butler_bus = { agents = { child = agent }, dialog_states = { child = blocked } },
   _butler_agent_startup = { claude = { dialog_states = { state_entry }, dialog_approvals = {} } },
   capture = function() return screen end,
