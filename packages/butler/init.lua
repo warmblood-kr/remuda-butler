@@ -258,6 +258,18 @@ return {
         working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
         login = { "Please log in", "not logged in", "Authentication required", "Sign in to continue", "Not authenticated" },
         dialogs = function() return host._butler_agent_startup.codex.modals end },
+      { id = "opencode", order = 25, executable = "opencode", requires = "opencode", automatic = false,
+        argv = function(_, spec) return host._butler_agent_builders.opencode(spec) end,
+        ready = function(_, screen)
+          for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
+            line = line:gsub("^%s*[│|]?%s*", ""):gsub("^[❯›>]%s*", ""):gsub("%s+$", "")
+            if line == "Ask anything, / for commands, @ for context..."
+                or line == "Ask anything…" or line == "Ask anything..." or line == "Ask anything" then return true end
+          end
+          return false
+        end,
+        working = function(_, screen) return tostring(screen or ""):find("esc to interrupt", 1, true) ~= nil end,
+        login = { "Authentication required", "Not authenticated", "Please log in" } },
       { id = "monocle", order = 30, executable = "monocle", requires = "monocle", automatic = false,
         argv = function(_, spec) return host._butler_agent_builders.monocle(spec) end,
         ready = function(_, screen) return host._butler_agent_startup.monocle.ready(screen) end,
@@ -317,6 +329,29 @@ manual file practices; do not assume a process performs them automatically.
             .. "`remuda butler reply MESSAGE-ID -` (or `--file PATH`). Long bodies use "
             .. 'stdin (`-`) or `--file "$PWD/path"`; message bodies are limited to 64 KiB. '
         end },
+      { id = "schedule", order = 22,
+        agents_md = function()
+          return [[Use Butler's persistent schedule for recurring checks or delayed follow-ups
+that should survive a Claude/Codex/OpenCode/Monocle session or harness change. First check
+`remuda butler schedule list`. A schedule sends its fixed text as timed mail; it
+does not run a shell command or CI job by itself. Read the mail and perform the
+check it describes.
+
+Schedules repeat. For example, this asks the operator to check a build every 20
+minutes in the Butler session:
+
+`remuda butler schedule add ci-watch "*/20 * * * *" "Check CI for PR #123 and report its status." --to butler`
+
+The time uses the machine's local time. `*/N` supports 5, 6, 10, 12, 15, 20 or
+30 minutes; `N` means that minute each hour; the hour is `N` or `*`. This is not
+a one-shot timer or a general cron runner. Schedules can be skipped if the
+target session is absent or still has unread mail from the previous firing.
+Adding and removing schedules require the owner at a terminal, so ask them to
+run `remuda butler schedule add ...` and confirm it with `remuda butler schedule
+list`. Name a different recipient with `--to SESSION`.
+
+]]
+        end },
       { id = "codex", order = 25,
         agents_md = function()
           return [[Codex members: use the MCP `butler_*` tools first (`butler_inbox`,
@@ -325,6 +360,14 @@ manual file practices; do not assume a process performs them automatically.
 `remuda butler` CLI fails inside the Codex sandbox by
 design (`Operation not permitted`). If you must use the CLI and get that error,
 re-run the command requesting escalated permissions.
+
+]]
+        end },
+      { id = "opencode", order = 26,
+        agents_md = function()
+          return [[OpenCode members: use the Butler MCP `butler_*` tools for coordination
+and mailbox work. The Butler MCP server is configured for this member; first run
+`remuda butler inbox` to read the task and recent mail.
 
 ]]
         end },

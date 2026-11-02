@@ -422,6 +422,7 @@ local function observe(name, agent, alias, instance, screen, failure, ticking)
     if state.id ~= id or state.signature ~= signature then
       state.id, state.signature, state.captures, state.entry = id, signature, 0, entry
       state.audited, state.reported = nil, nil
+      state.approval_attempted = nil
       local diagnostics = remuda._butler_diagnostics
       if diagnostics and type(diagnostics.record) == 'function' then
         local reason = (id == 'capture_unavailable' or id == 'session_unavailable'
@@ -445,6 +446,7 @@ local function observe(name, agent, alias, instance, screen, failure, ticking)
     if audit(name, agent, state, 'dialog_resolved', 'wait', 'no_exception_detected') then
       state.id, state.signature, state.blocked, state.entry = nil, nil, nil, nil
       state.captures, state.reported, state.audited = 0, nil, nil
+      state.approval_attempted = nil
       state.auto_steps, state.auto_failed = nil, nil
     end
   end
@@ -480,7 +482,10 @@ function M.tick()
   for _, session in ipairs(sessions) do
     if session.alive then
       live[session.name] = true
-      if agent_for(session.name) then check(session.name, true) end
+      if agent_for(session.name) then
+        local _, observed = check(session.name, true)
+        if butler.dialog_approval then butler.dialog_approval.consider(session.name, observed) end
+      end
     end
   end
   for name in pairs(states) do if not live[name] then states[name] = nil end end

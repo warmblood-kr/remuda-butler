@@ -127,6 +127,8 @@ remuda._butler_agent_startup.codex = {
     else return false end
     return target or phase == "escape"
   end,
+  -- Empty until a real, fixture-backed recognizer is approved for one-time input.
+  dialog_approvals = {},
   -- Recognised dialog states (see claudecode.lua and docs/butler.md).
   -- `scan` headings may sit above approval metadata and command/diff rows.
   -- No invented Codex denial/cache signatures beyond these.

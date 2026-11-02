@@ -110,7 +110,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   end
   candidates = compatible
   kind = kind or candidates[1]
-  if profile and (kind ~= "codex" or not remuda._butler_codex_config_ok()) then
+  if profile and kind ~= "codex" then
+    error("--writable and --sandbox apply to Codex members only; Butler does not manage OpenCode permissions yet.\nNext: launch without these flags, or use `codex`", 0)
+  end
+  if profile and not remuda._butler_codex_config_ok() then
     error("this core cannot pass a sandbox profile to Codex (`_codex_tui` lacks -c KEY=VALUE); refusing to launch without it.\nNext: remuda upgrade, then retry", 0)
   end
   -- Every launch and relaunch passes here: the profile is checked again, and `full`
@@ -195,13 +198,18 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         settings_path = telemetry.settings_path, telemetry = telemetry,
         system_prompt = parent and team_member_prompt(parent) or nil }
     end,
-    env = function(candidate_kind)
-      return { REMUDA_BUTLER_SESSION_NAME = name, REMUDA_BUTLER_AGENT_ID = identity.id,
+    env = function(candidate_kind, spec)
+      local values = { REMUDA_BUTLER_SESSION_NAME = name, REMUDA_BUTLER_AGENT_ID = identity.id,
         REMUDA_BUTLER_AGENT_ALIAS = name,
         REMUDA_BUTLER_LEADER_ID = parent_identity and parent_identity.id or "",
         REMUDA_BUTLER_AGENT_KIND = candidate_kind,
         REMUDA_BUTLER_MEMORY_DIR = memory_dir or "",
         CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1" }
+      if candidate_kind == "opencode" then
+        values.OPENCODE_CONFIG_CONTENT = remuda._butler_agent_support.opencode_config_content(
+          spec and spec.token, spec and spec.model)
+      end
+      return values
     end,
   }
   local function report_model_rejection(selected_kind, detail)

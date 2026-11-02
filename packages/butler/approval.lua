@@ -124,9 +124,10 @@ function approval.attach(state, persist_fn, post_fn, room_fn, home_room)
   local restarted_ms = math.floor(os.time() * 1000)
   for _, rec in pairs(state.approvals) do
     -- A guard request is answered only while its hook waits; a restart ends the wait.
-    if type(rec) == "table" and rec.kind == "guard_action" and (rec.status == "open" or rec.status == "approved") then
+    if type(rec) == "table" and (rec.kind == "guard_action" or rec.kind == "dialog_action")
+        and (rec.status == "open" or rec.status == "approved") then
       rec.status, rec.answered_at, rec.error = "expired", restarted_ms, "daemon restarted"
-      local callback = handlers.guard_action and handlers.guard_action.expire
+      local callback = handlers[rec.kind] and handlers[rec.kind].expire
       if callback then pcall(callback, rec) end
       recovered = true
     end
@@ -185,8 +186,13 @@ function approval.attach(state, persist_fn, post_fn, room_fn, home_room)
 end
 
 function approval.begin_delivery(rec)
-  if not attached or type(rec) ~= "table" or rec.kind ~= "approve_text"
-      or (rec.status ~= "approved" and rec.status ~= "queued") or rec.delivery_started == true then return false end
+  if not attached or type(rec) ~= "table" then return false end
+  if rec.kind == "dialog_action" then
+    if rec.status ~= "approved" or rec.delivery_started == true then return false end
+  elseif rec.kind ~= "approve_text"
+      or (rec.status ~= "approved" and rec.status ~= "queued") or rec.delivery_started == true then
+    return false
+  end
   rec.delivery_started = true
   local ok, result = pcall(persist)
   if not ok or result == false then
@@ -480,6 +486,9 @@ function approval.answer(id_or_event, verdict, who, event_id)
   end
   if rec.kind == "guard_unfreeze" and who == "operator (terminal)" and verdict == "approve" then
     return nil, "Lifting the freeze can only be approved by the owner in its live Matrix thread."
+  end
+  if rec.kind == "dialog_action" and who == "operator (terminal)" and verdict == "approve" then
+    return nil, "Dialog input can only be approved by the owner in its live Matrix thread."
   end
   if rec.kind == "approve_text" and rec.status == "approved" and verdict == "approve" then
     if rec.delivery_started == true then return nil, "Already answered.", rec end

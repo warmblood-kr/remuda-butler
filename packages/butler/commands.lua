@@ -543,14 +543,14 @@ local LAUNCH_CLI_SPEC = {
         { long = "sandbox", value = "MODE", help = "Use the full sandbox profile (operator-only; default is agent-specific)" },
       },
       args = {
-        { name = "AGENT", help = "Registered agent type (claude, codex, or monocle)" },
+        { name = "AGENT", help = "Registered agent type (claude, codex, opencode, or monocle)" },
         { name = "NAME", help = "Optional session name", required = false },
       },
       next = "remuda butler launch --help",
     },
   },
 }
-command(20, "launch", "  remuda butler launch <claude|codex|monocle> [name] [--model M] [--writable DIR]... [--sandbox full]", function(args, caller)
+command(20, "launch", "  remuda butler launch <claude|codex|opencode|monocle> [name] [--model M] [--writable DIR]... [--sandbox full]", function(args, caller)
   local report = cli_parser(LAUNCH_CLI_SPEC, args)
   if report.kind == "help" then return report.text end
   if not report.ok then

@@ -132,6 +132,8 @@ local function teach_labels(labels)
 end
 
 remuda._butler_agent_startup.claude = {
+  -- Empty until a real, fixture-backed recognizer is approved for one-time input.
+  dialog_approvals = {},
   -- Recognised dialog states, matched by dialogs.lua. Documented in
   -- docs/butler.md ("Recognised dialog states"); keep the two in step.
   -- response: approval = stop writes and report, the owner answers in the

@@ -101,6 +101,11 @@ end
 -- plus the text. Dim ghost suggestions stay NON-EMPTY and defer (#137).
 local PROMPT_GLYPHS = { "❯", ">", "›" }
 function remuda._butler_prompt_is_empty(kind, screen)
+  local startup = remuda._butler_agent_startup[kind] or {}
+  if kind == "opencode" and type(startup.empty) == "function" then
+    local ok, decision, value = pcall(startup.empty, screen)
+    if ok and decision then return decision, value or "" end
+  end
   local text, prompt_at
   -- Claude draws its empty composer as '❯' + NO-BREAK SPACE; Lua's %s
   -- misses U+00A0, so fold it to a space before parsing (every kind).
@@ -119,7 +124,6 @@ function remuda._butler_prompt_is_empty(kind, screen)
   end
   if not text then return "UNPARSEABLE", "" end
   text = text:gsub("│%s*$", ""):match("^%s*(.-)%s*$")
-  local startup = remuda._butler_agent_startup[kind] or {}
   if kind == "codex" then
     for _, placeholder in ipairs(startup.placeholders or {}) do
       if text == placeholder then return "EMPTY", text end

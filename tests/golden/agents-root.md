@@ -38,6 +38,13 @@ Caller attribution is advisory within one user account, not an isolation boundar
 
 `remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
+
+Use `remuda butler schedule` for recurring checks or delayed follow-ups that
+should survive agent-session or harness changes. Schedules deliver fixed text
+as timed mail; they do not run shell commands or CI jobs. They repeat and can
+skip a firing when the target is absent or has unread mail from the previous
+one. Check `remuda butler schedule list`; ask the owner to add or remove a
+schedule from a terminal. Example: `remuda butler schedule add ci-watch "*/20 * * * *" "Check CI for PR #123 and report its status." --to butler`.
 <!-- END remuda-butler:managed id=butler -->
 
 <!-- BEGIN remuda-butler:managed id=guidance-layers -->
@@ -47,7 +54,7 @@ Butler loaded these guidance layers in this order when this session started.
 A later layer adds to or overrides an earlier one. Edit the files named here,
 not this block: Butler rewrites it on every session start.
 
-- framework: built in, version sha256:cde212b1ae78
+- framework: built in, version sha256:e6cc18433fc5
 - cluster: not available (this Remuda core has no cluster file store; update Remuda)
 - team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
 - personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)

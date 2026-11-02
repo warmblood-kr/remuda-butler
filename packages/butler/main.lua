@@ -592,6 +592,16 @@ local function agent_mcp_config(token)
   return '{"mcp_servers":{"remuda":{"command":"remuda","args":["-s",'
     .. json_quote(server) .. ',"mcp"],"env":{' .. env .. '}}}}'
 end
+local function opencode_config_content(token, model)
+  local env = '"REMUDA_SESSION_CAPABILITY":' .. json_quote(token)
+  if runtime_dir then env = env .. ',"REMUDA_RUNTIME_DIR":' .. json_quote(runtime_dir) end
+  local config = '{"mcp":{"remuda":{"type":"local","command":["remuda","-s",'
+    .. json_quote(server) .. ',"mcp"],"environment":{' .. env .. '}}}'
+  if type(model) == "string" and model ~= "" then
+    config = config .. ',"model":' .. json_quote(model)
+  end
+  return config .. '}'
+end
 remuda._butler_agent_builders = remuda._butler_agent_builders or {}
 remuda._butler_agent_startup = remuda._butler_agent_startup or {}
 remuda._butler_agent_support = {
@@ -599,6 +609,7 @@ remuda._butler_agent_support = {
   mcp_flags = agent_mcp_flags,
   json_quote = json_quote,
   mcp_config = agent_mcp_config,
+  opencode_config_content = opencode_config_content,
   status_settings = status_settings,
   new_private_dir = new_private_dir,
 }
@@ -606,6 +617,7 @@ remuda.exec("butler/sandbox")
 remuda.exec("butler/telemetry")
 remuda.exec("butler/agents/claudecode")
 remuda.exec("butler/agents/codex")
+remuda.exec("butler/agents/opencode")
 remuda.exec("butler/agents/monocle")
 remuda.exec("butler/prompt")
 -- The launch chooser, member guidance and startup modals live in agents_launch.lua.
@@ -815,6 +827,7 @@ remuda.exec("butler/guard_policy")
 remuda.exec("butler/guard_grants")
 remuda.exec("butler/guard_approval")
 remuda.exec("butler/dialogs")
+remuda.exec("butler/dialog_approval")
 remuda.butler.dialogs.install()
 remuda.exec("butler/input_queue")
 remuda.exec("butler/owner_input")
@@ -1114,6 +1127,13 @@ Caller attribution is advisory within one user account, not an isolation boundar
 
 `remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
+
+Use `remuda butler schedule` for recurring checks or delayed follow-ups that
+should survive agent-session or harness changes. Schedules deliver fixed text
+as timed mail; they do not run shell commands or CI jobs. They repeat and can
+skip a firing when the target is absent or has unread mail from the previous
+one. Check `remuda butler schedule list`; ask the owner to add or remove a
+schedule from a terminal. Example: `remuda butler schedule add ci-watch "*/20 * * * *" "Check CI for PR #123 and report its status." --to butler`.
 ]]
 -- Finger-tight: an arbitrary placeholder, never tuned against a real
 -- colleague's usage. Tightening step: revisit once this has run on a real

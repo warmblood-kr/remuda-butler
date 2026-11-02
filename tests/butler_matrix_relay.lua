@@ -8879,6 +8879,41 @@ for _, case in ipairs({
   { "test_approved_text_switch_off_keeps_reply_on_mail_path", test_approved_text_switch_off_keeps_reply_on_mail_path },
   { "test_approved_text_registration_refuses_when_switch_is_off", test_approved_text_registration_refuses_when_switch_is_off },
   { "test_approved_text_denial_and_expiry_type_nothing", test_approved_text_denial_and_expiry_type_nothing },
+  { "test_dialog_action_uses_strict_live_owner_gate", function()
+    approval_env(OWNER, function(env)
+      local applied = 0
+      approval().handler('dialog_action', { approve = function(_, done) applied = applied + 1; done(true) end })
+      local function ask(key)
+        local id
+        approval().request({ kind = 'dialog_action', key = key, asker = ASKER,
+          summary = 'synthetic acknowledgement', on_id = function(value) id = value end }, function() end)
+        env.client:pump()
+        return assert(env.relay:state().approvals[id])
+      end
+      local rec = ask('synthetic-1')
+      assert(not approval().answer(rec.id, 'approve', 'operator (terminal)'), 'terminal cannot approve')
+      room_events(env, { reaction('$dialog-stranger', STRANGER, rec.event_id),
+        reaction('$dialog-agent', '@agent-worker:example.org', rec.event_id),
+        reaction('$dialog-early', OWNER, rec.event_id, nil, ts(-120000)) })
+      room_events(env, { reaction('$dialog-wrong-room', OWNER, rec.event_id) }, ALL)
+      local edited = text_event('$dialog-edit', OWNER, 'yes', rec.event_id)
+      edited.content['m.new_content'] = {body = 'yes'}
+      room_events(env, { edited })
+      assert(applied == 0 and rec.status == 'open', 'stranger, agent, stale, edited and wrong room refused')
+      local answer = reaction('$dialog-owner', OWNER, rec.event_id)
+      room_events(env, { answer }); room_events(env, { answer })
+      assert(applied == 1 and rec.status == 'applied' and rec.answer_event_id == '$dialog-owner', 'owner acts once')
+      rec = ask('synthetic-2')
+      room_events(env, { text_event('$dialog-explicit', OWNER, 'yes ' .. rec.id) })
+      assert(applied == 2 and rec.status == 'applied', 'strict explicit-ID owner reply works')
+      rec = ask('synthetic-3')
+      restart_relay(env)
+      assert(env.relay:state().approvals[rec.id].status == 'expired', 'restart expires dialog approval')
+      rec = ask('synthetic-4')
+      room_events(env, { reaction('$dialog-backfill', OWNER, rec.event_id) })
+      assert(applied == 2 and rec.status == 'open', 'first non-live sync refuses dialog approval')
+    end)
+  end },
 }) do
   local ok, err = pcall(case[2])
   if not ok then approval_failures[#approval_failures + 1] = case[1] .. ": " .. tostring(err) end

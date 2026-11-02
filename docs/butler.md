@@ -891,7 +891,13 @@ plan are maintained in the repository's
 At startup, Butler tries registered agent kinds in order and waits for each
 agent's idle prompt before selecting it. The default order is Claude, then
 Codex; set `REMUDA_BUTLER_AGENT_ORDER=codex,claude` to change it. This order
-also applies to delegates without an explicit kind. Each candidate waits up to
+also applies to delegates without an explicit kind. OpenCode is available
+explicitly with `remuda butler launch opencode NAME` or
+`remuda butler topic delegate NAME --agent opencode TASK`; members run its
+standalone TUI and receive a per-member Butler MCP config via
+`OPENCODE_CONFIG_CONTENT`. Butler does not use OpenCode's ACP protocol. Its
+`--sandbox` and `--writable` controls do not apply to OpenCode; its permission
+policy remains OpenCode's own configuration. Each candidate waits up to
 15 seconds by default; set `REMUDA_BUTLER_READINESS_TIMEOUT` to change that
 per-candidate timeout. `remuda butler sessions` shows the selected kind and
 the reason each earlier candidate was skipped.
@@ -995,12 +1001,40 @@ the leader (`state=unknown_choice`, input not stopped) and records
 no choices is not reported. Add a recognised state for a dialog that is
 reported this way only with a real capture of it.
 
+### One-time dialog approval infrastructure
+
+The one-time `dialog_action` path is available only for a fixture-backed
+descriptor tied to an already recognised blocking dialog state whose response
+is `approval` and whose `action_scope` is `once`. **No concrete action
+descriptors are enabled.** Unrecognised choices remain report-only and do not
+stop input. Classifier denials, mode switches, blanket allow choices and
+arbitrary key sequences must never be registered as actions.
+
+A future descriptor lives in that agent's `dialog_approvals` list and names its
+`state_id`, version, real sanitized dialog-only fixture, category (`permission`
+or `acknowledgement`), one key (`0`–`9` or `RET`), exact option label, safe
+summary, matcher and postcondition verifier. It must match current dialog
+geometry and the full action target; a historical title is insufficient.
+`RET` also requires proof that the intended option is selected. Increment the
+descriptor version whenever matching or verification semantics change.
+
+Only a live owner Matrix reaction or reply can approve the request. Terminal
+approval is refused. Each approval is bound to the session instance, launch
+marker, recognized state, descriptor version, dialog signature and exact
+one-time option. Audit failure, attachment, changed evidence, unavailable
+relay, expiry or restart leaves input stopped. The executor records consumption
+before the key, rechecks evidence, sends that key once, and verifies the next
+screen. Uncertain results are never retried. Synthetic fixtures test only the
+infrastructure; they do not establish a real agent dialog signature.
+
 Managed `key`, `type_text` and `send` calls append `dialog_action` to the private
 guard audit before input, even while guard observation is off. Failed audit
 writes refuse input. Butler rechecks the screen and session instance after the
 audit and records the returned outcome. The dispatcher does not retry an
 uncertain write. `guard stats` counts the `dialog_blocked`, `dialog_reported`,
-`dialog_resolved`, `dialog_action` and `dialog_action_result` events. Records carry
+`dialog_resolved`, `dialog_action`, `dialog_action_result`,
+`dialog_approval_requested`, `dialog_approval_answer` and
+`dialog_approval_closed` events. Records carry
 session-instance and descriptor metadata without storing screens or prepared
 text. A root blocker uses the operator log instead of mailing itself. This
 program-layer gate does not prevent direct input from an attached owner or

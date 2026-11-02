@@ -32,12 +32,35 @@ Use Butler's CLI for communication:
 - `remuda butler forward MESSAGE-ID MEMBER [NOTE]` passes a message on with an optional note
 - Run `remuda butler ...` exactly as shown. Do not prefix it with REMUDA_NO_UPDATE_CHECK=1 or other VAR=value assignments: managed sessions never print the update banner, and a leading assignment can stop an allow rule such as Bash(remuda butler *) from matching.
 
+Use Butler's persistent schedule for recurring checks or delayed follow-ups
+that should survive a Claude/Codex/OpenCode/Monocle session or harness change. First check
+`remuda butler schedule list`. A schedule sends its fixed text as timed mail; it
+does not run a shell command or CI job by itself. Read the mail and perform the
+check it describes.
+
+Schedules repeat. For example, this asks the operator to check a build every 20
+minutes in the Butler session:
+
+`remuda butler schedule add ci-watch "*/20 * * * *" "Check CI for PR #123 and report its status." --to butler`
+
+The time uses the machine's local time. `*/N` supports 5, 6, 10, 12, 15, 20 or
+30 minutes; `N` means that minute each hour; the hour is `N` or `*`. This is not
+a one-shot timer or a general cron runner. Schedules can be skipped if the
+target session is absent or still has unread mail from the previous firing.
+Adding and removing schedules require the owner at a terminal, so ask them to
+run `remuda butler schedule add ...` and confirm it with `remuda butler schedule
+list`. Name a different recipient with `--to SESSION`.
+
 Codex members: use the MCP `butler_*` tools first (`butler_inbox`,
 `butler_send`, `butler_reply`, `butler_send_to_leader`, `butler_forward`,
 `butler_sessions`; `matrix_download` and `matrix_upload` for Matrix files). The
 `remuda butler` CLI fails inside the Codex sandbox by
 design (`Operation not permitted`). If you must use the CLI and get that error,
 re-run the command requesting escalated permissions.
+
+OpenCode members: use the Butler MCP `butler_*` tools for coordination
+and mailbox work. The Butler MCP server is configured for this member; first run
+`remuda butler inbox` to read the task and recent mail.
 
 CLI identity comes from the daemon's caller session, never environment variables.
 If Butler cannot identify the caller, run from a registered Butler session or
@@ -68,7 +91,7 @@ Butler loaded these guidance layers in this order when this session started.
 A later layer adds to or overrides an earlier one. Edit the files named here,
 not this block: Butler rewrites it on every session start.
 
-- framework: built in, version sha256:a394937732e8
+- framework: built in, version sha256:5fa6f7d2fe3e
 - cluster: not available (this Remuda core has no cluster file store; update Remuda)
 - team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
 - personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)
