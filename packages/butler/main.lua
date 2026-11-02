@@ -706,6 +706,7 @@ remuda.exec("butler/guard_policy")
 remuda.exec("butler/guard_grants")
 remuda.exec("butler/guard_approval")
 remuda.exec("butler/dialogs")
+remuda.exec("butler/dialog_approval")
 remuda.butler.dialogs.install()
 remuda._butler_dialog_tick = function() remuda.butler.dialogs.tick() end
 remuda.exec("butler/commands")

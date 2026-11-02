@@ -785,7 +785,45 @@ admit an unfamiliar choice. Model/effort dialogs belong to the existing compacti
 while that member owns the compaction operation and its recorded picker phase
 and target match the current caption and option rows. Historical picker titles
 never establish ownership. The dispatcher sends no new
-automatic keys and creates no owner approval or standing grant.
+automatic keys and creates no standing grant.
+
+The `dialog_action` approval infrastructure is reserved for fixture-backed
+one-time permission choices or acknowledgements. **No concrete recognizers are
+enabled yet:** unknown panes stay report-only; classifier denials stop automation
+and are reported, never turned into an approval action. A future recognizer lives
+in that agent's `dialog_approvals` descriptor list in `agents/claudecode.lua` or
+`agents/codex.lua`. Before adding one, supply a sanitized real dialog-only fixture
+(never another session's transcript) and tests showing current option/target
+matching, changed target refusal and permission precedence. Synthetic fixtures
+exercise the infrastructure; they are not evidence of real agent UI signatures.
+
+Each descriptor supplies `id`, `version`, `fixture`, `category` (`permission` or
+`acknowledgement`), `action_scope = 'once'`, a pure `match(screen)` returning
+`signature`, one `key` (a digit or `RET`), `label` and a non-sensitive `summary`,
+and a pure `verify(screen)` postcondition. Never register classifier denials,
+mode switches that evade a denial, blanket Always-allow choices or arbitrary key
+sequences. Increment the version whenever matching, option or verification
+semantics change. Match current dialog geometry and the complete action target;
+a historical title is insufficient. `RET` requires proof that the intended
+one-time option is currently selected. The ordinary unknown gate must already
+have stopped input with two matching captures before a request is eligible.
+
+Owner answers use the strict live Matrix gate used by guarded tool calls:
+correct room, configured allowed human sender, event time/id, no edits, agent
+senders or replay. Configure allowed human senders to designate the owner.
+Terminal approval is refused; terminal denial may cancel. Requests bind the
+session instance and launch marker, descriptor version, signature hashes and
+exact one-time option. Audit failure, attachment, changed evidence, unavailable
+relay, expiry or restart leaves input stopped. The executor audits before input,
+persists a one-shot consumption marker, rechecks evidence after both operations,
+and sends only the recorded key. Failed or ambiguous postconditions never cause
+an automatic resend. Current verification is one immediate capture; slow UI
+repaints are reported as uncertain and require inspection.
+
+`guard stats` also counts `dialog_approval_requested`, `dialog_approval_answer`
+and `dialog_approval_closed`. Action audit rows include request and owner-event
+provenance without screens or task contents. Ordinary input remains gated until
+the dispatcher independently sees a known ready/working screen.
 
 Managed `key`, `type_text` and `send` calls append `dialog_action` to the private
 guard audit before input, even while guard observation is off. Failed audit

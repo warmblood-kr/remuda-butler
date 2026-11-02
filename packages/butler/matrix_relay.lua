@@ -1641,7 +1641,7 @@ function relay.new(options)
   -- Prepared-text and guard requests take the strict owner gate; the first also needs its switch.
   local function owner_gated(record)
     return (record.kind == "approve_text" and cfg.approve_text == true) or record.kind == "guard_action"
-      or record.kind == "guard_unfreeze"
+      or record.kind == "guard_unfreeze" or record.kind == "dialog_action"
   end
 
   -- The owner's `guard freeze|unfreeze|revoke gNNN` lines (guard_approval.owner_command). The strict owner gate is the
@@ -1693,7 +1693,7 @@ function relay.new(options)
                 for _, target in ipairs(targets) do
                   local candidate = approval.for_event(target)
                   if candidate and (candidate.kind == "approve_text" or candidate.kind == "guard_action"
-                      or candidate.kind == "guard_unfreeze") then
+                      or candidate.kind == "guard_unfreeze" or candidate.kind == "dialog_action") then
                     if owner_gated(candidate) and msgtype == "m.text" then
                       approval_record, approval_verdict = candidate, text_verdict
                     elseif owner_gated(candidate) and msgtype == "m.reaction" then
@@ -1779,7 +1779,7 @@ function relay.new(options)
             local origin_ms = tonumber(ev.origin_server_ts)
             local counts
             if approval_record.kind == "approve_text" or approval_record.kind == "guard_action"
-                or approval_record.kind == "guard_unfreeze" then
+                or approval_record.kind == "guard_unfreeze" or approval_record.kind == "dialog_action" then
               counts = approval_verdict ~= nil
                 and approve_text.owner_event_allowed(ev, approval_record, cfg, live_sync, room_id or cfg.room)
                 and member_kind(ev.sender, cfg) == "HUMAN"

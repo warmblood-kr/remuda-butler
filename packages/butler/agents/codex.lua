@@ -120,6 +120,9 @@ remuda._butler_agent_startup.codex = {
     return false
   end,
   -- No invented Codex denial/cache signatures: unfamiliar choices only.
+  -- Add only fixture-backed semantic descriptors; see docs/butler.md.
+  -- Classifier denials never belong in this action registry.
+  dialog_approvals = {},
   blocking = {
     { id = "unknown_choice", risk = "report", match = function(screen, probes)
       return probes.unknown and probes.unknown(screen)

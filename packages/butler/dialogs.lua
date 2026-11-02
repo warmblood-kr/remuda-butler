@@ -160,6 +160,7 @@ local function observe(name, agent, alias, instance, screen, failure)
     if state.id ~= id or state.signature ~= signature then
       state.id, state.signature, state.captures = id, signature, 0
       state.audited, state.reported = nil, nil
+      state.approval_attempted = nil
     end
     state.captures = state.captures + 1
     state.blocked = true -- stop on the first capture, not after debounce
@@ -171,6 +172,7 @@ local function observe(name, agent, alias, instance, screen, failure)
     if audit(name, agent, state, 'dialog_resolved', 'wait', 'ready_or_workflow_owned') then
       state.id, state.signature, state.blocked = nil, nil, nil
       state.captures, state.reported, state.audited = 0, nil, nil
+      state.approval_attempted = nil
     end
   end
   return not state.blocked, state
@@ -202,7 +204,10 @@ function M.tick()
   for _, session in ipairs(sessions) do
     if session.alive then
       live[session.name] = true
-      if agent_for(session.name) then M.check(session.name) end
+      if agent_for(session.name) then
+        M.check(session.name)
+        if butler.dialog_approval then butler.dialog_approval.consider(session.name) end
+      end
     end
   end
   for name in pairs(states) do if not live[name] then states[name] = nil end end

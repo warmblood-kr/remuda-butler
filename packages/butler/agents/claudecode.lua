@@ -84,6 +84,9 @@ end
 remuda._butler_agent_startup.claude = {
   -- Report-only descriptor contract; tool-result auto-mode denials are outside
   -- PR1. Future semantic recognisers require an observed dialog-only fixture.
+  -- Add only fixture-backed semantic descriptors; see docs/butler.md.
+  -- Classifier denials never belong in this action registry.
+  dialog_approvals = {},
   blocking = {
     { id = "unknown_choice", risk = "report", match = function(screen, probes)
       return probes.unknown and probes.unknown(screen)
