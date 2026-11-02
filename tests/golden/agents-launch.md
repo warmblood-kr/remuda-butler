@@ -91,7 +91,7 @@ Butler loaded these guidance layers in this order when this session started.
 A later layer adds to or overrides an earlier one. Edit the files named here,
 not this block: Butler rewrites it on every session start.
 
-- framework: built in, version sha256:a394937732e8
+- framework: built in, version sha256:5fa6f7d2fe3e
 - cluster: not available (this Remuda core has no cluster file store; update Remuda)
 - team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
 - personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)
