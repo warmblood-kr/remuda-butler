@@ -260,9 +260,16 @@ return {
         dialogs = function() return host._butler_agent_startup.codex.modals end },
       { id = "opencode", order = 25, executable = "opencode", requires = "opencode", automatic = false,
         argv = function(_, spec) return host._butler_agent_builders.opencode(spec) end,
-        ready = function(_, screen) return host._butler_agent_startup.opencode.ready(screen) end,
-        working = function(_, screen) return host._butler_agent_startup.opencode.working(screen) end,
-        login = host._butler_agent_startup.opencode.login },
+        ready = function(_, screen)
+          for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
+            line = line:gsub("^%s*[│|]?%s*", ""):gsub("^[❯›>]%s*", ""):gsub("%s+$", "")
+            if line == "Ask anything, / for commands, @ for context..."
+                or line == "Ask anything…" or line == "Ask anything..." or line == "Ask anything" then return true end
+          end
+          return false
+        end,
+        working = function(_, screen) return tostring(screen or ""):find("esc to interrupt", 1, true) ~= nil end,
+        login = { "Authentication required", "Not authenticated", "Please log in" } },
       { id = "monocle", order = 30, executable = "monocle", requires = "monocle", automatic = false,
         argv = function(_, spec) return host._butler_agent_builders.monocle(spec) end,
         ready = function(_, screen) return host._butler_agent_startup.monocle.ready(screen) end,
