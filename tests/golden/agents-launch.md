@@ -25,6 +25,10 @@ Codex members: use the MCP `butler_*` tools first (`butler_inbox`,
 design (`Operation not permitted`). If you must use the CLI and get that error,
 re-run the command requesting escalated permissions.
 
+OpenCode members: use the Butler MCP `butler_*` tools for coordination
+and mailbox work. The Butler MCP server is configured for this member; first run
+`remuda butler inbox` to read the task and recent mail.
+
 CLI identity comes from the daemon's caller session, never environment variables.
 If Butler cannot identify the caller, run from a registered Butler session or
 upgrade Remuda core. Older cores without caller fields refuse CLI member actions;

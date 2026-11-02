@@ -15,12 +15,15 @@ local PROMPT_DELIVERY = assert(remuda._butler_prompt_delivery)
 local BUILTIN_AGENT_BUILDERS = {}
 for kind, builder in pairs(AGENT_BUILDERS) do BUILTIN_AGENT_BUILDERS[kind] = builder end
 if not remuda.contribute then
-  for order, kind in ipairs({ "claude", "codex", "monocle" }) do
-    local kind_id = kind
+  local builtin_order = { { "claude", 10 }, { "codex", 20 }, { "opencode", 25 }, { "monocle", 30 } }
+  for _, row in ipairs(builtin_order) do
+    local kind_id, order = row[1], row[2]
     local startup = remuda._butler_agent_startup[kind_id] or {}
-    remuda._butler_contribute("butler.agent", kind_id, {
-      order = order * 10, executable = kind_id, automatic = kind_id ~= "monocle",
-      argv = function(_, spec) return AGENT_BUILDERS[kind_id](spec) end,
+    local builder = AGENT_BUILDERS[kind_id]
+    if builder then remuda._butler_contribute("butler.agent", kind_id, {
+      order = order, executable = kind_id,
+      automatic = kind_id ~= "monocle" and kind_id ~= "opencode",
+      argv = function(_, spec) return builder(spec) end,
       ready = startup.ready and function(_, screen) return startup.ready(screen) end or nil,
       working = startup.working and function(_, screen) return startup.working(screen) end
         or function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
@@ -28,7 +31,7 @@ if not remuda.contribute then
         and { "Please log in", "not logged in", "Authentication required", "Invalid API key", "Please run /login", "Select login method" }
         or { "Please log in", "not logged in", "Authentication required", "Sign in to continue", "Not authenticated" }),
       dialogs = startup.modals,
-    })
+    }) end
   end
 end
 local function build_agent_argv(kind, spec)
@@ -167,6 +170,14 @@ local function choose(candidates, opts, done)
       or entry.requires or entry.executable or (argv and argv[1]) or id
     if not opts.argv then
       local found, lookup_error = system.find_command(executable)
+      if not found and id == "opencode" then
+        local home_ok, home = pcall(system.home)
+        if home_ok and type(home) == "string" and home ~= "" then
+          local suffix = system.platform() == "windows"
+            and "\\.opencode\\bin\\opencode.exe" or "/.opencode/bin/opencode"
+          found, lookup_error = system.find_command(home .. suffix)
+        end
+      end
       if not found then
         attempt.reason, attempt.detail = "not_found", lookup_error or (executable .. " not found in PATH")
         start_next(); return
@@ -495,6 +506,14 @@ remuda._butler_contribute("butler.guidance", "codex", { order = 25,
 `remuda butler` CLI fails inside the Codex sandbox by
 design (`Operation not permitted`). If you must use the CLI and get that error,
 re-run the command requesting escalated permissions.
+
+]]
+  end })
+remuda._butler_contribute("butler.guidance", "opencode", { order = 26,
+  agents_md = function()
+    return [[OpenCode members: use the Butler MCP `butler_*` tools for coordination
+and mailbox work. The Butler MCP server is configured for this member; first run
+`remuda butler inbox` to read the task and recent mail.
 
 ]]
   end })

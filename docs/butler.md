@@ -728,7 +728,14 @@ plan are maintained in the repository's
 At startup, Butler tries registered agent kinds in order and waits for each
 agent's idle prompt before selecting it. The default order is Claude, then
 Codex; set `REMUDA_BUTLER_AGENT_ORDER=codex,claude` to change it. This order
-also applies to delegates without an explicit kind. Each candidate waits up to
+also applies to delegates without an explicit kind. OpenCode is available
+explicitly with `remuda butler launch opencode NAME` or
+`remuda butler topic delegate NAME --agent opencode TASK`; members run its
+standalone TUI and receive a per-member Butler MCP config via
+`OPENCODE_CONFIG_CONTENT`; OpenCode's terminal UI is supported here, while its
+ACP stdio protocol still needs a Remuda core process/session transport. Butler's
+`--sandbox` and `--writable` controls do not apply to OpenCode; its permission
+policy remains OpenCode's own configuration. Each candidate waits up to
 15 seconds by default; set `REMUDA_BUTLER_READINESS_TIMEOUT` to change that
 per-candidate timeout. `remuda butler sessions` shows the selected kind and
 the reason each earlier candidate was skipped.

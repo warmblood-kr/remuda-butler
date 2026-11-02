@@ -419,7 +419,7 @@ local function checked_profile(kind, state, caller, verb_words, cwd, suffix)
   end
   return remuda._butler_profile(kind, state.sandbox, state.writable)
 end
-command(20, "launch", "  remuda butler launch <claude|codex|monocle> [name] [--model M] [--writable DIR]... [--sandbox full]", function(args, caller)
+command(20, "launch", "  remuda butler launch <claude|codex|opencode|monocle> [name] [--model M] [--writable DIR]... [--sandbox full]", function(args, caller)
   if not args[2] then return nil end
   local registered = false
   for _, row in ipairs(contributions("butler.agent")) do if row.id == args[2] then registered = true end end

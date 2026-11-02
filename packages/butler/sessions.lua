@@ -203,7 +203,7 @@ end
 -- startup/trust/update dialog), "working", "idle" or "other". Only kinds whose
 -- ready/working probes are meaningful are probed (monocle's "working" means
 -- "not ready"). Any failure is "other"; the screen itself is never shown.
-local STATUS_KINDS = { claude = true, codex = true }
+local STATUS_KINDS = { claude = true, codex = true, opencode = true }
 local STATUS_TTL_SECONDS = 2
 local status_cache = {}
 local function probe_status(name, agent)

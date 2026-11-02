@@ -210,6 +210,11 @@ return {
         working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end,
         login = { "Please log in", "not logged in", "Authentication required", "Sign in to continue", "Not authenticated" },
         dialogs = function() return host._butler_agent_startup.codex.modals end },
+      { id = "opencode", order = 25, executable = "opencode", requires = "opencode", automatic = false,
+        argv = function(_, spec) return host._butler_agent_builders.opencode(spec) end,
+        ready = function(_, screen) return host._butler_agent_startup.opencode.ready(screen) end,
+        working = function(_, screen) return host._butler_agent_startup.opencode.working(screen) end,
+        login = host._butler_agent_startup.opencode.login },
       { id = "monocle", order = 30, executable = "monocle", requires = "monocle", automatic = false,
         argv = function(_, spec) return host._butler_agent_builders.monocle(spec) end,
         ready = function(_, screen) return host._butler_agent_startup.monocle.ready(screen) end,
@@ -263,6 +268,14 @@ Start by running `remuda butler inbox` to read your welcome message.
 `remuda butler` CLI fails inside the Codex sandbox by
 design (`Operation not permitted`). If you must use the CLI and get that error,
 re-run the command requesting escalated permissions.
+
+]]
+        end },
+      { id = "opencode", order = 26,
+        agents_md = function()
+          return [[OpenCode members: use the Butler MCP `butler_*` tools for coordination
+and mailbox work. The Butler MCP server is configured for this member; first run
+`remuda butler inbox` to read the task and recent mail.
 
 ]]
         end },

@@ -1,6 +1,10 @@
 -- First-task delivery is kept separate so its timing/verification policy can
 -- be exercised against a fake agent screen without launching an agent CLI.
 local function ready(kind, screen)
+  if kind == "opencode" then
+    local startup = remuda._butler_agent_startup.opencode or {}
+    return startup.ready and startup.ready(screen) == true
+  end
   if kind == "codex" then
     return screen:find("Ask Codex", 1, true) ~= nil
   end
