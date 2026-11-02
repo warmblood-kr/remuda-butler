@@ -18,6 +18,25 @@ Use Butler's CLI for communication:
 - `remuda butler forward MESSAGE-ID MEMBER [NOTE]` passes a message on with an optional note
 - Run `remuda butler ...` exactly as shown. Do not prefix it with REMUDA_NO_UPDATE_CHECK=1 or other VAR=value assignments: managed sessions never print the update banner, and a leading assignment can stop an allow rule such as Bash(remuda butler *) from matching.
 
+Use Butler's persistent schedule for recurring checks or delayed follow-ups
+that should survive a Claude/Codex/OpenCode/Monocle session or harness change. First check
+`remuda butler schedule list`. A schedule sends its fixed text as timed mail; it
+does not run a shell command or CI job by itself. Read the mail and perform the
+check it describes.
+
+Schedules repeat. For example, this asks the operator to check a build every 20
+minutes in the Butler session:
+
+`remuda butler schedule add ci-watch "*/20 * * * *" "Check CI for PR #123 and report its status." --to butler`
+
+The time uses the machine's local time. `*/N` supports 5, 6, 10, 12, 15, 20 or
+30 minutes; `N` means that minute each hour; the hour is `N` or `*`. This is not
+a one-shot timer or a general cron runner. Schedules can be skipped if the
+target session is absent or still has unread mail from the previous firing.
+Adding and removing schedules require the owner at a terminal, so ask them to
+run `remuda butler schedule add ...` and confirm it with `remuda butler schedule
+list`. Name a different recipient with `--to SESSION`.
+
 Codex members: use the MCP `butler_*` tools first (`butler_inbox`,
 `butler_send`, `butler_reply`, `butler_send_to_leader`, `butler_forward`,
 `butler_sessions`; `matrix_download` and `matrix_upload` for Matrix files). The
