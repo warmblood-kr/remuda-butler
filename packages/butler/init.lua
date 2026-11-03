@@ -260,15 +260,18 @@ return {
         dialogs = function() return host._butler_agent_startup.codex.modals end },
       { id = "opencode", order = 25, executable = "opencode", requires = "opencode", automatic = false,
         argv = function(_, spec) return host._butler_agent_builders.opencode(spec) end,
+        -- The agent module owns the composer grammar. Delegate at call time so
+        -- this declaration cannot drift from the startup/notice parser.
         ready = function(_, screen)
-          for line in (tostring(screen or "") .. "\n"):gmatch("(.-)\n") do
-            line = line:gsub("^%s*[│|]?%s*", ""):gsub("^[❯›>]%s*", ""):gsub("%s+$", "")
-            if line == "Ask anything, / for commands, @ for context..."
-                or line == "Ask anything…" or line == "Ask anything..." or line == "Ask anything" then return true end
-          end
-          return false
+          local grammar = host._butler_agent_startup and host._butler_agent_startup.opencode
+          return type(grammar) == "table" and type(grammar.ready) == "function"
+            and grammar.ready(screen) == true
         end,
-        working = function(_, screen) return tostring(screen or ""):find("esc to interrupt", 1, true) ~= nil end,
+        working = function(_, screen)
+          local grammar = host._butler_agent_startup and host._butler_agent_startup.opencode
+          return type(grammar) == "table" and type(grammar.working) == "function"
+            and grammar.working(screen) == true
+        end,
         login = { "Authentication required", "Not authenticated", "Please log in" } },
       { id = "monocle", order = 30, executable = "monocle", requires = "monocle", automatic = false,
         argv = function(_, spec) return host._butler_agent_builders.monocle(spec) end,

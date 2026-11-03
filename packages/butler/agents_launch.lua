@@ -242,7 +242,12 @@ local function choose(candidates, opts, done)
     if not ready and remuda._butler_prompt_is_empty then
       local tested, decision = pcall(remuda._butler_prompt_is_empty, id, screen); ready = tested and decision == "EMPTY"
     end
-    if not ready and (screen:match("\n%s*❯%s*$") or screen:match("\n%s*>%s*$") or screen:match("\n%s*›%s*$")) then ready = true end
+    -- OpenCode has a structural composer parser; a bare trailing glyph is not
+    -- composer evidence and must not bypass its readiness grammar.
+    if not ready and id ~= "opencode"
+        and (screen:match("\n%s*❯%s*$") or screen:match("\n%s*>%s*$") or screen:match("\n%s*›%s*$")) then
+      ready = true
+    end
     local dialogs = type(entry.dialogs) == "function" and select(2, call_callback(entry.dialogs)) or entry.dialogs or {}
     -- A titled modal can paint the idle composer beneath it: never ready while it is up.
     for _, dialog in ipairs(dialogs) do
