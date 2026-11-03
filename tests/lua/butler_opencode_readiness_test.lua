@@ -257,10 +257,32 @@ T.test("footer-only or malformed frames cannot establish emptiness", function()
 end)
 
 T.test("working status takes precedence over a visible empty composer", function()
-  local screen = 'esc to interrupt\n┃ Ask anything… "Fix broken tests"'
-  T.eq(startup.working(screen), true)
-  T.eq(registered.working({}, screen), true)
-  T.eq(status(screen), "working")
+  local file = assert(io.open(root .. "/tests/fixtures/opencode-idle-blank.txt", "r"))
+  local idle = file:read("*a"); file:close()
+  local frame = assert(idle:match("^(.-╹[^\n]*)\n")) .. "\n"
+  local function working(screen, expected, label)
+    T.eq(startup.working(screen), expected, label .. " startup working")
+    T.eq(registered.working({}, screen), expected, label .. " registered working")
+    T.eq(status(screen), expected and "working" or (startup.ready(screen) and "idle" or "other"),
+      label .. " status")
+  end
+  working(idle, false, "actual idle frame")
+  for _, hint in ipairs({ "esc interrupt", "esc to interrupt" }) do
+    for _, row in ipairs({ 1, 3 }) do
+      working(frame .. string.rep("\n", row - 1) .. "  ■  " .. hint .. "  ctrl+p commands\n",
+        true, hint .. " footer row " .. row)
+    end
+    working('assistant: quoted "' .. hint .. '"\n' .. idle, false, hint .. " quoted above frame")
+    working(hint .. '\n┃ Ask anything… "Fix broken tests"', false, hint .. " without bottom border")
+    working(frame .. "\n\n\n" .. hint, false, hint .. " outside footer window")
+    working(frame .. hint .. "\n" .. idle, false, hint .. " superseded by newer idle frame")
+    local draft = frame:gsub("┃\n", "┃ " .. hint .. "\n", 1)
+    working(draft .. "  ctrl+p commands\n", false, hint .. " typed in composer")
+    check(draft .. "  ctrl+p commands\n", "NON-EMPTY", hint .. " typed hint remains input")
+    for _, near_miss in ipairs({ "x" .. hint, hint .. "ed" }) do
+      working(frame .. near_miss .. "\n", false, near_miss .. " is not a hint")
+    end
+  end
 end)
 
 T.test("first-task poll writes only after the composer is empty", function()

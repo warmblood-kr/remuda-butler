@@ -267,7 +267,11 @@ return {
           return type(grammar) == "table" and type(grammar.ready) == "function"
             and grammar.ready(screen) == true
         end,
-        working = function(_, screen) return tostring(screen or ""):find("esc to interrupt", 1, true) ~= nil end,
+        working = function(_, screen)
+          local grammar = host._butler_agent_startup and host._butler_agent_startup.opencode
+          return type(grammar) == "table" and type(grammar.working) == "function"
+            and grammar.working(screen) == true
+        end,
         login = { "Authentication required", "Not authenticated", "Please log in" } },
       { id = "monocle", order = 30, executable = "monocle", requires = "monocle", automatic = false,
         argv = function(_, spec) return host._butler_agent_builders.monocle(spec) end,

@@ -269,6 +269,29 @@ local function ready(screen)
   return empty(screen) == "EMPTY"
 end
 
+local function working(screen)
+  local lines = {}
+  local normalized = tostring(screen or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+  for line in (normalized .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
+  local bottom
+  for index = math.max(1, #lines - SCAN_TAIL), #lines do
+    if is_bottom_border(lines[index]) then bottom = index end
+  end
+  if not bottom then return false end
+  -- Both current and legacy clients paint the interrupt hint below the box.
+  -- Transcript/draft quotes above it are not evidence of active work.
+  for index = bottom + 1, math.min(#lines, bottom + 3) do
+    local _, marked = composer_line(lines[index])
+    if marked or is_bottom_border(lines[index]) then break end
+    local footer = fold_space(lines[index])
+    if footer:match("%f[%w_]esc%s+interrupt%f[^%w_]")
+        or footer:match("%f[%w_]esc%s+to%s+interrupt%f[^%w_]") then
+      return true
+    end
+  end
+  return false
+end
+
 telemetry.opencode = {
   setup = function(spec) return { model = spec.model } end,
   read = function(state) return { model = state.model } end,
@@ -288,9 +311,7 @@ startup.opencode = {
   -- the init.lua registration, notices, first-task delivery, compaction, and
   -- status probes cannot drift.
   ready = ready,
-  working = function(screen)
-    return tostring(screen or ""):find("esc to interrupt", 1, true) ~= nil
-  end,
+  working = working,
   placeholders = PLACEHOLDERS,
   empty = empty,
   login = { "Authentication required", "Not authenticated", "Please log in" },
