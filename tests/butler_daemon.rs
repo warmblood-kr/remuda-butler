@@ -4735,6 +4735,19 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             local glyph = n == "t-codex" and "› " or "❯ "
             screens[n] = {{ glyph .. t, glyph }}
           end
+          -- Automatic notices are one ordinary atomic send now; record that
+          -- seam separately so first-task type assertions stay exact.
+          local function notice_send(n, t)
+            log[#log + 1] = n .. " send " .. t
+            local glyph = n == "t-codex" and "› " or "❯ "
+            screens[n] = {{ glyph .. t, glyph }}
+          end
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == "function" then
+            dialogs.automatic_notice_send = function(n, t) notice_send(n, t); return true end
+          else
+            remuda.send = function(n, t) notice_send(n, t); return true end
+          end
           -- Members' fixture Welcome mail is not under test here; keep its
           -- unread notice out of the per-session logs.
           local notify = remuda._butler_notify
@@ -4793,7 +4806,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         let leader_noticed = log
             .lines()
             .any(|l| {
-                l.starts_with("butler type ")
+                l.starts_with("butler send ")
                     && (l.contains("Butler message") || l.contains("new Butler messages arrived"))
             });
         if typed == 3 && traced.contains("first_task_delivery\tt-stuck")
@@ -4839,7 +4852,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     assert!(!log.contains("t-stuck "), "typed into an unknown dialog: {log}");
     assert!(std::fs::read_to_string(&trace).unwrap_or_default().contains("Workspace access changed"),
         "launch failure did not preserve the unknown dialog label");
-    assert!(log.contains(" type Butler message ") || log.contains(" new Butler messages arrived"),
+    assert!(log.contains(" send Butler message ") || log.contains(" new Butler messages arrived"),
         "the leader is told about t-stuck: {log}");
     assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('initial task for t-stuck was not delivered', 1, true) then found=true end end; return tostring(found)"),
         "true", "the first-task failure was not mailed to the leader");
@@ -4914,7 +4927,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         let log = eval(&path, "return table.concat(remuda._t, '\\n')");
         let traced = std::fs::read_to_string(&trace).unwrap_or_default();
         if traced.contains("codex_update_timeout\tt-codex-timeout")
-            && log.contains("type Butler message") {
+            && log.contains("send Butler message") {
             break log;
         }
         assert!(Instant::now() < deadline, "slow update timeout did not report while leaving its pane open: {log}");
@@ -4925,7 +4938,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         .collect();
     assert!(timed_out_member.iter().any(|l| l.ends_with(" key 1")), "update was not selected: {after_timeout}");
     assert!(!timed_out_member.iter().any(|l| l.ends_with(" key 2") || l.ends_with(" type task after timeout")), "slow update was skipped or task typed into its old pane: {after_timeout}");
-    assert!(after_timeout.contains("type Butler message"), "timeout did not notify the leader: {after_timeout}");
+    assert!(after_timeout.contains("send Butler message"), "timeout did not notify the leader: {after_timeout}");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.pending_tasks['t-codex-timeout'] == nil)"), "true");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.codex_update_relaunches['t-codex-timeout'] ~= nil)"), "true", "slow update pane was closed or lost its restart record");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.codex_update_state.waiting['t-codex-running'] == nil and next(remuda._butler_bus.codex_update_state.waiting) == nil)"), "true", "already-running Codex aliases remained in the waiting set");
@@ -4962,9 +4975,14 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.codex_update_state.done_version ~= '0.157.1->0.158.0' and remuda._butler_bus.codex_update_state.claimed == false and remuda._butler_bus.codex_update_relaunches['t-codex-gui-close'] == nil)"), "true", "screen close was mistaken for update completion");
     assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('t-codex-gui-close was not delivered', 1, true) then found=true end end; return tostring(found)"), "true", "aborted update silently lost its task");
     eval(&path, r#"remuda.capture_styled=function() return {rows={[2]={{text="",dim=false}},[3]={{text="",dim=false}}},cursor={row=3}} end"#);
-    eval(&path, r#"remuda._butler_notify("t-codex-timeout", "Butler message 01M3MX8NCGV5GVSGN104YP4TFT arrived. Read them: remuda butler inbox")"#);
+    eval(&path, r#"remuda._butler_notice_clock = function() return 0 end
+        remuda._butler_notify("t-codex-timeout", "Butler message 01M3MX8NCGV5GVSGN104YP4TFT arrived. Read them: remuda butler inbox")
+        remuda._butler_notice_clock = function() return 2 end
+        remuda._butler_deliver_notices()"#);
     let modal_notice_log = eval(&path, "return table.concat(remuda._t, '\\n')");
-    assert!(!modal_notice_log.contains("t-codex-timeout type Butler message"), "mail notice was typed into an update progress dialog: {modal_notice_log}");
+    assert!(modal_notice_log.contains("t-codex-timeout send Butler message"),
+        "automatic notices no longer predict the update dialog: {modal_notice_log}");
+    eval(&path, "remuda._butler_notice_clock = nil");
     drop(daemon);
 }
 

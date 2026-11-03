@@ -703,6 +703,90 @@ function M.register_queue_writer(register)
   return true
 end
 
+-- Narrow automatic-mail-wakeup capability (owner decision 2026-11-03).
+-- A notice is a Butler-generated pointer, not owner text, so it bypasses the
+-- modal *prediction* gate (M.check) and nothing else: every general
+-- send/type_text/key still passes that gate, and startup/approved flows are
+-- untouched. The capability keeps its own unconditional preflight and audit.
+-- Honest limitation: the core send word is name-addressed and has no attached
+-- guard (private QA wrote into an attached PTY), so this preflight is the
+-- guard and it is NOT atomic. A human can attach, or a name can be reused,
+-- between the row check and the write. There is no expected-instance-bound
+-- atomic send word usable here.
+local NOTICE_TEXT_PREFIXES = { 'Butler message ' }
+function M.automatic_notice_send(name, text, message_ids)
+  if butler.dialogs ~= M or not M._installed then return false, 'dialogs_unavailable' end
+  local originals = remuda._butler_dialog_originals
+  local send = originals and originals.send
+  if type(send) ~= 'function' then return false, 'send_unavailable' end
+  if type(name) ~= 'string' or name == '' or type(text) ~= 'string' then return false, 'invalid_notice' end
+  if text == '' or #text > 1024 or text:find('[%z\r\n]') then return false, 'invalid_notice' end
+  local generated = text:match('^%d+ new Butler message') ~= nil
+  for _, prefix in ipairs(NOTICE_TEXT_PREFIXES) do
+    if text:sub(1, #prefix) == prefix then generated = true end
+  end
+  if not generated then return false, 'invalid_notice' end
+  -- Coalescing has no ID cap: a burst or a reload may queue any number of
+  -- unread messages, and the one notice names all of them.
+  if type(message_ids) ~= 'table' or #message_ids < 1 then return false, 'invalid_notice' end
+  for _, id in ipairs(message_ids) do
+    if type(id) ~= 'string' or not id:match('^%w+$') then return false, 'invalid_notice' end
+  end
+  -- Canonical identity field: launch stores the live session instance here
+  -- (dialogs.check uses the same one; session_instance_id is not that field).
+  local function preflight()
+    local agent = bus.agents[name]
+    if not agent then return nil, 'session_unknown' end
+    local row
+    for _, candidate in ipairs(remuda.ls()) do
+      if candidate.name == name then row = candidate end
+    end
+    if not row or not row.alive then return nil, 'session_not_live' end
+    if row.attached then return nil, 'human_attached' end
+    local expected, actual = agent.instance_id, row.instance_id
+    if type(expected) == 'string' and expected ~= '' then
+      -- A bound instance with no readable row instance cannot be verified.
+      if type(actual) ~= 'string' or actual == '' then return nil, 'session_instance_missing' end
+      if actual ~= expected then return nil, 'session_replaced' end
+    end
+    return agent, actual
+  end
+  local agent, actual = preflight()
+  if not agent then return false, actual end
+  local state = states[name] or {}
+  state.instance = type(actual) == 'string' and actual or state.instance
+  if not audit(name, agent, state, 'automatic-mail-wakeup', 'send', 'transport_only') then
+    return false, 'audit_unavailable'
+  end
+  -- The audit append can yield. Recheck the exact agent record, the exact
+  -- captured instance, this module generation and the guards immediately
+  -- before the raw write. The remaining race is not eliminable with a
+  -- name-addressed core word.
+  local rechecked, again = preflight()
+  if not rechecked then
+    audit(name, agent, state, 'automatic-mail-wakeup-result', 'send', 'not_written')
+    return false, again
+  end
+  if rechecked ~= agent or again ~= actual or bus.agents[name] ~= agent
+      or not M._installed or butler.dialogs ~= M then
+    audit(name, agent, state, 'automatic-mail-wakeup-result', 'send', 'not_written')
+    return false, 'session_changed'
+  end
+  local ok, result, detail = pcall(send, name, text)
+  if ok and result ~= false then
+    audit(name, agent, state, 'automatic-mail-wakeup-result', 'send', 'transport_accepted')
+    return true
+  end
+  local reason
+  if ok then
+    reason = 'send_refused: ' .. tostring(detail or result or 'refused')
+  else
+    reason = tostring(result or 'send error')
+  end
+  audit(name, agent, state, 'automatic-mail-wakeup-result', 'send', 'refused')
+  return false, reason
+end
+
 function M.install()
   M._installed = true
   -- Reload replaces this module but retains the original core functions once.

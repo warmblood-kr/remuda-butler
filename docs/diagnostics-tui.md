@@ -39,11 +39,16 @@ Success labels describe the subsystem boundary, never agent receipt or consumpti
 - `matrix delivered/delivery_ok` means the configured delivery callback returned
   a non-nil result without throwing. It establishes callback acceptance, not
   downstream agent receipt, consumption, or a Matrix read acknowledgment.
-- `notice observed/heuristic_completion` means the existing composer/screen/busy
-  checks completed notice recovery. In particular, `verify_existing` accepts an
-  EMPTY composer alone. This is heuristic observed completion/submission, not
-  proof the notice reached or was consumed by an agent. The same labels appear
-  in the TUI, text CLI and JSON. Notice queue/retry behavior is unchanged.
+- `notice submitted/transport_accepted` means the core accepted one ordinary
+  send for an automatic mail wakeup (the write path returned submitted or
+  unverified). It is not a read and not proof the agent consumed it; mail stays
+  unread until its inbox is read. `notice error/delivery_uncertain` means the
+  send may have written bytes and its outcome is unknown; the sender receives
+  the message IDs once and no automatic resend follows in that runtime.
+  `notice deferred/human_attached`, `deferred/prompt_busy` and
+  `deferred/dialog_blocked` mean an explicit refusal that wrote nothing is
+  waiting for a bounded recheck. The retired
+  `observed/heuristic_completion` label is no longer emitted.
 - `control submitted/write_returned` means the core write returned, not consumption.
 
 The `heuristic_unknown_choice` record means the Lua control heuristic stopped acting. It

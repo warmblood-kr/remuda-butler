@@ -56,19 +56,25 @@ bus.unread_seeded_exited_at = bus.unread_seeded_exited_at or {}
 bus.notice_retry_reasons = bus.notice_retry_reasons or {}
 bus.notice_fallbacks = bus.notice_fallbacks or {}
 bus.notice_failure_alerts = bus.notice_failure_alerts or {}
+bus.notice_uncertain_alerts = bus.notice_uncertain_alerts or {}
+-- Durable-for-this-image uncertainty tombstones: recipient identity id ->
+-- message id. They outlive the report/stuck record and are never cleared by
+-- reads or reminders, so a compaction re-show or a preserved-bus reload cannot
+-- blindly resend bytes that may already have landed. A daemon restart clears
+-- this in-memory map (documented at-least-once behavior).
+bus.notice_uncertain = bus.notice_uncertain or {}
 bus.notice_sent_at = bus.notice_sent_at or {}
 bus.notice_reminder_at = bus.notice_reminder_at or {}
 -- session -> { ids, since, reason, reported_at }: mail whose notice ran out of retries.
 bus.notice_stuck = bus.notice_stuck or {}
 bus.notice_deferred_by_task = bus.notice_deferred_by_task or {}
+-- Human-pause/startup stability only (owner lines, first task, startup actions).
+-- Notice delivery no longer consults the screen at all.
 local NOTICE_STABLE_SECONDS = 3
 local NOTICE_QUIET_S = 2
 local NOTICE_MAX_WAIT_S = 10
-local NOTICE_RECOVERY_TIMEOUT_S = 20
+-- Bounded retry for an explicit refusal that wrote nothing ("not typed", gone).
 local NOTICE_RETRY_DELAYS = { 20, 60, 300, 900 }
--- A pane that never passes the delivery policy while its composer reads empty is reported as a
--- failed attempt after this long, so the retry schedule and the sender's failure notice apply.
-local NOTICE_STALL_S = 120
 local NOTICE_REMINDER_SECONDS = 10 * 60
 local NOTICE_STUCK_REPORT_SECONDS = 60 * 60
 local NOTICE_BUSY_CAP_S = 15 * 60
@@ -569,12 +575,8 @@ local function pending_notice_text(pending)
   end
   return pending.count .. " new Butler messages arrived. Read them: " .. inbox_hint(pending.kind)
 end
-local notice_recovery_error
-local function input_was_busy(ok, result, detail)
-  local message = tostring(ok and (detail or result) or result or "")
-  local first_line = message:match("^[^\r\n]*") or ""
-  return first_line:match("a session input write is already in flight$") ~= nil
-end
+-- Automatic mailbox wakeups: one atomic core send; see deliver_notice below.
+local notice_recovery_error, notice_delivery_uncertain
 local function refresh_pending_notice(session, pending)
   if not pending.message_order then return pending end
   local agent = bus.agents[session]
@@ -605,116 +607,89 @@ local function refresh_pending_notice(session, pending)
   end
   return pending
 end
-local function recovery_screen(session)
-  local ok, screen = pcall(remuda.capture, session)
-  if not ok then return nil end
-  local agent = bus.agents[session]
-  local kind = agent and agent.kind or ""
-  -- The same styled-aware decision as the policy: a dim ghost suggestion is not a draft.
-  -- A raw read made every retry probe time out while Claude showed a suggestion.
-  local decision, text = remuda._butler_composer_decision(kind, session, tostring(screen or ""))
-  return screen, decision, text
-end
-local function recovery_draft(kind, screen, first_line)
-  local lines, prompt_at = {}, nil
-  screen = tostring(screen or ""):gsub("\194\160", " "):gsub("\r\n", "\n")
-  for line in (screen .. "\n"):gmatch("(.-)\n") do lines[#lines + 1] = line end
-  local composer_text = tostring(first_line or "")
-  local composer_lines = {}
-  for line in (composer_text .. "\n"):gmatch("(.-)\n") do
-    composer_lines[line:match("^%s*(.-)%s*$")] = true
-  end
-  local composer_is_multiline = composer_text:find("\n", 1, true) ~= nil
-  local glyphs = { "❯", ">", "›" }
-  for index, line in ipairs(lines) do
-    local rest = line:gsub("^%s+", "")
-    if rest:sub(1, 3) == "│" then rest = rest:sub(4):gsub("^%s+", "") end
-    for _, glyph in ipairs(glyphs) do
-      if rest:sub(1, #glyph) == glyph then prompt_at = index end
-    end
-  end
-  if not prompt_at then return nil, false end
-  local parts = { composer_text }
-  for index = prompt_at + 1, #lines do
-    local rest = lines[index]:gsub("^%s+", "")
-    if rest == "" then
-      -- Empty rows can separate a boxed prompt from its lower border.
-    elseif rest:sub(1, 3) == "╰" or rest:sub(1, 3) == "└" or rest:sub(1, 3) == "─" then
-      break
-    elseif kind == "claude" and rest:sub(1, 3) == "│" then
-      local continuation = rest:sub(4):gsub("│%s*$", ""):match("^%s*(.-)%s*$")
-      if continuation ~= "" then
-        if composer_is_multiline then
-          if not composer_lines[continuation] then return nil, false end
-        else
-          parts[#parts + 1] = continuation
-        end
-      end
-    elseif kind == "codex" and (rest:match("^%? for shortcuts")
-        or rest:lower():find("context left", 1, true)
-        or rest:match("^[^%s]+%s+[^%s]+%s+·")) then
-      -- Known Codex model/path and help footer rows are outside the composer.
-    elseif composer_is_multiline and composer_lines[rest:match("^%s*(.-)%s*$")] then
-      -- This row was already parsed into the full composer text.
-    else
-      -- Don't erase a multiline draft when the TUI's continuation rows
-      -- cannot be distinguished from footer text.
-      return nil, false
-    end
-  end
-  return table.concat(parts, "\n"), true
-end
-local function normalized_composer(text)
-  return tostring(text or ""):gsub("\194\160", " "):gsub("\r\n", "\n"):gsub("\r", "\n")
-    :match("^%s*(.-)%s*$")
-end
-local function compact_composer(text)
-  return tostring(text or ""):gsub("\194\160", " "):gsub("%s+", "")
-end
-local function notice_matches_composer(session, screen, text, expected)
-  local agent = bus.agents[session]
-  local composer, safe = recovery_draft(agent and agent.kind or "", screen, text)
-  local expected_compact = compact_composer(expected)
-  return (safe and compact_composer(composer) == expected_compact)
-    or compact_composer(text) == expected_compact
-end
-local function trace_notice_retry(session, pending, reason)
-  if bus.notice_retry_reasons[session] == reason then return end
-  bus.notice_retry_reasons[session] = reason
-  diagnostic("deferred", "prompt_policy", session)
-  _butler_session_trace("notice_retry", "message_ids="
-    .. table.concat(pending and pending.message_order or {}, ",")
-    .. " session=" .. session .. " reason=" .. tostring(reason))
+-- Automatic mailbox wakeups use one ordinary atomic core `remuda.send` (text
+-- and Return in a single burst) through the dialogs module's narrow
+-- `automatic_notice_send` capability. The old empty-composer/modal/idle
+-- predictions, probe, 20-second recovery and extra Return are gone (owner
+-- decision 2026-11-03). The capability keeps an unconditional attached,
+-- live-session and instance preflight and its own audit; it bypasses only the
+-- modal *prediction* gate, and only for generated notice text. A core accept
+-- means the write path returned; it never means the agent read the mail. Only
+-- an inbox read drains mail. Known residual race: the core send word is
+-- name-addressed, so a human attaching, or a name being reused, between the
+-- preflight and the write is not excluded atomically.
+local function first_line(value)
+  local line = tostring(value or ""):match("^[^\r\n]*") or ""
+  return line:gsub("[\r\n]+", " "):gsub("%s+$", "")
 end
 local function notice_byte_length(value)
   return #tostring(value or "")
 end
-local function log_notice_verify_mismatch(session, state, screen, text, expected, reason)
-  _butler_session_trace("notice_verify_mismatch", "message_ids="
-    .. table.concat(state.message_ids or {}, ",") .. " session=" .. session
-    .. " reason=" .. reason .. " capture_bytes=" .. tostring(notice_byte_length(screen))
-    .. " composer_bytes=" .. tostring(notice_byte_length(text))
-    .. " expected_bytes=" .. tostring(notice_byte_length(expected)))
+-- One trace line per deferral transition, like the old prompt-NON-EMPTY line.
+local function trace_notice_defer(session, pending, kind)
+  if bus.notice_retry_reasons[session] == kind then return end
+  bus.notice_retry_reasons[session] = kind
+  _butler_session_trace("notice_retry", "message_ids="
+    .. table.concat(pending and pending.message_order or {}, ",")
+    .. " session=" .. session .. " reason=" .. tostring(kind))
+end
+
+-- `remuda.send` raises; its message is the only outcome channel. A refusal
+-- that wrote nothing may be retried on the bounded schedule. Anything that may
+-- have put bytes in the pane is uncertain: report the IDs and never resend
+-- blindly, because a second copy could follow a delivery that did land.
+-- Order matters. Detail is checked before the generic `send_refused:` prefix,
+-- because a legacy false result may carry a late/partial/unconfirmed/busy
+-- reason that says nothing was written (safe) or may have been (uncertain).
+local NOTICE_SEND_OUTCOMES = {
+  -- Core refusals that wrote nothing.
+  { kind = "busy", pattern = "session input is busy" },
+  { kind = "busy", pattern = "session input write is already in flight" },
+  { kind = "busy", pattern = "a session input write is already in flight" },
+  { kind = "attached", pattern = "a human is attached to this session" },
+  { kind = "dialog", pattern = "butler dialog blocked" },
+  { kind = "dialog", pattern = "butler dialog audit unavailable" },
+  { kind = "dialog", pattern = "butler dialog target is not registered" },
+  { kind = "rate", pattern = "session input rate limit exceeded" },
+  { kind = "gone", pattern = "agent process has exited" },
+  { kind = "gone", pattern = "no such session" },
+  -- LateSubmitAbandoned: the earlier stalled write never got its Return and
+  -- this text was not typed, so a retry cannot duplicate anything.
+  { kind = "not_typed", pattern = "this text was not typed" },
+  -- SubmitPending / SubmitUncertain / WriteTimeout / Io: bytes may be in the pane.
+  { kind = "uncertain", pattern = "text is still being written to a slow pane" },
+  { kind = "uncertain", pattern = "submission is unconfirmed" },
+  { kind = "uncertain", pattern = "delivery may be partial or late" },
+  { kind = "uncertain", pattern = "agent io error" },
+  { kind = "uncertain", pattern = "input outcome is uncertain" },
+  -- Preflight/refusal tokens from the dialogs capability and the local fallback.
+  { kind = "attached", pattern = "human_attached" },
+  { kind = "gone", pattern = "session_not_live" },
+  { kind = "gone", pattern = "session_replaced" },
+  { kind = "gone", pattern = "session_instance_missing" },
+  { kind = "gone", pattern = "session_changed" },
+  { kind = "gone", pattern = "session_unknown" },
+  { kind = "not_typed", pattern = "audit_unavailable" },
+  { kind = "not_typed", pattern = "send_unavailable" },
+  { kind = "not_typed", pattern = "dialogs_unavailable" },
+  { kind = "not_typed", pattern = "invalid_notice" },
+  -- A bare legacy false result proves nothing was written only when its detail
+  -- says so; without such detail it must be uncertain, never retried blindly.
+  { kind = "uncertain", pattern = "send_refused" },
+}
+local function notice_send_error_kind(err)
+  local text = tostring(err or ""):lower():gsub("[\r\n]+", " ")
+  for _, rule in ipairs(NOTICE_SEND_OUTCOMES) do
+    if text:find(rule.pattern, 1, true) then return rule.kind end
+  end
+  -- Unknown after dispatch: assume bytes may be in the pane.
+  return "uncertain"
 end
 local function clear_notice_fallbacks(session, ids)
   local fallback = bus.notice_fallbacks[session]
   if not fallback then return end
   for _, id in ipairs(ids or {}) do fallback[id] = nil end
   if next(fallback) == nil then bus.notice_fallbacks[session] = nil end
-end
-local function notice_fallback_or_fail(session, state, pending, reason)
-  local ids = pending and pending.message_order or state.message_ids or {}
-  local fallback = bus.notice_fallbacks[session] or {}
-  for _, id in ipairs(ids) do
-    if fallback[id] then
-      return notice_recovery_error(session, state, "notice fallback retry limit reached")
-    end
-  end
-  for _, id in ipairs(ids) do fallback[id] = true end
-  bus.notice_fallbacks[session] = fallback
-  trace_notice_retry(session, pending, reason)
-  bus.notice_recoveries[session] = nil
-  return true
 end
 -- Open or merge into the session's stuck record (IDs union, since and report throttle kept).
 function remuda._butler_notice_open_stuck(session, ids, reason)
@@ -731,7 +706,71 @@ function remuda._butler_notice_open_stuck(session, ids, reason)
   end
   stuck.reason = reason
 end
+-- Group the undelivered IDs by the person to tell. A sender without a Butler
+-- mailbox identity (CLI or Matrix) is reported to the recipient's leader.
+local function notice_alert_groups(session, ids)
+  local groups = {}
+  if session == "butler" then return groups end
+  for _, id in ipairs(ids or {}) do
+    local message = mail.find_message and mail.find_message(id)
+    local sender = message and message.from
+    local alias = sender and (sender.alias or sender.session)
+    if sender and alias and alias ~= "butler" and alias ~= session then
+      local target, target_id = alias, sender.id
+      if not target_id or target_id == "" then
+        local recipient = bus.agents[session]
+        target = recipient and recipient.parent or "butler"
+        local leader = bus.agents[target]
+        target_id = leader and leader.id
+        if not target_id or target_id == "" then
+          target, leader = "butler", bus.agents.butler
+          target_id = leader and leader.id
+        end
+      end
+      if target_id and target_id ~= "" then
+        local group = groups[target] or { id = target_id, message_ids = {} }
+        groups[target] = group
+        group.message_ids[#group.message_ids + 1] = id
+      end
+    end
+  end
+  return groups
+end
+local function notice_alert_already_sent(target_id, marker, id)
+  if not (mail.find_message and bus.objects) then return false end
+  for delivered_id in pairs(bus.mail_delivered and bus.mail_delivered[target_id] or {}) do
+    local prior = mail.find_message(delivered_id)
+    local object = prior and prior.body and bus.objects[prior.body.object_id]
+    if prior and prior.from and prior.from.alias == "butler" and object
+        and tostring(object.content):find("[" .. marker .. ":" .. id .. "]", 1, true) then
+      return true
+    end
+  end
+  return false
+end
+-- One alert per recipient, deduplicated by the marker already in Butler's own
+-- sent mail so a daemon restart cannot repeat it.
+local function send_notice_alert(session, ids, marker, body)
+  for alias, group in pairs(notice_alert_groups(session, ids)) do
+    if mail.unread then pcall(mail.unread, group.id) end
+    local fresh = {}
+    for _, id in ipairs(group.message_ids) do
+      if not notice_alert_already_sent(group.id, marker, id) then fresh[#fresh + 1] = id end
+    end
+    if #fresh > 0 then
+      local markers = {}
+      for _, id in ipairs(fresh) do markers[#markers + 1] = "[" .. marker .. ":" .. id .. "]" end
+      pcall(remuda._butler_send, "butler", alias, body(fresh) .. " " .. table.concat(markers, " "))
+    end
+  end
+end
+local function quoted_session(session)
+  return tostring(session):gsub("\\", "\\\\"):gsub('"', '\\"')
+end
+-- An explicit refusal that wrote nothing: bounded retry through the existing
+-- 20s/60s/300s/900s schedule, then one failure alert with the exact action.
 notice_recovery_error = function(session, state, reason)
+  state = type(state) == "table" and state or {}
   state.failed = true
   diagnostic("error", "delivery_failed", session)
   _butler_session_trace("notice_recovery_failed", "message_ids="
@@ -766,75 +805,88 @@ notice_recovery_error = function(session, state, reason)
     -- A later exhaustion merges into the open record so older unread IDs and the
     -- report throttle survive.
     remuda._butler_notice_open_stuck(session, state.message_ids, reason)
-    if session ~= "butler" then
-      local by_sender = {}
-      for _, id in ipairs(state.message_ids or {}) do
-        local message = mail.find_message and mail.find_message(id)
-        local sender = message and message.from
-        local alias = sender and (sender.alias or sender.session)
-        if sender and alias and alias ~= "butler" and alias ~= session then
-          local target, target_id = alias, sender.id
-          if not target_id or target_id == "" then
-            -- CLI/Matrix senders may not have a Butler mailbox identity. Tell
-            -- the recipient's leader so the undelivered notice is actionable.
-            local recipient = bus.agents[session]
-            target = recipient and recipient.parent or "butler"
-            local leader = bus.agents[target]
-            target_id = leader and leader.id
-            if not target_id or target_id == "" then
-              target, leader = "butler", bus.agents.butler
-              target_id = leader and leader.id
-            end
-          end
-          if target_id and target_id ~= "" then
-            local group = by_sender[target] or { id = target_id, message_ids = {} }
-            by_sender[target] = group
-            group.message_ids[#group.message_ids + 1] = id
-          end
-        end
-      end
-      for alias, group in pairs(by_sender) do
-        local new_ids = {}
-        -- Loading the sender's delivered set includes read messages. The
-        -- marker in Butler's sent mail is the durable once-only record.
-        if mail.unread then pcall(mail.unread, group.id) end
-        local delivered_messages = bus.mail_delivered and bus.mail_delivered[group.id] or {}
-        for _, id in ipairs(group.message_ids) do
-          local already_notified = false
-          for delivered_id in pairs(delivered_messages) do
-            local prior = mail.find_message and mail.find_message(delivered_id)
-            local object = prior and prior.body and bus.objects and bus.objects[prior.body.object_id]
-            local marker = "[butler-notice-failure:" .. id .. "]"
-            if prior and prior.from and prior.from.alias == "butler" and object
-                and tostring(object.content):find(marker, 1, true) then
-              already_notified = true
-              break
-            end
-          end
-          if not already_notified then new_ids[#new_ids + 1] = id end
-        end
-        if #new_ids > 0 then
-          local quoted_session = tostring(session):gsub("\\", "\\\\"):gsub('"', '\\"')
-          local command = 'remuda butler send "' .. quoted_session .. '" "read your inbox"'
-          local markers = {}
-          for _, id in ipairs(new_ids) do markers[#markers + 1] = "[butler-notice-failure:" .. id .. "]" end
-          pcall(remuda._butler_send, "butler", alias,
-            "Could not safely deliver queued Butler mail to " .. session .. " after "
-            .. tostring(attempts + 1) .. " attempts (last error: " .. reason
-            .. "). Inspect its composer, then run `" .. command .. "` to ask it to read its inbox. Message IDs: "
-            .. table.concat(new_ids, ",") .. ". " .. table.concat(markers, " "))
-        end
-      end
-    end
+    send_notice_alert(session, state.message_ids, "butler-notice-failure", function(ids)
+      return "Could not safely deliver queued Butler mail to " .. session .. " after "
+        .. tostring(attempts + 1) .. " attempts (last error: " .. reason
+        .. "). Inspect its composer, then run `remuda butler send \"" .. quoted_session(session)
+        .. "\" \"read your inbox\"` to ask it to read its inbox. Message IDs: "
+        .. table.concat(ids, ",") .. "."
+    end)
   end
   clear_notice_fallbacks(session, state.message_ids)
   bus.notices[session] = nil
   bus.notice_recoveries[session] = nil
   return false
 end
-local function complete_notice_recovery(session, state)
-  -- Composer/screen/busy observations establish heuristic completion only.
-  diagnostic("observed", "heuristic_completion", session)
+-- The write path returned but the outcome is unknown. The mail is untouched and
+-- durable; the sender gets the IDs once, and no immediate resend or Return runs.
+notice_delivery_uncertain = function(session, state, why)
+  state = type(state) == "table" and state or {}
+  local reason = first_line(why)
+  if reason == "" then reason = "the send outcome is unknown" end
+  local ids = state.message_ids or {}
+  state.failed = true
+  diagnostic("error", "delivery_uncertain", session)
+  _butler_session_trace("notice_delivery_uncertain", "message_ids=" .. table.concat(ids, ",")
+    .. " session=" .. session .. " reason=" .. reason)
+  bus.notice_retry_reasons[session] = nil
+  local agent = bus.agents[session]
+  if agent and agent.id then
+    local uncertain = bus.notice_uncertain[agent.id] or {}
+    bus.notice_uncertain[agent.id] = uncertain
+    for _, id in ipairs(ids) do uncertain[id] = reason end
+  end
+  remuda._butler_notice_open_stuck(session, ids, "uncertain: " .. reason)
+  -- Manual-only recovery in this runtime: the unread stuck record drives the
+  -- hourly leader report, and the sender alert names the IDs. Deliberately no
+  -- reminder clock and no automatic resend, because the write may have landed.
+  -- A full daemon restart loses the in-memory stuck record and may nudge the
+  -- still-unread mail again (documented duplicate potential, not exactly-once).
+  local alerts = bus.notice_uncertain_alerts[session] or {}
+  bus.notice_uncertain_alerts[session] = alerts
+  if not alerts.exhausted then
+    alerts.exhausted = true
+    send_notice_alert(session, ids, "butler-notice-uncertain", function(fresh)
+      return "Could not confirm delivery of queued Butler mail to " .. session
+        .. " (send outcome uncertain: " .. reason .. "). The mail is still unread in its inbox."
+        .. " Inspect its pane, then run `remuda butler send \"" .. quoted_session(session)
+        .. "\" \"read your inbox\"` if it is missing. Message IDs: " .. table.concat(fresh, ",") .. "."
+    end)
+  end
+  bus.notices[session] = nil
+  bus.notice_recoveries[session] = nil
+  return false
+end
+-- Busy, attached or dialog-blocked: nothing was written, and the condition is
+-- not the notice's fault. Recheck in one second without spending an attempt;
+-- the same bounded busy cap still opens the hourly stuck record.
+local function defer_notice_send(session, pending, kind, why)
+  bus.notice_recoveries[session] = nil
+  if pending then
+    pending.due_at = notice_now() + 1
+    pending.busy_since = pending.busy_since or notice_now()
+    if notice_now() - pending.busy_since >= NOTICE_BUSY_CAP_S then
+      remuda._butler_notice_open_stuck(session, pending.message_order,
+        kind .. ": " .. first_line(why))
+    end
+    local reason = kind == "attached" and "human_attached"
+      or kind == "dialog" and "dialog_blocked" or "prompt_busy"
+    if pending.diagnostic_reason ~= reason then
+      diagnostic("deferred", reason, session)
+      pending.diagnostic_reason = reason
+    end
+    trace_notice_defer(session, pending, kind)
+  end
+  return false, kind
+end
+-- The core accepted the write (submitted or unverified). This is transport
+-- acceptance, never receipt: mail stays unread until its inbox is read, and
+-- the reminder/stuck machinery keeps running for it.
+complete_notice_recovery = function(session, state)
+  state = type(state) == "table" and state or {}
+  diagnostic("submitted", "transport_accepted", session)
+  _butler_session_trace("notice_transport_accepted", "message_ids="
+    .. table.concat(state.message_ids or {}, ",") .. " session=" .. session)
   local pending = bus.notices[session]
   if pending then pending.diagnostic_reason = nil end
   local agent = bus.agents[session]
@@ -864,7 +916,7 @@ local function complete_notice_recovery(session, state)
     if pending.count <= 0 then
       bus.notices[session] = nil
     else
-      pending.delivery_attempts, pending.retry_at = 0, nil
+      pending.delivery_attempts, pending.retry_at, pending.busy_since = 0, nil, nil
       local first_at, last_at
       for _, id in ipairs(pending.message_order or {}) do
         local arrived_at = pending.message_times and pending.message_times[id]
@@ -897,266 +949,63 @@ local function complete_notice_recovery(session, state)
   clear_notice_fallbacks(session, state.message_ids)
   return true
 end
--- Guards a human at the keyboard only. Agent busy state is not a guard: Claude Code and
--- Codex both queue text typed mid-turn (owner decision 2026-10-19), so a notice never
--- waits for idle. Open dialogs are refused by the notice policy instead.
-local function recovery_human_safe(session)
-  local session_row
+-- The dialogs module's narrow automatic-wakeup capability is the only path
+-- that bypasses the modal prediction gate. Without that module (isolated
+-- tests or an older image) the raw core word is used after the same
+-- unconditional attached/live/instance preflight.
+local function notice_send(session, text, ids)
+  local dialogs = remuda.butler and remuda.butler.dialogs
+  if dialogs and type(dialogs.automatic_notice_send) == "function" then
+    local ok, sent, reason = pcall(dialogs.automatic_notice_send, session, text, ids)
+    if not ok then return false, tostring(sent) end
+    return sent == true, reason
+  end
+  local agent = bus.agents[session]
+  if not agent then return false, "session_unknown" end
+  local row
   for _, candidate in ipairs(remuda.ls()) do
-    if candidate.name == session then session_row = candidate end
+    if candidate.name == session then row = candidate end
   end
-  if not session_row or not session_row.alive then return false end
-  if session_row.attached then
-    if session_row.human_idle ~= nil then
-      if session_row.human_idle < (remuda._butler_notice_human_idle or 10) then return false end
-    elseif remuda._butler_human_active(session) then
-      return false
-    end
+  if not row or not row.alive then return false, "session_not_live" end
+  if row.attached then return false, "human_attached" end
+  local expected, actual = agent.instance_id, row.instance_id
+  if type(expected) == "string" and expected ~= "" then
+    -- A bound instance with no readable row instance cannot be verified.
+    if type(actual) ~= "string" or actual == "" then return false, "session_instance_missing" end
+    if actual ~= expected then return false, "session_replaced" end
   end
-  if remuda._butler_human_active(session) then return false end
-  return true
+  if type(remuda.send) ~= "function" then return false, "send_unavailable" end
+  local ok, result, detail = pcall(remuda.send, session, text)
+  if ok and result ~= false then return true end
+  if ok then return false, "send_refused: " .. tostring(detail or result or "refused") end
+  return false, tostring(result or "send error")
 end
--- The core refused the write because another input write is in flight: retry shortly.
-local function defer_notice_busy(session)
-  bus.notice_recoveries[session] = nil
-  local pending = bus.notices[session]
-  if pending then
-    pending.due_at = notice_now() + 1
-    -- Bounded visibility: a notice deferred for busy past the cap opens the stuck record
-    -- (hourly leader report, closes on delivery/read). Mail stays queued; no sender notice.
-    pending.busy_since = pending.busy_since or notice_now()
-    if notice_now() - pending.busy_since >= NOTICE_BUSY_CAP_S then
-      remuda._butler_notice_open_stuck(session, pending.message_order, "busy: an input write stayed in flight")
-    end
-    if pending.diagnostic_reason ~= "prompt_busy" then
-      diagnostic("deferred", "prompt_busy", session)
-      pending.diagnostic_reason = "prompt_busy"
-    end
-  end
-  return false, "busy"
-end
-local function begin_notice_submit(session, state)
-  local pending = bus.notices[session]
-  if not pending then bus.notice_recoveries[session] = nil; return true end
-  if not remuda._butler_notify_policy(session) then
-    bus.notice_recoveries[session] = nil
-    return false
-  end
-  state.draft = nil
-  state.count = pending.count
-  state.message_ids = {}
-  for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
-  state.notice = pending_notice_text(pending)
-  bus.notice_recoveries[session] = state
-  local typed, result, why = pcall(remuda.type_text, session, state.notice, 0.1)
-  if input_was_busy(typed, result, why) then
-    return defer_notice_busy(session)
-  end
-  pending.busy_since = nil
-  if not typed then
-    local fallback = bus.notice_fallbacks[session] or {}
-    for _, id in ipairs(state.message_ids) do
-      if fallback[id] then return notice_recovery_error(session, state, "fallback notice typing failed") end
-    end
-    return notice_recovery_error(session, state, "the notice could not be typed")
-  end
-  state.phase, state.checks, state.saw_notice = "verify_notice", 0, false
-  return false
-end
-local function tick_notice_recovery(session, state)
-  if state.failed then return false end
-  state.started_at = state.started_at or notice_now()
-  if notice_now() - state.started_at >= NOTICE_RECOVERY_TIMEOUT_S then
-    return notice_recovery_error(session, state, "recovery timed out after 20 seconds")
-  end
-  if not recovery_human_safe(session) then return false end
-  -- Busy is observed, never waited on: it only pauses the verification check count.
-  local busy = false
-  if remuda.session then
-    local checked, value = pcall(function()
-      local row = remuda.session(session)
-      return row and row.is_busy
-    end)
-    busy = checked and value == true
-  end
-  if not busy then state.checks = (state.checks or 0) + 1 end
-  if state.checks > 40 then return notice_recovery_error(session, state, "verification timed out") end
-  local screen, decision, text = recovery_screen(session)
-  if not screen then return notice_recovery_error(session, state, "the pane could not be captured") end
-  local normalized = tostring(screen):gsub("\r\n", "\n"):gsub("\r", "\n")
-  local pending = bus.notices[session]
-  trace_notice_retry(session, pending, "prompt-" .. decision)
-  if state.phase == "retry_type" then
-    return begin_notice_submit(session, state)
-  end
-  if state.phase == "probe" then
-    -- An EMPTY composer needs no stable screen: a working pane animates. The
-    -- policy inside begin_notice_submit re-checks modal and composer before typing.
-    if decision ~= "EMPTY" then
-      if state.last_screen == normalized then state.stable = (state.stable or 0) + 1
-      else state.last_screen, state.stable = normalized, 1 end
-      if state.stable < 2 then return false end
-    end
-    if decision == "EMPTY" then
-      bus.notice_recoveries[session] = nil
-      return begin_notice_submit(session, state)
-    end
-    -- An unrecognized or non-empty composer may be a human draft. Leave it
-    -- untouched and let this attempt time out into the scheduled retry.
-    state.draft = decision == "NON-EMPTY" and text or ""
-    return false
-  elseif state.phase == "redrawn" then
-    if decision == "EMPTY" then
-      return begin_notice_submit(session, state)
-    end
-    return notice_recovery_error(session, state, "legacy recovery state left the composer untouched")
-  elseif state.phase == "verify_clear" then
-    return notice_recovery_error(session, state, "legacy clear state left the composer untouched")
-  elseif state.phase == "verify_existing" then
-    local notice_visible = state.notice and tostring(screen):gsub("%s+", "")
-      :find(tostring(state.notice):gsub("%s+", ""):sub(1, 32), 1, true) ~= nil
-    local notice_in_composer = decision == "NON-EMPTY"
-      and notice_matches_composer(session, screen, text, state.notice)
-    if decision == "EMPTY" or (notice_visible and not notice_in_composer) then
-      return complete_notice_recovery(session, state)
-    end
-    if busy then return false end
-    if state.checks >= 6 then
-      log_notice_verify_mismatch(session, state, screen, text, state.notice,
-        "existing notice did not leave composer")
-      return notice_recovery_error(session, state, "the existing Butler notice did not leave the composer")
-    end
-    return false
-  elseif state.phase == "verify_notice" then
-    local notice_head = tostring(state.notice or ""):gsub("%s+", ""):sub(1, 32)
-    local notice_visible = notice_head ~= "" and normalized:gsub("%s+", ""):find(notice_head, 1, true) ~= nil
-    local notice_in_composer = decision == "NON-EMPTY"
-      and notice_matches_composer(session, screen, text, state.notice)
-    if notice_visible or notice_in_composer then
-      state.saw_notice = true
-    end
-    local agent = bus.agents[session]
-    local non_tui_echo = decision == "UNPARSEABLE" and agent
-      and agent.kind ~= "claude" and agent.kind ~= "codex" and notice_visible
-    if (decision == "EMPTY" and (state.saw_notice or busy))
-        or (state.saw_notice and notice_visible and not notice_in_composer) or non_tui_echo then
-      return complete_notice_recovery(session, state)
-    end
-    if notice_in_composer and not state.return_retried then
-      if not recovery_human_safe(session) then return false end
-      local pressed, result, why = pcall(remuda.key, session, "RET")
-      if input_was_busy(pressed, result, why) then return false end
-      if not pressed then return notice_recovery_error(session, state,
-        "the notice Return failed") end
-      state.return_retried = true
-      return false
-    end
-    if state.checks >= 12 then
-      if decision == "EMPTY" then
-        notice_fallback_or_fail(session, state, pending,
-          "cap reached; prompt-empty; falling back to normal delivery")
-        return false
-      end
-      log_notice_verify_mismatch(session, state, screen, text, state.notice,
-        "notice submit could not be verified")
-      return notice_recovery_error(session, state, "the notice submit could not be verified")
-    end
-    return false
-  end
-  return notice_recovery_error(session, state, "unknown recovery state")
-end
+-- One send per coalesced notice. No screen parsing, no composer prediction,
+-- no modal prediction, no Return retry: the capability's unconditional
+-- attached/live preflight and the core's in-flight write guard decide.
 local function deliver_notice(session)
   local pending = bus.notices[session]
   if not pending then return true end
   pending = refresh_pending_notice(session, pending)
   if not pending then return true end
   if bus.pending_tasks[session] then return false end
-  -- A Codex picker is a wait condition, not a failed text delivery. Keep the mail
-  -- and any submission verification intact; never probe a picker with keys.
-  local dialogs = remuda.butler and remuda.butler.dialogs
-  if dialogs and type(dialogs.picker_pending) == "function" then
-    local checked, pending_picker = pcall(dialogs.picker_pending, session)
-    if not checked or pending_picker then
-      pending.dialog_since = pending.dialog_since or notice_now()
-      pending.due_at = notice_now() + 1
-      if notice_now() - pending.dialog_since >= NOTICE_BUSY_CAP_S then
-        remuda._butler_notice_open_stuck(session, pending.message_order, "dialog: waiting for owner review")
-      end
-      return false
-    end
-  end
-  if pending.dialog_since then
-    local recovery = bus.notice_recoveries[session]
-    if recovery and recovery.started_at then
-      recovery.started_at = recovery.started_at + notice_now() - pending.dialog_since
-    end
-    pending.dialog_since = nil
-  end
-  local recovering = bus.notice_recoveries[session]
-  if recovering then
-    recovering.started_at = recovering.started_at or notice_now()
-    if notice_now() - recovering.started_at >= NOTICE_RECOVERY_TIMEOUT_S then
-      if remuda._butler_notify_policy(session) then
-        if not notice_fallback_or_fail(session, recovering, pending,
-            "recovery-timeout; policy-allows; falling-back-to-normal-delivery") then return false end
-        recovering = nil
-      else
-        return notice_recovery_error(session, recovering, "recovery timed out after 20 seconds")
-      end
-    end
-  end
-  if recovering then
-    if (recovering.failed or recovering.phase == "probe" or recovering.phase == "redrawn")
-        and remuda._butler_notify_policy(session) then
-      bus.notice_recoveries[session] = nil
-      recovering = nil
-    else
-      return tick_notice_recovery(session, recovering)
-    end
-  end
-  if remuda._butler_notify_policy(session) then
-    pending.stalled_at = nil
-    if (tonumber(pending.delivery_attempts) or 0) > 0 then
-      local screen, decision = recovery_screen(session)
-      if not screen or decision ~= "EMPTY" then
-        local state = { phase = "probe", count = pending.count, started_at = notice_now() }
-        state.message_ids = {}
-        for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
-        return notice_recovery_error(session, state,
-          "composer was not empty after a failed notice write")
-      end
-    end
-    local state = { phase = "verify_notice", count = pending.count, notice = pending_notice_text(pending), checks = 0,
-      started_at = notice_now() }
-    state.message_ids = {}
-    for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
-    local typed, result, why = pcall(remuda.type_text, session, state.notice, 0.1)
-    if input_was_busy(typed, result, why) then
-      return defer_notice_busy(session)
-    end
-    pending.busy_since = nil
-    if not typed or result == false then
-      bus.notice_recoveries[session] = state
-      return notice_recovery_error(session, state, tostring(why or result or "the notice could not be typed"))
-    end
-    bus.notice_recoveries[session] = state
-    return false
-  end
-  local screen, decision = recovery_screen(session)
-  if not screen or decision == "EMPTY" then
-    pending.stalled_at = pending.stalled_at or notice_now()
-    if notice_now() - pending.stalled_at < NOTICE_STALL_S then return false end
-    pending.stalled_at = nil
-    local stalled = { phase = "probe", count = pending.count, started_at = notice_now(), message_ids = {} }
-    return notice_recovery_error(session, stalled, "the pane did not become ready for a notice within "
-      .. tostring(NOTICE_STALL_S) .. " seconds")
-  end
-  pending.stalled_at = nil
-  local state = { phase = "probe", count = pending.count, checks = 0, started_at = notice_now() }
-  state.message_ids = {}
+  local state = { count = pending.count, message_ids = {} }
   for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
-  bus.notice_recoveries[session] = state
-  return tick_notice_recovery(session, state)
+  local text = pending_notice_text(pending)
+  local sent, why = notice_send(session, text, state.message_ids)
+  if sent then
+    return complete_notice_recovery(session, state)
+  end
+  local kind = notice_send_error_kind(why)
+  if kind == "busy" or kind == "attached" or kind == "dialog" or kind == "rate" then
+    return defer_notice_send(session, pending, kind, why)
+  end
+  if kind == "uncertain" then
+    return notice_delivery_uncertain(session, state, why)
+  end
+  -- not_typed / gone: nothing was written, so the bounded schedule owns it.
+  return notice_recovery_error(session, state,
+    kind == "gone" and "the recipient session is gone" or "the notice write was abandoned before typing")
 end
 -- The poll and the debounce timers share this check.
 local function deliver_due_notice(session, now)
@@ -1188,8 +1037,29 @@ local function arm_notice_timer(session, slot, seconds)
   pair[slot] = handle
   bus.notice_timers[session] = pair
 end
+-- An automatic wakeup for an ID that is already stuck for this recipient (an
+-- uncertain send, or a busy/dialog deferral past the cap) is suppressed here,
+-- the single admission point. That covers arrivals, reshow-after-compaction and
+-- reminders alike, so a second compaction or a preserved-bus reload cannot
+-- blindly resend the same possibly-written ID. New message IDs are unaffected.
+local function notice_id_stuck(alias, message_id)
+  if not message_id then return false end
+  local agent = bus.agents[alias]
+  local recipient_id = agent and agent.id or mail_id(alias, false)
+  if type(recipient_id) ~= "string" then return false end
+  local uncertain = bus.notice_uncertain[recipient_id]
+  if uncertain and uncertain[message_id] then return true end
+  local stuck = bus.notice_stuck[alias]
+  if not stuck or type(stuck.ids) ~= "table" then return false end
+  if agent and stuck.agent_id and stuck.agent_id ~= agent.id then return false end
+  for _, id in ipairs(stuck.ids) do
+    if id == message_id then return true end
+  end
+  return false
+end
 function remuda._butler_notify(alias, notice, message_id, reshow, reminder)
   local _, recipient = mail_id(alias, false)
+  if notice_id_stuck(alias, message_id) then return false end
   if message_id and not reshow and not mail.is_unread(recipient.id, message_id) then return true end
   local now = notice_now()
   if message_id and not reshow then
@@ -1244,6 +1114,11 @@ local function seed_unread_notices(alias, previous_instance, instance, unread)
   local agent = bus.agents[alias]
   if not agent or not agent.id then return false end
   if unread <= 0 then return true end
+  local stuck = bus.notice_stuck[alias]
+  local uncertain = {}
+  if stuck and stuck.agent_id == agent.id then
+    for _, id in ipairs(stuck.ids or {}) do uncertain[id] = true end
+  end
   for _, message_id in ipairs(mailbox(agent.id)) do
     if mail.is_unread(agent.id, message_id) then
       local seen = bus.notice_seen[agent.id]
@@ -1257,7 +1132,7 @@ local function seed_unread_notices(alias, previous_instance, instance, unread)
         seen[message_id] = nil
         already_seen = false
       end
-      if not already_pending and not already_seen then
+      if not already_pending and not already_seen and not uncertain[message_id] then
         local message = mail.find_message(message_id) or {}
         local resent = bus.mail_resent[agent.id] and bus.mail_resent[agent.id][message_id]
         local detail
@@ -1437,10 +1312,9 @@ function remuda._butler_deliver_notices()
         or update.owner == alias
         or (update.waiting and update.waiting[alias])
         or (update.restart_waiting and update.restart_waiting[alias])
-      -- Check the policy only when unseeded: it captures the pane.
-      -- A ready-looking prompt during a Codex update handoff belongs to the
-      -- relaunch check. Seeding here can type over it after a task-poke timeout.
-      -- A delegated task's startup probe owns the pane until the task clears.
+      -- Seeding no longer reads the composer (owner decision 2026-11-03): the
+      -- queued notice is delivered by the ordinary atomic send below. A Codex
+      -- update handoff and a delegated startup task still own the pane.
       if agent.id then note_context_drop(alias, agent, instance) end
       if bus.pending_tasks[alias] then
         bus.notice_deferred_by_task[alias] = true
@@ -1464,8 +1338,7 @@ function remuda._butler_deliver_notices()
           if unread <= 0 and not leader_message then
             bus.unread_seeded[alias] = instance
             bus.unread_seeded_exited_at[alias] = nil
-          elseif not bus.pending_tasks[alias] and not update_handoff
-              and remuda._butler_notify_policy(alias, now) then
+          elseif not bus.pending_tasks[alias] and not update_handoff then
             local seeded, result = pcall(seed_unread_notices, alias, previous_instance, instance, unread)
             if seeded and result then
               if leader_message then

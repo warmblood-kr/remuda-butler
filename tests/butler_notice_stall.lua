@@ -43,39 +43,48 @@ assert(text_decision == "NON-EMPTY", "real composer text stays non-empty, got " 
 local blank_draft = remuda._butler_prompt_is_empty("codex", "› \n⚠ my own note\n")
 assert(blank_draft == "NON-EMPTY", "only the warning-count footer ends the composer, got " .. blank_draft)
 
--- A pane the policy never accepts (a human keeps typing) while its composer reads empty:
--- the stall becomes a failed attempt, then the retry schedule, then the sender's failure notice.
+-- No stall clock exists any more: the first due tick attempts the ordinary
+-- atomic send. An attached human is refused by preflight (nothing written) and
+-- rechecked in a second; a dead pane takes the bounded retry schedule.
 local deliver = remuda._butler_notice.deliver_notice
-assert(not remuda._butler_notify_policy("lead", now), "policy is false while a human is active")
+local sends = 0
+remuda.send = function() sends = sends + 1 end
 deliver("lead")
-assert(bus.notices.lead.delivery_attempts == nil, "the first stalled tick only starts the clock")
-now = now + 119
+assert(sends == 0, "an attached human never receives the notice")
+assert(bus.notices.lead.due_at == now + 1, "attachment is rechecked in one second")
+assert(bus.notices.lead.delivery_attempts == nil, "attachment spends no delivery attempt")
+for _ = 1, 901 do
+  now = now + 1
+  deliver("lead")
+end
+assert(sends == 0, "a long attachment never writes into the human's pane")
+assert(bus.notice_stuck.lead, "the busy cap still opens the hourly stuck record")
+assert(#sent == 0, "no failure mail while the human is attached")
+
+-- Detached: the same queued notice sends and the queue clears.
+remuda.ls = function() return { { name = "lead", alive = true, attached = false } } end
+now = now + 1
 deliver("lead")
-assert(bus.notices.lead.delivery_attempts == nil, "no attempt is charged before the stall limit")
-now = now + 2
+assert(sends == 1 and bus.notices.lead == nil, "the notice sends once the pane is detached")
+
+-- A dead session takes the bounded schedule and eventually alerts the sender.
+bus.agents.lead.id = "lead-id"
+remuda.ls = function() return { { name = "lead", alive = false, attached = false } } end
+bus.notices.lead = { count = 1, message_order = { "m1" }, message_ids = { m1 = "notice" }, text = "notice" }
+bus.notice_failure_alerts, bus.notice_stuck, bus.notice_uncertain_alerts = {}, {}, {}
+remuda.send = function() error("must not send to a dead session") end
 deliver("lead")
-assert(bus.notices.lead.delivery_attempts == 1, "a stall past the limit is one failed attempt")
-assert(bus.notices.lead.retry_at == now + 20, "the stall uses the retry schedule")
-assert(#sent == 0, "no failure mail yet")
+assert(bus.notices.lead.delivery_attempts == 1, "a dead pane starts the bounded schedule")
 for attempt = 2, 4 do
   now = bus.notices.lead.retry_at
   deliver("lead")
-  now = now + 121
-  deliver("lead")
-  assert(bus.notices.lead.delivery_attempts == attempt, "stall attempt " .. attempt)
+  assert(bus.notices.lead.delivery_attempts == attempt, "dead-pane attempt " .. attempt)
 end
 now = bus.notices.lead.retry_at
 deliver("lead")
-now = now + 121
-deliver("lead")
+assert(bus.notices.lead == nil, "an exhausted dead-pane notice leaves the queue")
 local to_alice
 for _, row in ipairs(sent) do if row[1] == "alice" then to_alice = row end end
-assert(to_alice, "after the last retry the sender gets the failure notice")
-
--- A pane that passes the policy clears the stall clock.
-bus.notices.lead = { count = 1, message_order = { "m1" }, message_ids = { m1 = "notice" }, stalled_at = now - 500 }
-human_idle = math.huge
-remuda.type_text = function() return true end
-deliver("lead")
-assert(bus.notices.lead == nil or bus.notices.lead.stalled_at == nil, "delivery clears the stall clock")
-print("ok - stalled notice delivery")
+assert(to_alice and to_alice[2]:find("Could not safely deliver", 1, true),
+  "after the last retry the sender gets the failure notice")
+print("ok - no stall clock: atomic sends, attachment refusal, bounded failure")

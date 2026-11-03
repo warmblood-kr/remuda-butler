@@ -128,108 +128,92 @@ remuda._butler_notice.notice_recovery_error("orphan", {
 }, "recovery timed out")
 assert(sent[#sent][1] == "butler", "leaderless recipient failure falls back to root Butler")
 
--- If type_text reports another write in flight, a later non-empty composer is
--- re-probed before any retry; another sender's task or human draft is untouched.
--- This is an isolated delivery-policy scenario; prior simulated retries may
--- have advanced unread mail past its reminder interval.
+-- A writer-busy refusal wrote nothing: recheck after one second without
+-- spending a delivery attempt. The notice is one atomic send, not type+RET.
 bus.notice_sent_at, bus.notice_reminder_at = {}, {}
-now, screen = now + 10, "› Ask Codex to do anything"
+now = now + 10
 bus.agents.lead.id = "lead-id"
 bus.notices.lead, bus.notice_recoveries.lead = nil, nil
-remuda._butler_human_active = function() return false end
-remuda.session = function() return { is_busy = false } end
-local type_attempts, unsafe_writes = 0, {}
-remuda.capture = function() return screen end
+bus.notice_screens = {}
+local send_attempts, unsafe_writes = 0, {}
 remuda.key = function(_, key) unsafe_writes[#unsafe_writes + 1] = "key " .. key end
-remuda.type_text = function(_, value)
-  type_attempts = type_attempts + 1
-  if type_attempts == 1 then
-    error("runtime error: a session input write is already in flight\nstack traceback:\n\t[C]: in ?", 0)
+remuda.type_text = function(_, value) unsafe_writes[#unsafe_writes + 1] = "type " .. value end
+remuda.send = function(_, value)
+  send_attempts = send_attempts + 1
+  if send_attempts == 1 then
+    error("session input is busy; nothing was written, retry\nNext: wait for the previous write", 0)
   end
-  unsafe_writes[#unsafe_writes + 1] = "type " .. value
+  assert(value:find("queued notice", 1, true), "the coalesced notice text is sent")
 end
 assert(not remuda._butler_notify("lead", "queued notice"))
 now = now + 2
 local retry_at = now
 remuda._butler_deliver_notices()
-assert(type_attempts == 1 and bus.notice_recoveries.lead == nil
+assert(send_attempts == 1 and bus.notice_recoveries.lead == nil
   and bus.notices.lead.delivery_attempts == nil
   and bus.notices.lead.due_at == retry_at + 1,
-  "traceback-wrapped busy input schedules a one-second probe, not a delivery retry")
-screen = "› another sender's task text / human draft"
-now = now + 1.1
+  "busy send schedules a one-second recheck, not a delivery retry")
+now = now + 1
 remuda._butler_deliver_notices()
-assert(type_attempts == 1 and #unsafe_writes == 0,
-  "a retry never types or submits into the non-empty composer")
+assert(send_attempts == 2 and bus.notices.lead == nil and #unsafe_writes == 0,
+  "the recheck sends the same notice once and never splits type_text/RET")
 
--- A failed notice write may leave part of its text behind. Even if the
--- delivery policy's capture is stale and looks empty, the retry's fresh
--- composer check must prevent another write into that partial text.
-now, screen = now + 10, "› Ask Codex to do anything"
-bus.notices.lead, bus.notice_recoveries.lead = nil, nil
-bus.unread_seeded = bus.unread_seeded or {}
-bus.unread_seeded.lead = bus.agents.lead
-local retry_captures, notice_type_attempts = 0, 0
-remuda.capture = function()
-  retry_captures = retry_captures + 1
-  if retry_captures <= 2 then return "› Ask Codex to do anything" end
-  return "› partially typed notice"
-end
-remuda.type_text = function(_, value)
-  notice_type_attempts = notice_type_attempts + 1
-  screen = "› partially typed notice"
-  error("simulated write failure after partial input", 0)
-end
-assert(not remuda._butler_notify("lead", "notice that may be partial"))
-now = now + 2
-remuda._butler_deliver_notices()
-assert(notice_type_attempts == 1 and bus.notices.lead.delivery_attempts == 1,
-  "first notice write fails after leaving partial text")
-now = bus.notices.lead.due_at
-remuda._butler_deliver_notices()
-assert(retry_captures >= 3 and notice_type_attempts == 1,
-  "notice retry requires a fresh empty-composer check before retyping")
-
--- A busy pane does not consume the verification check budget. Keep the notice
--- in the composer so this tick cannot complete the recovery for another reason.
+-- A human draft on screen no longer changes the decision, but the notice is
+-- still one atomic send and no key, clear or type_text call is made.
 now = now + 10
-local busy_notice = "Busy recovery notice"
-bus.notice_recoveries.lead = {
-  phase = "verify_notice", checks = 39, notice = busy_notice,
-  message_ids = { "m1" }, started_at = now,
-}
-bus.notices.lead = {
-  count = 1, text = busy_notice, message_ids = { m1 = busy_notice },
-  message_order = { "m1" },
-}
-remuda.session = function() return { is_busy = true } end
-remuda.capture = function() return "› " .. busy_notice end
-remuda.key = function() end
-remuda._butler_deliver_notices()
-assert(bus.notice_recoveries.lead and not bus.notice_recoveries.lead.failed,
-  "busy verification at the check cap remains active")
-assert(bus.notice_recoveries.lead.checks == 39,
-  "busy verification does not consume a recovery check")
-
--- A human draft is left exactly where it is; recovery neither clears it nor types over it.
-now, screen = now + 10, "› private draft"
-local input_events = {}
-remuda.capture = function() return screen end
-remuda.key = function(_, key) input_events[#input_events + 1] = "key " .. key end
-remuda.type_text = function(_, value) input_events[#input_events + 1] = "type " .. value end
-remuda.session = function() return { is_busy = true } end
-remuda.after = nil
-bus.agents.lead.id = nil
-bus.notices.lead = nil
-bus.notice_recoveries.lead = nil
-bus.pending_tasks.lead = nil
-bus.codex_update_state, bus.codex_update_relaunches = {}, {}
-assert(not remuda._butler_notify("lead", "queued notice"))
+bus.notices.lead, bus.notice_recoveries.lead = nil, nil
+bus.agents.lead.id = "lead-id"
+local draft_sends = 0
+remuda.send = function() draft_sends = draft_sends + 1 end
+assert(not remuda._butler_notify("lead", "notice beside a draft"))
 now = now + 2
 remuda._butler_deliver_notices()
+assert(draft_sends == 1 and bus.notices.lead == nil,
+  "the draft screen no longer blocks the automatic notice")
+assert(#unsafe_writes == 0, "notice delivery never presses keys or types separately")
+
+-- A refusal that wrote nothing ("this text was not typed") uses the bounded
+-- schedule, and the mail stays unread.
+now = now + 10
+bus.notices.lead, bus.notice_recoveries.lead = nil, nil
+bus.notice_retry_reasons = {}
+mail_unread = true
+local not_typed_sends = 0
+remuda.send = function()
+  not_typed_sends = not_typed_sends + 1
+  error("an earlier write to this pane stalled for over 30s and its Return was not sent; "
+    .. "the pane may hold unsent text; this text was not typed", 0)
+end
+assert(not remuda._butler_notify("lead", "notice after a stalled write"))
+now = now + 2
 remuda._butler_deliver_notices()
-assert(#input_events == 0, "a non-empty composer receives no keys or typed text")
-assert(bus.notices.lead and bus.notice_recoveries.lead.phase == "probe", "draft blocks the queued notice safely")
+assert(not_typed_sends == 1 and bus.notices.lead.delivery_attempts == 1
+  and bus.notices.lead.retry_at == now + 20,
+  "a not-typed refusal takes the bounded retry schedule")
+assert(mail_unread == true, "the mail is still unread after a refusal")
+
+-- An uncertain outcome after dispatch is reported once and never resent.
+now = now + 10
+bus.notices.lead, bus.notice_recoveries.lead, bus.notice_stuck.lead = nil, nil, nil
+bus.notice_uncertain_alerts, bus.notice_failure_alerts = {}, {}
+stored_messages.m5 = { from = { alias = "alice", id = "alice-id" } }
+sent = {}
+local uncertain_sends = 0
+remuda.send = function()
+  uncertain_sends = uncertain_sends + 1
+  error("text may be in the pane, but submission is unconfirmed.", 0)
+end
+assert(not remuda._butler_notify("lead", "notice with an uncertain outcome", "m5"))
+now = now + 2
+remuda._butler_deliver_notices()
+assert(uncertain_sends == 1 and bus.notices.lead == nil and bus.notice_stuck.lead,
+  "an uncertain outcome is reported, not retried")
+local uncertain_alert
+for _, row in ipairs(sent) do if row[1] == "alice" then uncertain_alert = row end end
+assert(uncertain_alert and uncertain_alert[2]:find("Could not confirm", 1, true),
+  "the sender hears that delivery is unconfirmed")
+remuda._butler_deliver_notices()
+assert(uncertain_sends == 1, "no blind repeat after uncertainty")
 bus.notices.lead, bus.notice_recoveries.lead = nil, nil
 bus.agents.lead.id, mail_unread = "lead-id", true
 assert(not remuda._butler_notify("lead", "readable mail", "m3"))
@@ -243,4 +227,4 @@ assert(not remuda._butler_notify("lead", "mail for gone recipient", "m4"))
 bus.agents.lead = nil
 remuda._butler_deliver_notices()
 assert(bus.notices.lead == nil, "recipient exit cancels queued retries")
-print("ok - retries back off, respect empty busy prompt, and alert once on exhaustion")
+print("ok - refusals back off, uncertainty is reported once, and mail stays unread")
