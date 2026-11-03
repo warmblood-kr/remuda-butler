@@ -102,9 +102,15 @@ end
 local PROMPT_GLYPHS = { "❯", ">", "›" }
 function remuda._butler_prompt_is_empty(kind, screen)
   local startup = remuda._butler_agent_startup[kind] or {}
-  if kind == "opencode" and type(startup.empty) == "function" then
+  if kind == "opencode" then
+    -- OpenCode's parser is mandatory: a missing or failing parser must not fall
+    -- through to the generic glyph grammar (history/typed text could read EMPTY).
+    if type(startup.empty) ~= "function" then return "UNPARSEABLE", "" end
     local ok, decision, value = pcall(startup.empty, screen)
-    if ok and decision then return decision, value or "" end
+    if ok and (decision == "EMPTY" or decision == "NON-EMPTY" or decision == "UNPARSEABLE") then
+      return decision, value or ""
+    end
+    return "UNPARSEABLE", ""
   end
   local text, prompt_at
   -- Claude draws its empty composer as '❯' + NO-BREAK SPACE; Lua's %s
@@ -273,17 +279,22 @@ function remuda._butler_notify_policy(session, now)
     _butler_session_trace("notice_deferred_modal", session .. " " .. kind)
     return false
   end
-  local decision, text = remuda._butler_prompt_is_empty(kind, prompt_screen)
+  -- OpenCode's composer spans continuation rows; its parser must see the full
+  -- screen, not just a styled cursor row that may sit on the placeholder.
+  local policy_screen = kind == "opencode" and full_screen or prompt_screen
+  local decision, text = remuda._butler_prompt_is_empty(kind, policy_screen)
   -- During a fresh redraw the cursor may still sit on a footer or banner.
   -- A cursor row with no composer glyph supplies no input evidence: use the
   -- full parser only when it independently identifies an empty composer.
-  if decision == "UNPARSEABLE" and prompt_screen ~= full_screen then
+  if decision == "UNPARSEABLE" and policy_screen ~= full_screen then
     local full_decision, full_text = remuda._butler_prompt_is_empty(kind, full_screen)
     if full_decision == "EMPTY" then decision, text = full_decision, full_text end
   end
   -- An explicitly idle client also admits UNPARSEABLE, except where the cursor
   -- row says it is off the prompt (styled core) or the screen looks like a dialog.
-  local admit_unparseable = idle and prompt_screen == full_screen and not looks_like_dialog(full_screen)
+  -- OpenCode fails closed: no composer evidence must never admit typing.
+  local admit_unparseable = idle and policy_screen == full_screen and not looks_like_dialog(full_screen)
+  if kind == "opencode" then admit_unparseable = false end
   if decision == "UNPARSEABLE" and idle and not admit_unparseable then decision = "DIALOG" end
   if seen.decision ~= decision then -- once per change, not every retry
     seen.decision = decision
@@ -300,10 +311,12 @@ end
 
 -- The composer decision the policy makes, for callers that hold a raw screen (first-task
 -- delivery): the cursor row without dim ghost text when the core can say so (#137, #372).
+-- OpenCode is excluded: its composer can span continuation rows, so a cursor-only row
+-- cannot override the full-screen parser.
 function remuda._butler_composer_decision(kind, session, screen)
   local raw, raw_text = remuda._butler_prompt_is_empty(kind, screen)
   -- Only a NON-EMPTY raw read can be a ghost, and the styled row can only upgrade it to EMPTY.
-  if raw == "NON-EMPTY" and remuda.capture_styled then
+  if raw == "NON-EMPTY" and remuda.capture_styled and kind ~= "opencode" then
     local ok, styled = pcall(remuda.capture_styled, session)
     local row = ok and styled and styled.cursor and styled.rows and styled.rows[styled.cursor.row]
     if row then
@@ -397,6 +410,7 @@ function remuda._butler_approved_text_policy(session, now, owned_composer)
       if candidate.session_name == session then agent = candidate; break end
     end
   end
+  local kind = agent and agent.kind or ""
   local lifecycle = remuda._butler_state or remuda._butler_compaction_state or {}
   if agent and lifecycle.compaction_fleet_active == (agent.id or agent.session_name) then
     return false, "workflow_owned"
@@ -433,8 +447,12 @@ function remuda._butler_approved_text_policy(session, now, owned_composer)
     return false, "known_modal"
   end
   local captured, screen = pcall(remuda.capture, session)
-  if not captured or type(screen) ~= "string" then return true, "renderer_unknown" end
-  local kind = agent and agent.kind or ""
+  if not captured or type(screen) ~= "string" then
+    -- OpenCode fails closed when its composer cannot be read; owner-approved
+    -- text may still proceed on other kinds' renderer-unknown path.
+    if kind == "opencode" then return false, "renderer_unknown" end
+    return true, "renderer_unknown"
+  end
   local startup = remuda._butler_agent_startup[kind] or {}
   if startup.picker and startup.picker(screen) then return false, "known_modal" end
   local parsed, decision, text = pcall(remuda._butler_composer_decision, kind, session, screen)
@@ -445,10 +463,16 @@ function remuda._butler_approved_text_policy(session, now, owned_composer)
       return true, 'owned_composer'
     end
     local bounded, menu_like = current_composer_evidence(kind, screen)
-    if menu_like and not bounded then
+    if kind ~= "opencode" and menu_like and not bounded then
       return true, "renderer_unknown"
     end
     return false, "composer_nonempty"
+  end
+  if kind == "opencode" then
+    -- Unknown/error never admits OpenCode input; only a parsed empty composer
+    -- (or the exact owned NON-EMPTY above) does.
+    if parsed and decision == "EMPTY" then return true, "composer_empty" end
+    return false, "renderer_unknown"
   end
   return true, parsed and decision == "EMPTY" and "composer_empty" or "renderer_unknown"
 end
