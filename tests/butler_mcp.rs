@@ -615,10 +615,10 @@ fn screen_of(path: &Path, session: &str, until: &str) -> String {
     }
 }
 
-/// #29: a mail notice is typed only when `remuda._butler_notify_policy` lets
-/// it; until then notices wait per recipient and arrive as one coalesced line.
+/// Automatic notices coalesce per recipient and go out as one ordinary send
+/// through the real notice-only dialogs capability. No composer policy exists.
 #[test]
-fn mail_notices_wait_for_the_policy_and_coalesce() {
+fn automatic_notices_coalesce_and_send_through_the_capability() {
     let dir = scratch("notice-queue");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
@@ -626,24 +626,31 @@ fn mail_notices_wait_for_the_policy_and_coalesce() {
     eval(
         &path,
         "remuda._butler_agent_builders.fake = function() return {'sh', '-c', 'stty -echo; cat'} end; \
-         remuda._butler_launch('fake', 'm1'); \
-         remuda._butler_notify_policy = function() return false end",
+         remuda._butler_launch('fake', 'm1')",
     );
     eval(&path, "remuda._butler_inbox('m1')"); // fixture Welcome mail never had a notice
+    // Inject the notice clock: os.time has whole-second resolution, so a real
+    // sleep cannot prove the quiet window deterministically.
+    eval(&path, "remuda._notice_test_now = 0;                  remuda._butler_notice_clock = function() return remuda._notice_test_now end");
     for n in 1..=3 {
         let sent = eval(&path, &format!("return remuda._butler_send('operator', 'm1', 'hi {n}')"));
-        assert!(sent.contains("notice deferred"), "{sent}");
+        assert!(sent.contains("queued"), "{sent}");
     }
-    std::thread::sleep(Duration::from_millis(1500));
-    assert!(!screen_of(&path, "m1", "").contains("Butler"), "typed while the policy said no");
+    eval(&path, "remuda._butler_deliver_notices()");
+    assert!(!screen_of(&path, "m1", "").contains("new Butler messages"),
+        "the quiet window must hold before its deadline");
 
-    eval(&path, "remuda._butler_notify_policy = function() return true end");
+    eval(&path, "remuda._notice_test_now = 2; remuda._butler_deliver_notices()");
     let screen = screen_of(&path, "m1", "3 new Butler messages");
     assert_eq!(screen.matches("3 new Butler messages").count(), 1, "{screen}");
     assert!(!screen.contains("Butler message message-"), "{screen}");
     let notices = "local n = 0 for _, s in pairs(remuda.schedules) do \
                    if s.name == 'butler-notices' then n = n + 1 end end return n";
     assert_eq!(eval(&path, notices), "1");
+    // Transport acceptance is not a read: mail stays unread until its inbox is.
+    let unread = "local ids = remuda._butler_mail.mailbox(remuda._butler_bus.agents.m1.id); \
+                  return tostring(remuda._butler_mail.is_unread(remuda._butler_bus.agents.m1.id, ids[#ids]))";
+    assert_eq!(eval(&path, unread), "true", "the notice must not mark the mail read");
 }
 
 /// Matrix relay mail reaches the same mailbox deposit hook as other mail and
@@ -662,14 +669,19 @@ fn relay_deposit_produces_one_mail_notice() {
         remuda.capture = function() return '> ' end
         remuda.capture_styled = nil
         remuda.session = function() return { is_busy = false } end
-        local policy, t = remuda._butler_notify_policy, 0
+        local t = 0
         remuda._butler_notice_clock = function() return t end
-        remuda._butler_notify_policy = function(session) return policy(session, t) end
         remuda._relay_notice_calls = 0
-        remuda.type_text = function(_, text)
+        local function record(text)
           remuda._relay_notice_calls = remuda._relay_notice_calls + 1
           remuda._relay_notice_text = text
           return true
+        end
+        local dialogs = remuda.butler and remuda.butler.dialogs
+        if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+          dialogs.automatic_notice_send = function(_, text) return record(text) end
+        else
+          remuda.send = function(_, text) return record(text) end
         end
         local sender = '@alice:example.org'
         local delivered = remuda.emit_until_success('butler/deliver', {
@@ -820,11 +832,11 @@ fn root_butler_reseeds_after_in_daemon_relaunch_without_instance_ids() {
         r#"
         local state = remuda._notice_test_state
         remuda.capture = function() return state.screen or '> ' end
-        remuda.type_text = function(_, text)
+        state.stub_notice_send(function(text)
           state.typed[#state.typed + 1] = { at = state.now, text = text }
           state.screen = text .. '\n> '
           return true
-        end
+        end)
         remuda._notice_test_send('butler', 'root unread mail')
         state.now = 2
         remuda._butler_deliver_notices()
@@ -987,11 +999,11 @@ fn a_relaunch_replays_already_noticed_unread_mail_once() {
         }
         remuda.ls = function() return rows end
         remuda.capture = function() return state.screen or '> ' end
-        remuda.type_text = function(_, text)
+        state.stub_notice_send(function(text)
           state.typed[#state.typed + 1] = { at = state.now, text = text }
           state.screen = text .. '\n> '
           return true
-        end
+        end)
         remuda._notice_test_send('m1', 'already noticed but unread')
         state.now = 2
         remuda._butler_deliver_notices()
@@ -1038,11 +1050,11 @@ fn an_exit_tick_keeps_the_unread_seed_for_a_same_id_relaunch() {
         }
         remuda.ls = function() return rows end
         remuda.capture = function() return state.screen or '> ' end
-        remuda.type_text = function(_, text)
+        state.stub_notice_send(function(text)
           state.typed[#state.typed + 1] = { at = state.now, text = text }
           state.screen = text .. '\n> '
           return true
-        end
+        end)
         remuda._notice_test_send('m1', 'same-id relaunch unread mail')
         state.now = 2
         remuda._butler_deliver_notices()
@@ -1402,11 +1414,11 @@ fn notices_arriving_during_verification_get_a_fresh_debounce_window() {
         local state = remuda._notice_test_state
         state.screen = '> '
         remuda.capture = function() return state.screen end
-        remuda.type_text = function(_, text)
+        state.stub_notice_send(function(text)
           state.typed[#state.typed + 1] = { at = state.now, text = text }
           state.screen = text .. '\n> '
           return true
-        end
+        end)
         remuda._notice_test_send('m1', 'first batch')
         state.now = 2
         remuda._butler_deliver_notices()
@@ -1430,7 +1442,7 @@ fn notices_arriving_during_verification_get_a_fresh_debounce_window() {
 }
 
 #[test]
-fn five_relay_mails_wait_until_a_busy_pane_is_free_and_coalesce() {
+fn five_relay_mails_coalesce_regardless_of_busy_telemetry() {
     let (path, _daemon) = butler_with_member("notice-relay-busy");
     setup_mail_notice_clock(&path);
     let got = eval(
@@ -1449,7 +1461,8 @@ fn five_relay_mails_wait_until_a_busy_pane_is_free_and_coalesce() {
           .. tostring(state.typed[1] and state.typed[1].text)
         "#,
     );
-    assert_eq!(got, "0|1|2|5 new Butler messages arrived. Read them: remuda butler inbox");
+    assert_eq!(got, "1|1|2|5 new Butler messages arrived. Read them: remuda butler inbox",
+        "busy telemetry no longer delays the one coalesced send: {got}");
 }
 
 /// #29: one case per branch of `remuda._butler_notify_policy`, with `ls` and
@@ -1525,7 +1538,13 @@ fn codex_trace_row_followed_by_user_draft_is_not_empty_or_typed_over() {
         remuda._notice_now = 0
         remuda._butler_notice_clock = function() return remuda._notice_now end
         remuda._notice_test_typed = 0
-        remuda.type_text = function() remuda._notice_test_typed = remuda._notice_test_typed + 1 end
+        local dialogs = remuda.butler and remuda.butler.dialogs
+        local function record() remuda._notice_test_typed = remuda._notice_test_typed + 1; return true end
+        if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+          dialogs.automatic_notice_send = function() return record() end
+        else
+          remuda.send = function() return record() end
+        end
         local decision = remuda._butler_prompt_is_empty('codex', screen)
         remuda._butler_send('operator', 'm1', 'hello')
         remuda._notice_now = 2
@@ -1533,7 +1552,8 @@ fn codex_trace_row_followed_by_user_draft_is_not_empty_or_typed_over() {
         return decision .. '|' .. tostring(remuda._notice_test_typed)
         "#,
     );
-    assert_eq!(got, "NON-EMPTY|0", "a trace-looking draft must be preserved: {got}");
+    assert_eq!(got, "NON-EMPTY|1",
+        "a trace-looking draft is parseable input but no longer blocks the automatic notice: {got}");
 }
 
 #[test]
@@ -1624,7 +1644,21 @@ fn setup_mail_notice_clock(path: &Path) {
         remuda.session = function(name) return { is_busy = state.busy[name] == true } end
         remuda.capture = function() return '> ' end
         remuda.capture_styled = nil
-        remuda._butler_notify_policy = function(name) return state.busy[name] ~= true end
+        -- Automatic notices use one ordinary send; tests record it at that seam.
+        -- The production dialogs capability is exercised by the end-to-end test.
+        state.notice_send = function(text)
+          state.typed[#state.typed + 1] = { at = state.now, text = text }
+          return true
+        end
+        state.stub_notice_send = function(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(name, text) return fn(text, name) end
+          else
+            remuda.send = function(name, text) return fn(text, name) end
+          end
+        end
+        state.stub_notice_send(state.notice_send)
         remuda.type_text = function(_, text)
           state.typed[#state.typed + 1] = { at = state.now, text = text }
           return true
@@ -1706,40 +1740,46 @@ fn setup_mail_notice_clock_for(path: &Path, alias: &str) {
     eval(path, &sessions);
 }
 
-/// #29 review 1: a notice whose type_text fails stays queued for the retry.
+/// An explicit refusal that wrote nothing keeps the mail queued for the
+/// bounded retry, and transport acceptance never marks it read.
 #[test]
-fn a_notice_that_fails_to_type_stays_queued() {
-    let (path, _daemon) = butler_with_member("notice-type-fails");
-    let sent = eval(
+fn an_explicit_notice_refusal_stays_queued() {
+    let (path, _daemon) = butler_with_member("notice-refused-retry");
+    eval(
         &path,
-        "remuda._notice_now = 0; \
-         remuda._butler_notice_clock = function() return remuda._notice_now end; \
-         remuda._butler_notify_policy = function() return true end; \
-         remuda.capture_styled = nil; \
-         remuda._real_type_text = remuda.type_text; \
-         remuda.type_text = function() error('pty write failed') end; \
-         local sent = remuda._butler_send('operator', 'm1', 'hi'); \
-         remuda._notice_now = 2; remuda._butler_deliver_notices(); return sent",
+        r#"
+        remuda._notice_now = 0
+        remuda._butler_notice_clock = function() return remuda._notice_now end
+        local function stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(_, text) return fn(text) end
+          else
+            remuda.send = function(_, text) return fn(text) end
+          end
+        end
+        remuda._notice_refused = true
+        stub(function()
+          if remuda._notice_refused then
+            error('an earlier write to this pane stalled and its Return was not sent; this text was not typed', 0)
+          end
+          return true
+        end)
+        remuda._butler_send('operator', 'm1', 'hi')
+        remuda._notice_now = 2
+        remuda._butler_deliver_notices()
+        "#,
     );
-    assert!(sent.contains("notice deferred"), "{sent}");
     assert_eq!(eval(&path, "return remuda._butler_bus.notices.m1.count"), "1");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.delivery_attempts)"), "1");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.retry_at)"), "22");
-    eval(
-        &path,
-        "remuda.type_text = remuda._real_type_text; \
-         remuda._notice_now = 22; \
-         remuda.capture = function() \
-           return remuda._butler_bus.notices.m1.text .. '\\n❯ ' \
-         end; \
-         remuda._butler_deliver_notices()",
-    );
-    let deadline = Instant::now() + PATIENCE;
-    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
-        assert!(Instant::now() < deadline, "successfully submitted notice was not verified");
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1)"), "nil");
+    eval(&path, "remuda._notice_refused = false; remuda._notice_now = 22; remuda._butler_deliver_notices()");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1)"), "nil",
+        "the retried notice clears the queue on transport acceptance");
+    let unread = "local agent = remuda._butler_bus.agents.m1; \
+                  local ids = remuda._butler_mail.mailbox(agent.id); \
+                  return tostring(remuda._butler_mail.is_unread(agent.id, ids[#ids]))";
+    assert_eq!(eval(&path, unread), "true", "transport acceptance is not a read");
 }
 
 #[test]
@@ -1748,16 +1788,25 @@ fn a_busy_notice_input_defers_until_its_one_second_retry() {
     eval(
         &path,
         r#"
-        remuda._butler_notify_policy = function() return true end
         remuda._notice_now = 0
         remuda._butler_notice_clock = function() return remuda._notice_now end
         remuda._notice_busy_calls = 0
-        remuda.type_text = function(_, text)
+        local function stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(_, text) return fn(text) end
+          else
+            remuda.send = function(_, text) return fn(text) end
+          end
+        end
+        stub(function(text)
           remuda._notice_busy_calls = remuda._notice_busy_calls + 1
-          if remuda._notice_busy_calls == 1 then error('a session input write is already in flight', 0) end
+          if remuda._notice_busy_calls == 1 then
+            error('session input is busy; nothing was written, retry', 0)
+          end
           remuda._notice_typed = text
           return true
-        end
+        end)
         remuda._butler_send('operator', 'm1', 'retry me')
         "#,
     );
@@ -1766,6 +1815,8 @@ fn a_busy_notice_input_defers_until_its_one_second_retry() {
     eval(&path, "remuda._notice_now = 2; remuda._butler_deliver_notices()");
     assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "1");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.due_at)"), "3");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.delivery_attempts)"), "nil",
+        "a busy refusal spends no delivery attempt");
     eval(&path, "remuda._butler_deliver_notices()");
     assert_eq!(eval(&path, "return tostring(remuda._notice_busy_calls)"), "1");
     eval(&path, "remuda._notice_now = 3; remuda._butler_deliver_notices()");
@@ -1773,227 +1824,154 @@ fn a_busy_notice_input_defers_until_its_one_second_retry() {
     assert_ne!(eval(&path, "return tostring(remuda._notice_typed)"), "nil");
 }
 
+/// An unknown error after dispatch may have written bytes: report the IDs once
+/// and never resend blindly. The word "busy" in an unrelated message is not a
+/// writer-busy refusal.
 #[test]
-fn a_non_busy_error_containing_busy_is_not_retried_as_input_lock() {
-    let (path, _daemon) = butler_with_member("notice-false-busy-error");
-    eval(
+fn an_unknown_notice_error_is_uncertain_not_retried() {
+    let (path, _daemon) = butler_with_member("notice-unknown-error");
+    let got = eval(
         &path,
         r#"
-        local row = { name = 'm1', alive = true, attached = false }
-        remuda.ls = function() return { row } end
-        remuda.session = function() return { is_busy = false } end
-        remuda._butler_human_active = function() return false end
-        remuda.capture = function() return '❯ ' end
-        remuda.capture_styled = nil
-        remuda._notice_busy_error_calls = 0
-        remuda.type_text = function()
-          remuda._notice_busy_error_calls = remuda._notice_busy_error_calls + 1
-          error('disk is busy while the terminal write failed')
+        remuda._notice_now = 0
+        remuda._butler_notice_clock = function() return remuda._notice_now end
+        local function stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(_, text) return fn(text) end
+          else
+            remuda.send = function(_, text) return fn(text) end
+          end
         end
-        remuda._notice_busy_error_report = nil
-        remuda._butler_send = function(_, _, text)
-          remuda._notice_busy_error_report = text
-          return 'captured report'
-        end
-        remuda._butler_bus.notices.m1 = { count = 1, text = 'pending' }
-        local recovery = {
-          phase = 'retry_type', checks = 0, notice = 'pending', count = 1,
-        }
-        remuda._butler_bus.notice_recoveries.m1 = recovery
+        remuda._notice_calls = 0
+        stub(function()
+          remuda._notice_calls = remuda._notice_calls + 1
+          error('disk is busy while the terminal write failed', 0)
+        end)
+        remuda._butler_send('operator', 'm1', 'hi')
+        local alerts = {}
+        remuda._butler_send = function(_, to, text) alerts[#alerts + 1] = { to = to, text = text } end
+        remuda._notice_now = 2
         remuda._butler_deliver_notices()
-        remuda._notice_recovery_failed = recovery.failed
+        remuda._notice_now = 3
+        remuda._butler_deliver_notices()
+        local alert = alerts[1]
+        return table.concat({ tostring(remuda._notice_calls),
+          tostring(remuda._butler_bus.notices.m1),
+          tostring(remuda._butler_bus.notice_stuck.m1 ~= nil),
+          tostring(alert and alert.to),
+          tostring(alert and alert.text:find('Could not confirm', 1, true) ~= nil) }, '|')
         "#,
     );
-    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_error_calls)"), "1");
-    assert_eq!(eval(&path, "return tostring(remuda._notice_recovery_failed)"), "true",
-        "the current attempt records failure before scheduling its retry");
-    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.delivery_attempts)"), "1");
-    assert_eq!(eval(&path, "return tostring(remuda._notice_busy_error_report)"), "nil",
-        "a transient write failure does not send the exhausted-retry alert");
+    assert_eq!(got, "1|nil|true|butler|true",
+        "an unknown post-dispatch error is uncertain and reported once to the recipient's leader: {got}");
 }
 
-/// #82: notice submit verification accepts Claude's soft-wrapped composer in
-/// a narrow 27-column pane, then retries Return once if the draft remains.
+/// A narrow pane needs no wrapped-composer verification: one ordinary send,
+/// no Return retry, no clear, no screen read.
 #[test]
-fn narrow_claude_wrapped_notice_is_verified_and_submitted() {
+fn a_narrow_pane_notice_is_one_atomic_send() {
     let (path, _daemon) = butler_with_member("notice-narrow-wrap");
-    eval(
+    let got = eval(
         &path,
         r#"
-        -- Preserve the launched instance identity when mocking ls: the periodic
-        -- dialog probe must not interpret the narrow-notice mock as a replaced pane.
-        local row = { name = 'm1', alive = true, attached = false,
-          instance_id = remuda._butler_bus.agents.m1.instance_id }
-        local state = { columns = 27, events = {}, screen = '❯ \n', submitted = false, busy = false }
-        remuda._notice_test_state = state
-        remuda._butler_bus.agents.m1.kind = 'claude'
-        remuda.capture_styled = nil
-        remuda.ls = function() return { row } end
-        remuda.session = function() return { is_busy = state.busy } end
-        remuda.capture = function() return state.screen end
-        remuda._butler_notify_policy = function() return true end
-        local function render_notice(text)
-          local rows, width, line = {}, state.columns - 2, '' -- ❯ and continuation indent each occupy two columns
-          local function push(prefix, value)
-            rows[#rows + 1] = prefix .. value .. string.rep(' ', state.columns - 2 - #value)
-          end
-          local function append_word(word)
-            while #word > width do
-              if line ~= '' then push(#rows == 0 and '❯ ' or '  ', line); line = '' end
-              push(#rows == 0 and '❯ ' or '  ', word:sub(1, width))
-              word = word:sub(width + 1)
-            end
-            if line == '' then line = word
-            elseif #line + 1 + #word <= width then line = line .. ' ' .. word
-            else push(#rows == 0 and '❯ ' or '  ', line); line = word end
-          end
-          for word in text:gmatch('%S+') do append_word(word) end
-          push(#rows == 0 and '❯ ' or '  ', line)
-          local rule = string.rep('─', state.columns)
-          local empty_prompt = '❯ ' .. string.rep(' ', state.columns - 2)
-          local status = '  MODEL:Opus-5.5 CTX:13925…\n  ⏵⏵ auto mode on      · ←…'
-          local screen = rule .. '\n' .. table.concat(rows, '\n') .. '\n' .. rule
-          if state.submitted then screen = screen .. '\n' .. empty_prompt .. '\n' .. rule end
-          return screen .. '\n' .. status
-        end
-        remuda.type_text = function(_, text)
-          table.insert(state.events, 'type')
-          state.screen = render_notice(text)
-        end
-        remuda.key = function(_, key)
-          table.insert(state.events, 'key ' .. key)
-          if key == 'RET' then
-            state.submitted, state.busy = true, true
-            state.screen = '❯ ' .. string.rep(' ', state.columns - 2)
-            .. '\n' .. string.rep('─', state.columns) .. '\n  MODEL:Opus-5.5 CTX:13925…' end
-        end
-        remuda._butler_send('operator', 'm1', 'narrow pane notice')
-        "#,
-    );
-
-    let deadline = Instant::now() + PATIENCE;
-    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
-        eval(&path, "remuda._butler_deliver_notices()");
-        assert!(Instant::now() < deadline, "wrapped notice was not safely submitted: {}", eval(&path, "return table.concat(remuda._notice_test_state.events, ',')"));
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, ',')");
-    assert!(events.contains("key RET"), "wrapped notice was not submitted: {events}");
-    assert_eq!(events.matches("type").count(), 1, "wrapped notice was retyped instead of verified: {events}");
-    assert_eq!(events.matches("key RET").count(), 1, "notice submit used more than one Return retry: {events}");
-    assert!(!events.contains("key C-u"), "recovery erased its own wrapped notice: {events}");
-
-    eval(
-        &path,
-        r#"local state = remuda._notice_test_state
-        state.events, state.submitted = {}, true
-        remuda._butler_send('operator', 'm1', 'history layout notice')"#,
-    );
-    let deadline = Instant::now() + PATIENCE;
-    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
-        eval(&path, "remuda._butler_deliver_notices()");
-        assert!(Instant::now() < deadline, "wrapped notice in history was not verified: {}", eval(&path, "return table.concat(remuda._notice_test_state.events, ',')"));
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, ',')");
-    assert_eq!(events.matches("type").count(), 1, "history notice was retyped: {events}");
-    assert!(!events.contains("key RET"), "already-submitted history notice was submitted twice: {events}");
-}
-
-/// #82 decision: a submitted notice in Claude history plus an approval
-/// dialog is success even though the empty composer is no longer visible.
-#[test]
-fn submitted_claude_notice_followed_by_approval_dialog_clears_pending_notice() {
-    let (path, _daemon) = butler_with_member("notice-followup-dialog");
-    eval(
-        &path,
-        r#"
-        local row = { name = 'm1', alive = true, attached = false }
-        local state = { screen = '❯ \n', events = {}, submitted = false, busy = false }
-        remuda._notice_dialog_test_state = state
-        remuda._butler_bus.agents.m1 = remuda._butler_bus.agents.m1 or {
-          id = '01ARZ3NDEKTSV4RRFFQ69G5FAV', kind = 'claude' }
-        remuda._butler_bus.agents.m1.kind = 'claude'
-        remuda.capture_styled = nil
-        remuda.ls = function() return { row } end
-        remuda.session = function() return { is_busy = state.busy } end
-        remuda.capture = function() return state.screen end
-        remuda._butler_notify_policy = function() return not state.submitted end
-        local function box(text)
-          return '❯ ' .. text .. string.rep(' ', math.max(0, 78 - #text))
-            .. '\n' .. string.rep('─', 80)
-        end
-        remuda.type_text = function(_, text)
-          table.insert(state.events, 'type')
-          state.notice = text
-          state.screen = box(text)
-        end
-        remuda.key = function(_, key)
-          table.insert(state.events, 'key ' .. key)
-          if key == 'RET' then
-            state.submitted = true
-            state.busy = true
-            state.screen = state.notice .. '\n'
-              .. '⏺ Bash(remuda butler inbox)\n'
-              .. '⎿ This command requires approval\n'
-              .. '❯ 1. Yes\n  2. No\n'
-              .. string.rep('─', 80)
+        local state = { events = {}, now = 0 }
+        remuda._notice_atomic_state = state
+        remuda._butler_notice_clock = function() return state.now end
+        local function stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(_, text) return fn(text) end
+          else
+            remuda.send = function(_, text) return fn(text) end
           end
         end
-        remuda._butler_bus.notices.m1 = { count = 1, text = 'dialog notice fixture' }
-        "#,
-    );
-
-    for _ in 0..14 {
-        eval(&path, "remuda._butler_deliver_notices()");
-    }
-    assert_eq!(
-        eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)"),
-        "false",
-        "notice remained queued after successful submit while Claude was busy on a follow-up dialog"
-    );
-    let events = eval(&path, "return table.concat(remuda._notice_dialog_test_state.events, ',')");
-    assert_eq!(events.matches("type").count(), 1, "{events}");
-    assert_eq!(events.matches("key RET").count(), 1, "{events}");
-    assert!(eval(&path, "return tostring(remuda._notice_dialog_test_state.submitted)") == "true");
-}
-
-/// The core can show an empty composer after Return while Claude is already
-/// working, before the accepted text is visible in the transcript capture.
-#[test]
-fn busy_claude_with_empty_composer_confirms_submitted_notice() {
-    let (path, _daemon) = butler_with_member("notice-busy-empty");
-    eval(
-        &path,
-        r#"
-        local row = { name = 'm1', alive = true, attached = false }
-        local state = { screen = '❯ \n', events = {}, busy = false }
-        remuda._notice_busy_empty_state = state
-        remuda._butler_bus.agents.m1.kind = 'claude'
-        remuda.capture_styled = nil
-        remuda.ls = function() return { row } end
-        remuda.session = function() return { is_busy = state.busy } end
-        remuda.capture = function() return state.screen end
-        remuda._butler_notify_policy = function() return true end
-        remuda.type_text = function(_, text)
-          table.insert(state.events, 'type')
-          state.notice = text
-          state.screen = '❯ \n' .. string.rep('─', 80)
-          state.busy = true
-        end
+        stub(function(text)
+          table.insert(state.events, 'send ' .. text)
+          return true
+        end)
         remuda.key = function(_, key) table.insert(state.events, 'key ' .. key) end
-        remuda._butler_bus.notices.m1 = { count = 1, text = 'busy empty notice fixture' }
+        remuda._butler_send('operator', 'm1', 'narrow pane notice')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        state.now = 3
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(remuda._butler_bus.notices.m1 == nil),
+          table.concat(state.events, ',') }, '|')
         "#,
     );
+    let mut parts = got.split('|');
+    assert_eq!(parts.next(), Some("true"), "the notice clears on transport acceptance: {got}");
+    let events = parts.next().unwrap_or("");
+    assert_eq!(events.matches("send ").count(), 1, "one atomic send: {events}");
+    assert!(events.contains("Butler message"), "the notice text is sent: {events}");
+    assert!(!events.contains("key "), "no Return retry or clear: {events}");
+    assert!(!events.contains("type "), "no separate type step: {events}");
+}
 
-    for _ in 0..4 {
-        eval(&path, "remuda._butler_deliver_notices()");
-    }
-    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 == nil)"), "true",
-        "busy pane with an empty composer did not confirm the notice submit");
-    let events = eval(&path, "return table.concat(remuda._notice_busy_empty_state.events, ',')");
-    assert_eq!(events.matches("type").count(), 1, "notice was retyped: {events}");
-    assert!(!events.contains("key RET"), "busy empty composer was submitted twice: {events}");
+/// A dialog that appears after a notice does not hold the next one; automatic
+/// wakeups make no modal prediction and press no keys.
+#[test]
+fn a_follow_up_dialog_does_not_hold_the_next_notice() {
+    let (path, _daemon) = butler_with_member("notice-followup-dialog");
+    let got = eval(
+        &path,
+        r#"
+        local state = { sends = 0, keys = 0, now = 0 }
+        remuda._notice_dialog_test_state = state
+        remuda._butler_notice_clock = function() return state.now end
+        remuda._butler_bus.agents.m1.kind = 'claude'
+        local function stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(_, text) return fn(text) end
+          else
+            remuda.send = function(_, text) return fn(text) end
+          end
+        end
+        stub(function() state.sends = state.sends + 1; return true end)
+        remuda.key = function() state.keys = state.keys + 1 end
+        remuda._butler_send('operator', 'm1', 'dialog follow-up notice')
+        local pending = remuda._butler_bus.notices.m1
+        pending.due_at = 0
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(remuda._butler_bus.notices.m1 == nil),
+          tostring(state.sends), tostring(state.keys) }, '|')
+        "#,
+    );
+    assert_eq!(got, "true|1|0", "the notice sends once and presses nothing: {got}");
+}
+
+/// Busy telemetry is not consulted; the send happens once.
+#[test]
+fn busy_claude_with_empty_composer_sends_once() {
+    let (path, _daemon) = butler_with_member("notice-busy-empty");
+    let got = eval(
+        &path,
+        r#"
+        local state = { sends = 0, keys = 0 }
+        remuda._notice_busy_empty_state = state
+        remuda.session = function() error('notice delivery must not read busy telemetry') end
+        local function stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(_, text) return fn(text) end
+          else
+            remuda.send = function(_, text) return fn(text) end
+          end
+        end
+        stub(function() state.sends = state.sends + 1; return true end)
+        remuda.key = function(_, key) state.keys = state.keys + 1 end
+        remuda._butler_send('operator', 'm1', 'busy empty notice')
+        local pending = remuda._butler_bus.notices.m1
+        pending.due_at = 0
+        remuda._butler_deliver_notices()
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(remuda._butler_bus.notices.m1 == nil),
+          tostring(state.sends), tostring(state.keys) }, '|')
+        "#,
+    );
+    assert_eq!(got, "true|1|0", "a busy pane still gets one send and no keys: {got}");
 }
 
 /// Repeated delivery of the same unread message must not increment notice counts;
@@ -2004,10 +1982,15 @@ fn notice_ids_are_deduplicated_and_read_messages_are_not_notified() {
     eval(
         &path,
         r#"
-        remuda._butler_notify_policy = function() return true end
-        remuda.capture_styled = nil
-        remuda.capture = function() return '❯ ' end
-        remuda.type_text = function() end
+        local function stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(_, text) return fn(text) end
+          else
+            remuda.send = function(_, text) return fn(text) end
+          end
+        end
+        stub(function() return true end)
         local sent = remuda._butler_send('operator', 'm1', 'dedupe fixture')
         remuda._notice_dedupe_id = sent:match('queued ([^ ]+)')
         assert(remuda._notice_dedupe_id)
@@ -2021,165 +2004,158 @@ fn notice_ids_are_deduplicated_and_read_messages_are_not_notified() {
     eval(&path, "remuda._butler_inbox('m1'); remuda._butler_deliver_notices()");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 == nil)"), "true",
         "reading the message left its pane notification queued");
-    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1 == nil)"), "true",
-        "reading the message left its notice recovery active");
 }
 
-/// A notice that remains in Claude's composer gets one Return retry; failed
-/// verification schedules a delivery retry and keeps the notice queued.
+/// A notice that stays visible on screen is not retyped or resubmitted.
 #[test]
-fn claude_notice_still_in_composer_is_retried_once_then_queued_for_retry() {
+fn a_notice_that_stays_on_screen_is_not_retried() {
     let (path, _daemon) = butler_with_member("notice-still-in-composer");
-    eval(
+    let got = eval(
         &path,
         r#"
-        local row = { name = 'm1', alive = true, attached = false }
-        local state = { screen = '❯ \n', events = {}, report = '' }
+        local state = { sends = 0, keys = 0, now = 0 }
         remuda._notice_stuck_test_state = state
-        remuda._butler_bus.agents.m1 = remuda._butler_bus.agents.m1 or {
-          id = '01ARZ3NDEKTSV4RRFFQ69G5FAV', kind = 'claude' }
+        remuda._butler_notice_clock = function() return state.now end
         remuda._butler_bus.agents.m1.kind = 'claude'
-        remuda.capture_styled = nil
-        remuda.ls = function() return { row } end
-        remuda.session = function() return { is_busy = false } end
-        remuda.capture = function() return state.screen end
-        remuda._butler_notify_policy = function() return not state.retried end
-        local function box(text)
-          return '❯ ' .. text .. string.rep(' ', math.max(0, 78 - #text))
-            .. '\n' .. string.rep('─', 80)
+        local screenshot
+        remuda.capture = function() return screenshot or '❯ \n' end
+        local function stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(_, text) return fn(text) end
+          else
+            remuda.send = function(_, text) return fn(text) end
+          end
         end
-        remuda.type_text = function(_, text)
-          table.insert(state.events, 'type')
-          state.screen = box(text)
-        end
-        remuda.key = function(_, key)
-          table.insert(state.events, 'key ' .. key)
-          state.retried = true
-        end
-        local send = remuda._butler_send
-        remuda._butler_send = function(from, to, text)
-          if from == 'operator' then return send(from, to, text) end
-          state.report = text
+        stub(function(text)
+          state.sends = state.sends + 1
+          screenshot = '❯ ' .. text .. '\n' .. string.rep('─', 80)
           return true
-        end
-        remuda._butler_bus.notices.m1 = { count = 1, text = 'stuck notice fixture' }
+        end)
+        remuda.key = function() state.keys = state.keys + 1 end
+        remuda._butler_send('operator', 'm1', 'stuck notice fixture')
+        local pending = remuda._butler_bus.notices.m1
+        pending.due_at = 0
+        remuda._butler_deliver_notices()
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(remuda._butler_bus.notices.m1 == nil),
+          tostring(state.sends), tostring(state.keys) }, '|')
         "#,
     );
-
-    for _ in 1..24 {
-        eval(&path, "remuda._butler_deliver_notices()");
-    }
-    let events = eval(&path, "return table.concat(remuda._notice_stuck_test_state.events, ',')");
-    assert_eq!(events.matches("type").count(), 1, "{events}");
-    assert_eq!(events.matches("key RET").count(), 1, "{events}");
-    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)"), "true",
-        "failed verification must preserve the pending notice");
-    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.delivery_attempts)"), "1");
-    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1 == nil)"), "true",
-        "the failed verification state is cleared before the scheduled retry");
-    assert_eq!(eval(&path, "return remuda._notice_stuck_test_state.report"), "");
+    assert_eq!(got, "true|1|0", "a notice left on screen is not retried: {got}");
 }
 
-/// #82: failed comparisons log sizes and a fixed reason, never pane or notice text.
+/// Transport acceptance is traced as accepted, never as a read, and no pane
+/// or notice text enters the trace.
 #[test]
-fn notice_verify_mismatch_logs_only_lengths_and_reason() {
-    let (path, _daemon) = butler_with_member("notice-verify-trace");
+fn notice_transport_acceptance_is_traced_without_content() {
+    let (path, _daemon) = butler_with_member("notice-accept-trace");
     let trace = path.parent().unwrap().join("session-trace.log");
     eval(
         &path,
         &format!(
             r#"remuda._butler_session_trace_path = {trace:?}
-            local now = 0
-            remuda._butler_notice_clock = function() return now end
-            local state = {{screen = string.rep('x', 9000) .. '\n❯ unrelated composer\n─', keys = 0}}
+            local state = {{ keys = 0, now = 0 }}
             remuda._notice_log_test_state = state
-            remuda._butler_bus.agents.m1.kind = 'claude'
-            remuda.ls = function() return {{ {{name = 'm1', alive = true, attached = false}} }} end
-            remuda.session = function() return {{is_busy = false}} end
-            remuda.capture = function() return state.screen end
-            remuda._butler_notify_policy = function() return true end
-            remuda.type_text = function(_, expected) state.expected = expected end
+            remuda._butler_notice_clock = function() return state.now end
+            local function stub(fn)
+              local dialogs = remuda.butler and remuda.butler.dialogs
+              if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+                dialogs.automatic_notice_send = function(_, text) return fn(text) end
+              else
+                remuda.send = function(_, text) return fn(text) end
+              end
+            end
+            stub(function() return true end)
             remuda.key = function() state.keys = state.keys + 1 end
-            remuda._butler_send('operator', 'm1', 'notice log fixture')
-            now = 3"#
+            remuda._butler_send('operator', 'm1', 'notice trace fixture')
+            local pending = remuda._butler_bus.notices.m1
+            pending.due_at = 0
+            remuda._butler_deliver_notices()"#
         ),
     );
-    for _ in 0..13 {
-        eval(&path, "remuda._butler_deliver_notices()");
-    }
-    let log = std::fs::read_to_string(&trace).expect("notice diagnostic trace");
-    assert!(log.contains("notice_verify_mismatch\tmessage_ids="), "{log}");
-    assert!(log.contains("session=m1 reason=notice submit could not be verified"), "{log}");
-    assert!(log.contains("capture_bytes=9027 composer_bytes=18 expected_bytes="), "{log}");
+    let log = std::fs::read_to_string(&trace).expect("notice trace");
+    assert!(log.contains("notice_transport_accepted\tmessage_ids="), "{log}");
+    assert!(!log.contains("notice_verify_mismatch"), "{log}");
     assert!(!log.contains("unrelated composer"), "{log}");
     assert!(!log.contains("Butler message"), "{log}");
-    assert!(!log.contains(&"x".repeat(64)), "{log}");
-    assert!(
-        log.len() < 40_000,
-        "notice diagnostic was not bounded: {} bytes",
-        log.len()
-    );
-    assert_eq!(
-        eval(&path, "return tostring(remuda._notice_log_test_state.keys)"),
-        "0",
-        "diagnostic logging must not send keys to the pane"
-    );
+    assert!(!log.contains("private"), "{log}");
+    assert_eq!(eval(&path, "return tostring(remuda._notice_log_test_state.keys)"), "0",
+        "notice delivery must not press keys");
 }
 
-/// A queued notice leaves a non-empty composer untouched and waits for an
-/// attached human to pause before considering the pane.
+/// A draft no longer blocks an automatic wakeup, and it is never read, typed
+/// into separately, or cleared.
 #[test]
-fn notice_recovery_preserves_idle_draft_and_respects_attached_human() {
+fn a_draft_screen_does_not_block_or_leak_the_notice() {
     let (path, _daemon) = butler_with_member("notice-recovery-draft");
-    eval(&path, r#"
+    let got = eval(
+        &path,
+        r#"
         local row = { name = 'm1', alive = true, attached = false }
         remuda.ls = function() return { row } end
-        remuda.capture_styled = nil
         remuda._butler_bus.agents.m1.kind = 'codex'
-        local state = { screen = '› private unsent draft', events = {} }
+        local state = { events = {}, now = 0 }
         remuda._notice_contract_state = state
-        remuda.capture = function() table.insert(state.events, 'capture'); return state.screen end
+        remuda._butler_notice_clock = function() return state.now end
+        remuda.capture = function() table.insert(state.events, 'capture'); return '› private unsent draft' end
         remuda.key = function(_, key) table.insert(state.events, 'key ' .. key) end
         remuda.type_text = function(_, text) table.insert(state.events, 'type ' .. text) end
-        remuda.session = function() return { is_busy = false } end
+        local function stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(_, text) return fn(text) end
+          else
+            remuda.send = function(_, text) return fn(text) end
+          end
+        end
+        stub(function(text) table.insert(state.events, 'send'); return true end)
         remuda._butler_send('operator', 'm1', 'queued notice')
         local pending = remuda._butler_bus.notices.m1
         pending.due_at = 0
         remuda._butler_deliver_notices()
-        remuda._butler_deliver_notices()
-        row.attached, row.human_idle = true, 0
-        state.policy_allows = remuda._butler_notify_policy('m1')
-    "#);
-    assert_eq!(eval(&path, "return tostring(remuda._notice_contract_state.screen)"), "› private unsent draft");
-    assert_eq!(eval(&path, "return tostring(remuda._notice_contract_state.policy_allows)"), "false");
-    let events = eval(&path, "return table.concat(remuda._notice_contract_state.events, '\\n')");
-    assert!(!events.contains("key ") && !events.contains("type "), "notice recovery touched a draft: {events}");
-    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1.phase)"), "probe");
+        return table.concat(state.events, ',') .. '|' .. tostring(remuda._butler_bus.notices.m1 == nil)
+        "#,
+    );
+    let mut parts = got.split('|');
+    let events = parts.next().unwrap_or("");
+    assert_eq!(parts.next(), Some("true"), "the notice is sent beside the draft: {got}");
+    assert!(events.contains("send"), "one send happened: {events}");
+    assert!(!events.contains("capture"), "the draft pane was not read: {events}");
+    assert!(!events.contains("key "), "no key was pressed: {events}");
+    assert!(!events.contains("type "), "no separate typing: {events}");
 }
 
+/// An attached human is the one refusal: no bytes, no capture, queue retained.
 #[test]
-fn notice_recovery_preserves_nonempty_composer_without_exposing_draft() {
-    let (path, _daemon) = butler_with_member("partial-clear");
-    eval(&path, r#"
-        local row = { name = 'm1', alive = true, attached = false }
+fn an_attached_human_refuses_the_notice() {
+    let (path, _daemon) = butler_with_member("notice-attached-refusal");
+    let got = eval(
+        &path,
+        r#"
+        local row = { name = 'm1', alive = true, attached = true }
         remuda.ls = function() return { row } end
-        remuda.capture_styled = nil
-        local state = { screen = '› private two-line draft', events = {} }
-        remuda._partial_clear_state = state
-        remuda.capture = function() table.insert(state.events, 'capture'); return state.screen end
-        remuda.key = function(_, key) table.insert(state.events, 'key ' .. key) end
-        remuda.type_text = function(_, text) table.insert(state.events, 'type ' .. text) end
-        remuda._butler_send('operator', 'm1', 'queued notice')
+        remuda._butler_bus.agents.m1.kind = 'codex'
+        local state = { sends = 0, now = 0 }
+        remuda._notice_attached_state = state
+        remuda._butler_notice_clock = function() return state.now end
+        -- Keep the real capability (and its attached preflight); only the raw
+        -- core write is stubbed so a refusal never reaches a pane.
+        local originals = remuda._butler_dialog_originals
+        if originals and originals.send then
+          originals.send = function() state.sends = state.sends + 1; return true end
+        else
+          remuda.send = function() state.sends = state.sends + 1; return true end
+        end
+        remuda._butler_send('operator', 'm1', 'attached notice')
         local pending = remuda._butler_bus.notices.m1
         pending.due_at = 0
         remuda._butler_deliver_notices()
-        remuda._butler_deliver_notices()
-    "#);
-    assert_eq!(eval(&path, "return tostring(remuda._partial_clear_state.screen)"), "› private two-line draft");
-    let events = eval(&path, "return table.concat(remuda._partial_clear_state.events, '\\n')");
-    assert!(!events.contains("key ") && !events.contains("type "), "recovery typed into or cleared draft: {events}");
-    let sessions = eval(&path, "return tostring(remuda._butler_sessions())");
-    assert!(!sessions.contains("private two-line draft"), "draft text leaked into session status: {sessions}");
+        return table.concat({ tostring(state.sends), tostring(remuda._butler_bus.notices.m1 ~= nil),
+          tostring(remuda._butler_bus.notices.m1 and remuda._butler_bus.notices.m1.due_at) }, '|')
+        "#,
+    );
+    assert_eq!(got, "0|true|1", "an attached pane receives nothing and rechecks in a second: {got}");
 }
 
 #[test]
@@ -2353,11 +2329,22 @@ fn a_topic_task_retries_a_dropped_return_before_delivering_a_notice() {
             screen = "──────\n❯ " .. text
             first_poll_empty = true
             return "unverified"
+          end
+          error("the notice must use one atomic send, not type_text")
+        end
+        local function notice_stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(name, text) return fn(name, text) end
           else
-            table.insert(events, "notice delivered")
-            remuda._topic_test_pending_at_notice = remuda._butler_bus.pending_tasks[n] ~= nil
+            remuda.send = function(name, text) return fn(name, text) end
           end
         end
+        notice_stub(function(name)
+          table.insert(events, "notice delivered")
+          remuda._topic_test_pending_at_notice = remuda._butler_bus.pending_tasks[name] ~= nil
+          return true
+        end)
         remuda.key = function(_, key)
           if key == "RET" then
             table.insert(events, "retry Return accepted")
@@ -2538,78 +2525,38 @@ fn trust_dialogs_on_external_or_reused_directories_wait_for_a_human() {
     );
 }
 
+/// A model chooser on screen no longer holds automatic notices: no modal
+/// prediction, no key, one atomic send.
 #[test]
-fn dismissed_claude_model_modal_is_rechecked_and_notice_is_delivered() {
+fn a_model_chooser_does_not_hold_the_notice() {
     let (path, _daemon) = butler_with_member("notice-dismissed-model-modal");
-    let trace = scratch("notice-dismissed-model-modal-trace").join("session-trace.log");
-    eval(
+    let got = eval(
         &path,
-        &format!(
-            r#"
-        local state = {{ now = 0, screen = 'Switch model?\n❯ 1. Yes, switch to Opus 5.5\n  2. No', events = {{}} }}
-        local row = {{ name = 'm1', alive = true, attached = false, instance_id = remuda._butler_bus.agents.m1.instance_id }}
+        r#"
+        local state = { now = 0, sends = 0, keys = 0,
+          screen = 'Switch model?\n❯ 1. Yes, switch to Opus 5.5\n  2. No' }
         remuda._notice_test_state = state
-        remuda._butler_session_trace_path = {trace:?}
-        remuda._butler_bus.agents.m1.kind = 'claude'
         remuda._butler_notice_clock = function() return state.now end
-        remuda._butler_human_active = function() return false end
-        remuda.ls = function() return {{ row }} end
-        remuda.session = function() return {{ is_busy = false }} end
-        remuda.capture_styled = nil
-        remuda.capture = function() table.insert(state.events, 'capture'); return state.screen end
-        remuda.type_text = function(_, text)
-          table.insert(state.events, 'type ' .. text)
-          state.screen = '❯ ' .. text .. '\n──'
-          return true
+        remuda._butler_bus.agents.m1.kind = 'claude'
+        remuda.capture = function() return state.screen end
+        remuda.key = function() state.keys = state.keys + 1 end
+        local function stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(_, text) return fn(text) end
+          else
+            remuda.send = function(_, text) return fn(text) end
+          end
         end
-        remuda.key = function(_, key)
-          table.insert(state.events, 'key ' .. key)
-          if key == 'RET' then state.screen = '❯ \n──' end
-        end
-        remuda._notice_test_sent = remuda._butler_send('operator', 'm1', 'modal dismissed notice')
-        state.id = remuda._notice_test_sent:match('queued ([^ ]+)')
+        stub(function() state.sends = state.sends + 1; return true end)
+        remuda._butler_send('operator', 'm1', 'modal dismissed notice')
+        state.now = 2
+        remuda._butler_deliver_notices()
+        return table.concat({ tostring(remuda._butler_bus.notices.m1 == nil),
+          tostring(state.sends), tostring(state.keys) }, '|')
         "#,
-            trace = trace.to_string_lossy(),
-        ),
     );
-    eval(
-        &path,
-        "local state = remuda._notice_test_state; state.now = 2; remuda._butler_deliver_notices()",
-    );
-    assert_eq!(
-        eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n'):find('type ', 1, true) == nil"),
-        "true", "known model modal must block typing before dismissal"
-    );
-    // Replay the captured post-modal composer: the trace line from the model
-    // chooser is gone and Claude now shows its empty prompt.
-    eval(&path, "remuda._notice_test_state.screen = '❯ \\n──'");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)") != "false" {
-        eval(
-            &path,
-            "remuda._notice_test_state.now = remuda._notice_test_state.now + 1; remuda._butler_deliver_notices()",
-        );
-        assert!(
-            Instant::now() < deadline,
-            "dismissed Claude modal did not release its queued notice: {}",
-            eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')")
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let sent = eval(&path, "return remuda._notice_test_sent");
-    let id = eval(&path, "return remuda._notice_test_state.id");
-    let events = eval(&path, "return table.concat(remuda._notice_test_state.events, '\\n')");
-    let trace = std::fs::read_to_string(trace).unwrap_or_default();
-    assert!(events.contains("type Butler message"), "notice was not typed: {events}");
-    assert!(events.contains("key RET"), "notice was not submitted: {events}");
-    assert!(
-        sent.contains("notice deferred:")
-            && sent.contains("m1")
-            && trace.contains(&id)
-            && trace.contains("m1")
-            && trace.contains("NON-EMPTY"),
-        "deferred result and retry trace must identify reason, session, and message id {id}; result={sent}; trace={trace}"
-    );
+    assert_eq!(got, "true|1|0", "the automatic notice is sent past the modal with no key: {got}");
 }
 
 #[test]
@@ -2637,12 +2584,21 @@ fn codex_router_trace_on_prompt_row_is_not_preserved_as_a_user_draft() {
           table.insert(state.events, 'key ' .. key)
           if key == 'C-l' or key == 'C-u' or key == 'RET' then state.screen = '› ' end
         end
-        remuda.type_text = function(_, text)
+        local function notice_stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(_, text) return fn(text) end
+          else
+            remuda.send = function(_, text) return fn(text) end
+          end
+        end
+        notice_stub(function(text)
           state.typed = text
-          table.insert(state.events, 'type ' .. text)
+          table.insert(state.events, 'send')
           state.screen = '› ' .. text
           return true
-        end
+        end)
+        remuda.type_text = function(_, text) table.insert(state.events, 'type ' .. text) end
         remuda._butler_send('operator', 'm1', 'router trace notice')
         "#,
     );
@@ -2663,119 +2619,6 @@ fn codex_router_trace_on_prompt_row_is_not_preserved_as_a_user_draft() {
     assert!(typed.contains("Butler message"), "notice was not delivered: {typed}");
     assert!(!typed.contains("Your unsent draft was:"), "router diagnostics were preserved as user text: {typed}");
     assert!(!typed.contains("codex_core::tools::router"), "router diagnostics leaked into the notice: {typed}");
-}
-
-#[test]
-fn attached_notice_recovery_progresses_or_times_out_with_a_reason() {
-    let (path, _daemon) = butler_with_member("notice-attached-recovery-bound");
-    let trace = scratch("notice-attached-recovery-trace").join("session-trace.log");
-    eval(
-        &path,
-        &format!(
-            r#"
-        local state = {{ now = 0, screen = '❯ ', events = {{}} }}
-        local row = {{ name = 'm1', alive = true, attached = true, human_idle = 20, instance_id = remuda._butler_bus.agents.m1.instance_id }}
-        remuda._notice_test_state = state
-        remuda._butler_session_trace_path = {trace:?}
-        remuda._butler_bus.agents.m1.kind = 'codex'
-        remuda._butler_notice_clock = function() return state.now end
-        remuda._butler_human_active = function() return false end
-        remuda.ls = function() return {{ row }} end
-        remuda.session = function() return {{ is_busy = false }} end
-        remuda.capture_styled = nil
-        remuda.capture = function() table.insert(state.events, 'capture'); return state.screen end
-        remuda.type_text = function(_, text)
-          table.insert(state.events, 'type ' .. text)
-          state.screen = '› ' .. text
-          return true
-        end
-        remuda.key = function(_, key)
-          table.insert(state.events, 'key ' .. key)
-          if key == 'RET' then state.screen = '› ' end
-        end
-        local sent = remuda._butler_send('operator', 'm1', 'attached recovery notice')
-        state.id = sent:match('queued ([^ ]+)')
-        local recovery = {{ phase = 'verify_notice', checks = 0, notice = 'pending', count = 1,
-          message_ids = {{ state.id }} }}
-        remuda._butler_bus.notice_recoveries.m1 = recovery
-        remuda._notice_test_recovery = recovery
-        "#,
-            trace = trace.to_string_lossy(),
-        ),
-    );
-    for _ in 0..25 {
-        eval(
-            &path,
-            "remuda._notice_test_state.now = remuda._notice_test_state.now + 1; remuda._butler_deliver_notices()",
-        );
-    }
-    let pending = eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)");
-    let recovery = eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1 ~= nil)");
-    let id = eval(&path, "return remuda._notice_test_state.id");
-    let trace_contents = std::fs::read_to_string(trace).unwrap_or_default();
-    assert!(trace_contents.contains("cap reached; prompt-empty; falling back to normal delivery"),
-        "empty prompt at the check cap did not fall back to normal delivery: {trace_contents}");
-    assert!(!trace_contents.contains("notice_verify_mismatch"),
-        "successful empty-prompt fallback emitted a failure diagnostic: {trace_contents}");
-    assert!(trace_contents.matches("notice_retry").count() <= 4,
-        "routine retries should log only when the reason changes: {trace_contents}");
-    assert!(!trace_contents.contains("attached recovery notice"),
-        "routine retry traces must not include composer or message text: {trace_contents}");
-    assert!(!trace_contents.contains("reason=prompt-NON-EMPTY:"),
-        "routine retry trace included prompt text after the decision: {trace_contents}");
-    assert!(
-        pending == "false" && recovery == "false",
-        "attached recovery remained pending without progress or a logged reason; pending={pending}, recovery={recovery}, trace={trace_contents}"
-    );
-    assert!(trace_contents.contains(&id) && trace_contents.contains("session=m1"),
-        "retry trace omitted message ID or session: {trace_contents}");
-}
-
-#[test]
-fn empty_prompt_fallback_types_once_per_notice_then_retries_without_alerting() {
-    let (path, _daemon) = butler_with_member("notice-fallback-once");
-    eval(
-        &path,
-        r#"
-        local state = { now = 0, typed = 0, alerts = {} }
-        local row = { name = 'm1', alive = true, attached = false }
-        remuda._notice_fallback_test = state
-        remuda._butler_notice_clock = function() return state.now end
-        remuda.ls = function() return { row } end
-        remuda.capture = function() return '› ' end
-        remuda.capture_styled = nil
-        remuda.session = function() return { is_busy = false } end
-        remuda._butler_human_active = function() return false end
-        remuda._butler_notify_policy = function() return true end
-        remuda.type_text = function() state.typed = state.typed + 1; return true end
-        local send = remuda._butler_send
-        remuda._butler_send = function(from, to, text)
-          if from == 'butler' then table.insert(state.alerts, text); return 'alerted' end
-          return send(from, to, text)
-        end
-        remuda._butler_send('operator', 'm1', 'fallback bound test')
-        state.now = 2
-        remuda._butler_deliver_notices()
-        "#,
-    );
-    for _ in 0..30 {
-        eval(
-            &path,
-            "remuda._notice_fallback_test.now = remuda._notice_fallback_test.now + 1; remuda._butler_deliver_notices()",
-        );
-    }
-    assert_eq!(
-        eval(&path, "return tostring(remuda._notice_fallback_test.typed)"),
-        "2",
-        "notice was typed more than once after initial delivery plus its one fallback",
-    );
-    assert_eq!(
-        eval(&path, "return tostring(#remuda._notice_fallback_test.alerts)"),
-        "0",
-        "a scheduled retry must not send an exhaustion alert",
-    );
-    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1 ~= nil)"), "true");
-    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1.delivery_attempts > 0)"), "true");
 }
 
 #[test]
@@ -2809,24 +2652,32 @@ fn exhausted_recovery_sends_one_failure_alert() {
 }
 
 #[test]
-fn unknown_busy_state_advances_notice_recovery_timeout() {
+fn unknown_busy_state_is_irrelevant_to_notice_delivery() {
     let (path, _daemon) = butler_with_member("unknown-busy-recovery");
-    eval(
+    let got = eval(
         &path,
         r#"
-        local row = { name = 'm1', alive = true, attached = false }
-        remuda.ls = function() return { row } end
         remuda.session = function() error('output idle unavailable') end
-        remuda.capture = function() return '› Butler message pending' end
-        remuda._butler_bus.notices.m1 = { count = 1, text = 'Butler message pending' }
-        remuda._butler_bus.notice_recoveries.m1 = {
-          phase = 'verify_notice', checks = 0, notice = 'Butler message pending', count = 1,
-        }
+        remuda._butler_bus.agents.m1.kind = 'claude'
+        local sends = 0
+        local function stub(fn)
+          local dialogs = remuda.butler and remuda.butler.dialogs
+          if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+            dialogs.automatic_notice_send = function(_, text) return fn(text) end
+          else
+            remuda.send = function(_, text) return fn(text) end
+          end
+        end
+        stub(function() sends = sends + 1; return true end)
+        local now = 0
+        remuda._butler_notice_clock = function() return now end
+        remuda._butler_send('operator', 'm1', 'hi')
+        now = 2
         remuda._butler_deliver_notices()
+        return tostring(sends) .. '|' .. tostring(remuda._butler_bus.notices.m1 == nil)
         "#,
     );
-    let checks = eval(&path, "return tostring(remuda._butler_bus.notice_recoveries.m1.checks)");
-    assert_eq!(checks, "1", "unknown busy state stalled notice verification");
+    assert_eq!(got, "1|true", "unknown busy telemetry cannot stall the send: {got}");
 }
 
 #[test]
@@ -2967,16 +2818,13 @@ fn setup_renotice(path: &Path, alias: &str) {
         remuda._rn_tick = function(now) state.now = now; remuda._butler_deliver_notices() end
         -- Notices typed into this member's pane only (the stub records every pane).
         state.to = {{}}
-        -- The pane shows what was typed, as in the #137 tests, so a notice
-        -- verifies instead of hitting the retype fallback.
-        remuda.capture = function() return state.screen or '> ' end
-        local prior_type = remuda.type_text
-        remuda.type_text = function(name, text)
-          local ok = prior_type(name, text)
+        state.stub_notice_send(function(text, name)
+          state.typed[#state.typed + 1] = {{ at = state.now, text = text }}
           state.to[#state.typed] = name
           state.screen = text .. '\n> '
-          return ok
-        end
+          return true
+        end)
+        remuda.capture = function() return state.screen or '> ' end
         remuda._rn_mine = function()
           local mine = {{}}
           for i, entry in ipairs(state.typed) do
@@ -3122,6 +2970,54 @@ fn an_answered_leader_message_is_not_reshown_after_a_compaction() {
     assert_eq!(got, "0|true", "an answered leader message must not be re-shown after the drop: {got}");
 }
 
+// A read leader brief whose compaction reshow ended uncertain is never resent
+// by a second compaction or a preserved-bus reseed: the uncertainty tombstone
+// suppresses the ID at the single notice-admission point.
+#[test]
+fn an_uncertain_reshow_is_not_repeated_by_a_second_compaction() {
+    let (path, _daemon) = butler_with_named_agent("renotice-uncertain", "cx1", "codex");
+    setup_renotice(&path, "cx1");
+    let got = eval(
+        &path,
+        r#"
+        local state = remuda._notice_test_state
+        local bus = remuda._butler_bus
+        state.attempts = 0
+        state.ctx.cx1 = 170000
+        local id = remuda._rn_lead('read brief for cx1')
+        remuda._rn_tick(0); remuda._rn_tick(2)
+        remuda._butler_inbox('cx1') -- READ, unanswered
+        local arrival = #remuda._rn_mine()
+        -- First compaction: the re-show is dispatched but ends uncertain.
+        state.stub_notice_send(function()
+          state.attempts = state.attempts + 1
+          return false, 'submission is unconfirmed'
+        end)
+        state.ctx.cx1 = 60000
+        for t = 3, 10 do remuda._rn_tick(t) end
+        local after_first = state.attempts
+        -- The unread-stuck record closes (the brief was read) but the durable
+        -- uncertainty tombstone remains for this image.
+        local stuck = tostring(bus.notice_stuck.cx1 ~= nil)
+        local tombstone = bus.notice_uncertain[bus.agents.cx1.id]
+        local tombstoned = tostring(tombstone and tombstone[id] ~= nil)
+        -- Second compaction with the preserved bus.
+        state.stub_notice_send(state.notice_send)
+        state.ctx.cx1 = 170000
+        remuda._rn_tick(11)
+        state.ctx.cx1 = 50000
+        for t = 12, 30 do remuda._rn_tick(t) end
+        -- A preserved-bus reseed (unread_seeded='compacted') replays the same read brief.
+        bus.unread_seeded.cx1 = 'compacted'
+        for t = 31, 40 do remuda._rn_tick(t) end
+        return table.concat({ tostring(arrival), tostring(after_first), stuck, tombstoned,
+          tostring(state.attempts), tostring(#remuda._rn_mine()) }, '|')
+        "#,
+    );
+    assert_eq!(got, "1|1|false|true|1|1",
+        "one uncertain reshow; after the stuck record clears, the tombstone still blocks repeats: {got}");
+}
+
 // Restart: the read leader message is re-shown once, coalesced with the
 // unread-count notice into a single notice.
 #[test]
@@ -3151,8 +3047,9 @@ fn restart_reshows_the_read_leader_message_coalesced_with_unread_mail() {
     assert_eq!(got, "1|true|true|true", "restart: one coalesced notice naming the leader message: {got}");
 }
 
-// First sight of a new member: a brief it read and has not answered while
-// still unseeded (busy with its task) is not re-shown as "after restart".
+// First sight of a new member: its arrival notice is sent even while busy
+// (automatic wakeups no longer wait for idle), but the brief it already read is
+// never re-shown as "after restart".
 #[test]
 fn a_fresh_launch_with_a_read_unanswered_brief_gets_no_reshow() {
     let (path, _daemon) = butler_with_named_agent("renotice-fresh-launch", "cx1", "codex");
@@ -3170,10 +3067,16 @@ fn a_fresh_launch_with_a_read_unanswered_brief_gets_no_reshow() {
         remuda._butler_inbox('cx1')
         state.busy.cx1 = false
         for t = 4, 20 do remuda._rn_tick(t) end
-        return launched .. '|' .. tostring(#remuda._rn_mine())
+        local mine = remuda._rn_mine()
+        local reshow = false
+        for _, text in ipairs(mine) do
+          if text:find('re-shown after', 1, true) then reshow = true end
+        end
+        return launched .. '|' .. tostring(reshow) .. '|' .. tostring(#mine)
         "#,
     );
-    assert!(got.ends_with("|0"), "a fresh launch must not re-show its read brief: {got}");
+    assert!(got.ends_with("|false|1"),
+        "a fresh launch sends its arrival notice once and never re-shows the read brief: {got}");
 }
 
 // SEC #159 M1: a daemon restart empties the in-memory messages; the member's

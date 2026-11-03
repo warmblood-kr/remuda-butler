@@ -902,17 +902,41 @@ policy remains OpenCode's own configuration. Each candidate waits up to
 per-candidate timeout. `remuda butler sessions` shows the selected kind and
 the reason each earlier candidate was skipped.
 
-Butler waits for a known empty composer before typing a mail notice. A pane can
-report background work while its own prompt is idle; Butler types notices only
-into an empty composer and waits for an attached human to pause. If notice
-delivery cannot be verified, Butler retries after 20 seconds, one minute, five
-minutes and 15 minutes, then sends one failure message to the original mail
-sender with the exact command to resend. The sent failure notice is recorded in
-mail so a daemon restart cannot send it again. Mail without a Butler sender
-identity, such as CLI or Matrix mail, is reported to the recipient's leader. If
-that leader is absent or has exited, the root Butler receives the failure mail.
-The root records its own notice failure without mailing itself. Notice retries
-stop when the mail is read or the recipient exits.
+An automatic mail notice is one ordinary atomic terminal send: the text and its
+Return go to the pane in a single write. Butler does not wait for an idle or
+empty composer, read the screen, predict a dialog, or retry a Return. An
+attached human (someone is driving that pane by hand) refuses it, and a pending
+delegated first task holds it until the task clears. An open picker or other
+dialog does not hold it, because automatic wakeups make no modal prediction.
+Every other write still passes the audited dialog gate; the notice-only path is
+the single exception and only for Butler-generated notice text. Because the write inserts at the cursor, a
+detached draft is concatenated with the notice and submitted (owner decision
+2026-11-03); Butler never clears the composer or sends Escape to restore it.
+
+A successful send means the write path accepted the text (submitted or
+unverified). It never means the agent read the mail: only reading the inbox
+marks it read, and the unread reminder and stuck report keep running. A refusal
+that provably wrote nothing (`a session input write is already in flight`, an
+attached human, a stalled earlier write whose Return never went, or a dead or
+replaced session) is retried after 20 seconds, one minute, five minutes and 15
+minutes, then one failure message names the message IDs and the exact resend
+command. An outcome that may have written bytes (a slow pane whose Return is
+still pending, an unconfirmed submission, a PTY write timeout, an I/O error, or
+an unknown error) is reported once with the IDs and is not resent in that
+running Butler; the mail stays unread. An in-memory tombstone keyed by the
+recipient's identity and the message id keeps that ID suppressed even after the
+mail is read, the reminder runs or the stuck record closes, so a later
+compaction re-show or a reload cannot resend it. A full daemon restart loses
+those in-memory records and may nudge still-unread mail again, so notice
+delivery is at-least-once, not exactly-once. The attached check reads the session list
+immediately before the write, but the core send word is name-addressed, so a
+human attaching or a name being reused in that instant is not excluded. The
+sent failure notice is recorded in mail so a daemon restart cannot send it
+again. Mail without a Butler sender identity, such as CLI or Matrix mail, is
+reported to the recipient's leader. If that leader is absent or has exited, the
+root Butler receives the failure mail. The root records its own notice failure
+without mailing itself. Notice retries stop when the mail is read or the
+recipient exits.
 
 The client session list leads each Butler session line with its status, read
 from the agent's own screen probes: `working`, `idle`, `needs you` (a trust,

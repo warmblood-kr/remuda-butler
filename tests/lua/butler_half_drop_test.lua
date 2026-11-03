@@ -26,15 +26,21 @@ T.eval([[
   } end
   remuda.session = function(name) return { is_busy = state.busy[name] == true } end
   remuda.capture_styled = nil
-  remuda._butler_notify_policy = function(name) return state.busy[name] ~= true end
   remuda._butler_telemetry_for = function(agent)
     return { context_used = state.ctx[agent and agent.alias or ''] }
   end
   remuda.capture = function() return state.screen or '> ' end
-  remuda.type_text = function(_, text)
+  -- Automatic notices use one ordinary send; record it at the notice seam.
+  local function record(_, text)
     state.typed[#state.typed + 1] = { at = state.now, text = text }
     state.screen = text .. '\n> '
     return true
+  end
+  local dialogs = remuda.butler and remuda.butler.dialogs
+  if dialogs and type(dialogs.automatic_notice_send) == 'function' then
+    dialogs.automatic_notice_send = function(name, text) return record(name, text) end
+  else
+    remuda.send = function(name, text) return record(name, text) end
   end
   remuda._rn_tick = function(now) state.now = now; remuda._butler_deliver_notices() end
 ]])
