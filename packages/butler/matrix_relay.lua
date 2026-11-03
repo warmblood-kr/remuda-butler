@@ -1619,7 +1619,7 @@ function relay.new(options)
     elseif reason == "rate_limited" then
       return "Not typed: typed lines are limited to 10 per 10 minutes. Next: wait, then send the line again"
     elseif reason == "invalid_line" or reason == "empty_line" then
-      return "Not typed: one plain line of at most 2000 bytes. Next: send it as one line"
+      return "Not typed: one plain line of at most 5000 characters. Next: send it as one line"
     elseif reason == "unreadable_content" then
       return "Not typed: the message is not plain text. Next: send it as one plain text line"
     elseif reason == "invalid_prefix" then
