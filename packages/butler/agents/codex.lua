@@ -1,3 +1,13 @@
+local function observed_at(path, payload)
+  local file = path and io.open(path .. ".observed", "r")
+  if not file then return nil end
+  local value = file:read(513)
+  file:close()
+  if not value or #value > 512 then return nil end
+  local at, recorded = (value or ""):match("^(%d+)\n(.*)$")
+  if recorded ~= payload then return nil end
+  return tonumber(at)
+end
 local builders = assert(remuda._butler_agent_builders)
 local telemetry = assert(remuda._butler_telemetry_adapters)
 
@@ -11,7 +21,7 @@ telemetry.codex = {
     local line = f:read("*l")
     f:close()
     local model, used, window, percent = (line or ""):match("^MODEL:([A-Za-z0-9_.%-?]+) CTX:([0-9?]+) CTXWIN:([0-9?]+) CTXPCT:([0-9?]+)$")
-    return { model = model or state.model, context_used = used, context_window = window, context_percent = percent }
+    return { observed_at = observed_at(state.status_path, line), model = model or state.model, context_used = used, context_window = window, context_percent = percent }
   end,
 }
 
