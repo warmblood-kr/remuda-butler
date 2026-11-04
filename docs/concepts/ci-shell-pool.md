@@ -50,10 +50,11 @@ The shell job needs one release `remuda` at `CORE_REF`. Building it costs
 60-85s. The cache key includes OS/arch, runner image/ABI, full core ref,
 Rust toolchain, profile and recipe version. Every hit/build is validated
 against the pin; failed validation is never published or used. Publish is a
-staged directory rename under a lock whose owner PID is recorded; a later run
-reclaims only a dead owner's lock, never an active build by age. A SIGKILL may
-leave a staging directory; it is harmless and is not age-evicted. The cache
-contains only the binary and metadata, never daemon/home/
+staged directory rename under a lock whose owner PID is recorded for
+diagnostics. A SIGKILL may leave the lock; a waiter fails after a bounded wait
+with the lock path rather than deleting a lock it cannot prove dead (the next
+job has a fresh TMPDIR). The cache contains only the binary and metadata,
+never daemon/home/
 config/state.
 
 ## Measurement

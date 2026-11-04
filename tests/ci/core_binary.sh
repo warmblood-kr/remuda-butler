@@ -65,23 +65,21 @@ core_binary_validate() {
 
 # Build and publish one cache entry. Runs in a subshell with an EXIT/INT/TERM
 # trap that removes only this build's temp tree, staging dir and lock. The lock
-# holds the owner PID; a later run reclaims it only when that PID is dead.
-# (No age-only reclaim: a slow active build must not be evicted.)
+# holds the owner PID for diagnostics; a SIGKILL may leave it, and a waiter then
+# fails after a bounded wait with the lock path (the next job has a fresh
+# TMPDIR). It never deletes a lock it cannot prove dead, avoiding a stale-read
+# race between two waiters.
 core_binary_build_and_publish() {
   local cache=$1 key=$2 dir=$3
   local lock='' built='' rc=0 waited=0 owner=''
   CORE_BINARY_LOCK= CORE_BINARY_TMP= CORE_BINARY_STAGE=
   lock="${TMPDIR:-/tmp}/remuda-core-cache-$key.lock"
   while ! mkdir "$lock" 2>/dev/null; do
-    owner=''
-    [[ -f $lock/pid ]] && owner=$(cat "$lock/pid" 2>/dev/null || true)
-    if [[ -n $owner ]] && ! kill -0 "$owner" 2>/dev/null; then
-      rm -rf "$lock" 2>/dev/null || true
-      continue
-    fi
     waited=$((waited + 1))
     if ((waited > 300)); then
-      echo "core binary: timeout waiting for cache lock $lock (owner ${owner:-unknown})" >&2
+      owner=''
+      [[ -f $lock/pid ]] && owner=$(cat "$lock/pid" 2>/dev/null || true)
+      echo "core binary: timeout waiting for cache lock $lock (owner ${owner:-unknown}); remove it only if no build is active" >&2
       return 2
     fi
     sleep 0.1

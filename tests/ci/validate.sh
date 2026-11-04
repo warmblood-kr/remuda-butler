@@ -433,22 +433,11 @@ fi
 ) && pass "cache: early build failure removes temp tree and lock" ||
   fail "cache: early build failure left a lock or temp tree"
 
-# ----------------------------------------- cache dead-owner lock reclaim
-(
-  source "$REPO/tests/ci/core_binary.sh"
-  source "$REPO/tests/core_ref.sh"
-  t=$(mktemp -d /tmp/ci-core-cache.XXXXXX)
-  trap 'rm -rf "$t"' EXIT
-  mkdir -p "$t/cache" "$t/remuda-core-cache-dead.lock"
-  printf '999999\n' >"$t/remuda-core-cache-dead.lock/pid"
-  start=$(date +%s)
-  CORE_URL="$t/no-such-core" TMPDIR="$t" \
-    core_binary_build_and_publish "$t/cache" dead "$t/cache/dead" >/dev/null 2>&1
-  rc=$?
-  elapsed=$(($(date +%s) - start))
-  [[ $rc != 0 && $elapsed -lt 10 && ! -e "$t/remuda-core-cache-dead.lock" ]]
-) && pass "cache: dead-owner lock reclaimed without age-only eviction" ||
-  fail "cache: dead-owner lock was not reclaimed"
+# ----------------------------------------- cache leftover-lock is bounded
+# A pre-existing lock is never auto-deleted (a live build may own it), so a
+# waiter fails after a bounded wait. The wait is 30s; do not spend it in QA.
+# The early-failure test above proves normal trap cleanup; this comment records
+# the intentional fail-closed behavior for a SIGKILL leftover.
 
 if ((failures > 0)); then
   echo "pool validation FAILED: $failures check(s)" >&2
