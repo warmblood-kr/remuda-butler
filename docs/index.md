@@ -107,6 +107,16 @@ refuse identity-sensitive CLI commands: upgrade core or use the MCP `butler_*`
 tools with the session's configured capability. Environment variables never
 select CLI identity. Caller attribution is advisory, not an isolation boundary.
 
+### Completion nudge
+
+An OpenCode member can finish a turn and idle without reporting. OpenCode 2.2.x
+has no stop hook, so each OpenCode member's private server loads a small plugin
+that watches `session.execution.succeeded` and, once per user-initiated work
+cycle, asks the member itself to report if it has finished. It never reports for
+the member and never claims success. See
+[OpenCode completion nudge](opencode-completion-nudge.md) for the verified event
+semantics, identity contract and tests.
+
 ### Optional Matrix bridge
 
 With Matrix credentials configured, Butler can bridge one room. The bridge is
