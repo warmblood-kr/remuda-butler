@@ -433,11 +433,22 @@ fi
 ) && pass "cache: early build failure removes temp tree and lock" ||
   fail "cache: early build failure left a lock or temp tree"
 
-# ----------------------------------------- cache leftover-lock is bounded
-# A pre-existing lock is never auto-deleted (a live build may own it), so a
-# waiter fails after a bounded wait. The wait is 30s; do not spend it in QA.
-# The early-failure test above proves normal trap cleanup; this comment records
-# the intentional fail-closed behavior for a SIGKILL leftover.
+# ----------------------------------------- cache live lock is not deleted
+(
+  source "$REPO/tests/ci/core_binary.sh"
+  source "$REPO/tests/core_ref.sh"
+  t=$(mktemp -d /tmp/ci-core-cache.XXXXXX)
+  trap 'rm -rf "$t"' EXIT
+  mkdir -p "$t/cache" "$t/remuda-core-cache-busy.lock"
+  printf '%s\n' "$$" >"$t/remuda-core-cache-busy.lock/pid"
+  before=$(cat "$t/remuda-core-cache-busy.lock/pid")
+  CORE_BINARY_LOCK_WAIT=2 CORE_URL="$t/no-such-core" TMPDIR="$t" \
+    core_binary_build_and_publish "$t/cache" busy "$t/cache/busy" >/dev/null 2>&1
+  rc=$?
+  after=$(cat "$t/remuda-core-cache-busy.lock/pid" 2>/dev/null || true)
+  [[ $rc == 2 && -d "$t/remuda-core-cache-busy.lock" && $before == "$after" ]]
+) && pass "cache: a live lock is not deleted; waiter fails bounded" ||
+  fail "cache: a live lock was deleted or not failed bounded"
 
 if ((failures > 0)); then
   echo "pool validation FAILED: $failures check(s)" >&2

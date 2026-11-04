@@ -71,15 +71,17 @@ core_binary_validate() {
 # race between two waiters.
 core_binary_build_and_publish() {
   local cache=$1 key=$2 dir=$3
-  local lock='' built='' rc=0 waited=0 owner=''
+  local lock='' built='' rc=0 waited=0 owner='' lock_wait=${CORE_BINARY_LOCK_WAIT:-1200}
+  [[ $lock_wait =~ ^[0-9]+$ ]] || lock_wait=1200
+  ((lock_wait >= 1)) || lock_wait=1200
   CORE_BINARY_LOCK= CORE_BINARY_TMP= CORE_BINARY_STAGE=
   lock="${TMPDIR:-/tmp}/remuda-core-cache-$key.lock"
   while ! mkdir "$lock" 2>/dev/null; do
     waited=$((waited + 1))
-    if ((waited > 300)); then
+    if ((waited > lock_wait)); then
       owner=''
       [[ -f $lock/pid ]] && owner=$(cat "$lock/pid" 2>/dev/null || true)
-      echo "core binary: timeout waiting for cache lock $lock (owner ${owner:-unknown}); remove it only if no build is active" >&2
+      echo "core binary: timeout after $((lock_wait / 10))s waiting for cache lock $lock (owner ${owner:-unknown}); remove it only if no build is active" >&2
       return 2
     fi
     sleep 0.1
