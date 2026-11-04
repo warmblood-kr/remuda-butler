@@ -149,6 +149,8 @@ R -e "if not dofile('$REPO/scripts/check-butler-path-convention.lua') then error
 R -e "remuda._butler_argv = {'$T/bin/fake-root'}" >/dev/null   # root session: no agent
 R butler --headless >/dev/null
 wait_live butler
+# The live root system prompt must name the STICC parts and ask for propagation.
+R -e "local p = remuda._butler_system_prompt or ''; for _, word in ipairs({ 'Situation', 'Task', 'Intent', 'Concern', 'Calibrate', 'propagate' }) do if not p:find(word, 1, true) then error('root SYSTEM_PROMPT lacks ' .. word, 0) end end"
 R butler topic delegate lead1 --agent claude "golden task" >/dev/null
 R butler launch claude w1 >/dev/null
 wait_live lead1; wait_live w1; wait_file "$T/argv/lead1"
@@ -191,6 +193,41 @@ NOPREFIX='Do not prefix it with REMUDA_NO_UPDATE_CHECK=1 or other VAR=value assi
 for f in agents-topic.md agents-launch.md; do
   grep -qF "$NOPREFIX" "$OUT/$f" || { echo "FAIL golden guidance: $f lacks the no-env-prefix line" >&2; exit 1; }
 done
+
+# Semantics, not just snapshots: every generated surface carries the durable
+# guidance agents act on. Keep these checks when a deliberate golden update runs.
+require_text() { # file needle description
+  grep -qF "$2" "$OUT/$1" || { echo "FAIL golden guidance: $1 lacks $3" >&2; exit 1; }
+}
+for f in agents-root.md agents-topic.md agents-launch.md welcome.txt; do
+  require_text "$f" '## Delegation: STICC' "the STICC section"
+  require_text "$f" '**Calibrate:** ask the member to confirm' "the STICC calibrate step"
+  require_text "$f" 'tell them to propagate it' "STICC propagation"
+  require_text "$f" 'reserved sender `schedule`' "the standing schedule-mail warning"
+  require_text "$f" 'created by your current Butler identity' "identity-based schedule ownership"
+  require_text "$f" 'the add asks for confirmation' "the owner-terminal schedule path"
+  require_text "$f" 'steps 5, 6, 10, 12, 15, 20 or 30' "the exact cron step list"
+  require_text "$f" "request's expiry (default" "the displayed approval expiry"
+  require_text "$f" 'approval_ttl_minutes' "the configurable approval TTL"
+  require_text "$f" '8 KiB of normalized text' "the normalized 8 KiB limit"
+  require_text "$f" 'live Matrix sync and prepared-text approval on' "the approval prerequisites"
+  require_text "$f" 'typed (seen)' "the typed(seen) observation caveat"
+  require_text "$f" 'does not approve prepared text' "the owner-Matrix-only approval rule"
+  if grep -qF 'Adding and removing schedules require the owner at a terminal' "$OUT/$f"; then
+    echo "FAIL golden guidance: $f still says schedules need the owner at a terminal" >&2; exit 1
+  fi
+  if grep -qF 'Requests expire after 60 minutes' "$OUT/$f"; then
+    echo "FAIL golden guidance: $f hardcodes a 60-minute approval expiry" >&2; exit 1
+  fi
+done
+for f in agents-topic.md agents-launch.md welcome.txt; do
+  require_text "$f" 'add one for your own session' "scheduler self-service ownership"
+  require_text "$f" 'Your session is the target' "the member's own schedule target"
+done
+require_text agents-root.md 'Add one for the Butler session' "the root's own schedule target"
+require_text agents-root.md 'The Butler session is the target' "the root command as confirmation"
+# The member prompt is what the agent sees before it reads AGENTS.md.
+require_text argv-claude.txt 'explain the assignment using STICC' "the STICC prompt cue"
 
 if [[ ${GOLDEN_UPDATE:-} == 1 ]]; then
   mkdir -p "$GOLDEN"

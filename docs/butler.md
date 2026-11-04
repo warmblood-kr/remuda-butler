@@ -296,7 +296,8 @@ remuda butler schedule rm NAME
 ```
 
 `NAME` is 1-32 characters of `a-z`, `0-9` and `-`, unique among at most 16
-schedules. `SESSION` is a live session alias and defaults to `butler`. `TEXT`
+schedules. `SESSION` is a live session alias; it defaults to the caller's own
+session for a Butler agent, or to `butler` for the operator. `TEXT`
 is at most 2048 bytes and holds no control characters except newlines; `-`
 reads it from stdin. The schedule has five fields in the machine's local time:
 the minute is `N` or `*/N` (N is 5, 6, 10, 12, 15, 20 or 30, so the gap
@@ -305,14 +306,17 @@ month and weekday are `*`. `7 * * * *` is minute 7 of every hour,
 `0 9 * * *` is 09:00 daily, `*/30 * * * *` is every half hour.
 
 `list` is open to every session and prints each schedule's name, spec, target,
-state, last firing and the first 80 bytes of its text. `add` and `rm` are for a
-person at the terminal; a Butler agent is refused, because a schedule keeps
-injecting its text after the agent has forgotten it. `add` asks for `yes` at
-the terminal, as turning typed lines on does; `rm` does not ask.
-The operator-only gate on `add` and `rm` is advisory within one user account, like
-the typed-line switches: a process running as the same user with Lua access can
-write the schedule store directly. A schedule's text is delivered as mail marked
-as a timed message, never as typed input.
+state, last firing and the first 80 bytes of its text. An authenticated Butler
+session can `add` a schedule for itself and `rm` the schedules it created; its
+own alias is the target and running the command is its confirmation. The owner
+at the terminal can manage any target: `add` asks for `yes`, as turning typed
+lines on does, and `--to SESSION` names the target; `rm` does not ask. The
+stored creator identity, not the alias, decides which schedules a member may
+remove, so a reused alias does not inherit them.
+The operator-only gate on the terminal path is advisory within one user account,
+like the typed-line switches: a process running as the same user with Lua access
+can write the schedule store directly. A schedule's text is delivered as mail
+marked as a timed message, never as typed input.
 
 A timer checks every 30 seconds. Each due schedule is delivered as mail from
 the reserved sender `schedule`, with the subject `[schedule NAME]` and a first
@@ -488,9 +492,9 @@ leaves the approved request available for another owner reply until expiry.
 Before typing, Butler persists a one-shot delivery marker; if typing can have
 started, the request cannot be retried. If Butler restarts after saving that
 marker, delivery is uncertain: the text may not have been typed, and it must
-be registered again. Requests expire after 60 minutes; no
-more than five may be pending at once, and an agent may register at most ten
-in ten minutes.
+be registered again. Requests expire at the expiry shown in the request
+(default 30 minutes; `approval_ttl_minutes` sets 1 to 1440); no more than five
+may be pending at once, and an agent may register at most ten in ten minutes.
 Session binding uses the Butler session identity and a non-secret launch marker;
 the root Butler identity can survive a pane relaunch, so its fresh launch marker
 is what distinguishes that instance.
