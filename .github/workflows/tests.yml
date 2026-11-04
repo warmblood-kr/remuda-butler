@@ -78,8 +78,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      # The runner context is not available in a job-level env block, so
+      # SHELL_TESTS_ARTIFACTS is set from RUNNER_TEMP in a step below.
       SHELL_TESTS_JOBS: ${{ github.event.inputs.jobs || vars.SHELL_TESTS_JOBS || '12' }}
-      SHELL_TESTS_ARTIFACTS: ${{ runner.temp }}/shell-tests-artifacts
     steps:
       - uses: actions/checkout@v4
         with:
@@ -99,6 +100,8 @@ jobs:
           core_binary_resolve
           echo "REMUDA_BIN=$REMUDA_BIN" >> "$GITHUB_ENV"
           "$REMUDA_BIN" --version
+      - name: Set shell test artifact directory
+        run: echo "SHELL_TESTS_ARTIFACTS=$RUNNER_TEMP/shell-tests-artifacts" >> "$GITHUB_ENV"
       - run: tests/ci/validate.sh
       - run: tests/shell_tests.sh
       - uses: actions/upload-artifact@v4
