@@ -64,30 +64,37 @@ core_binary_validate() {
 }
 
 # Build and publish one cache entry. Runs in a subshell with an EXIT/INT/TERM
-# trap that removes only this build's temp tree, staging dir and lock. A
-# SIGKILL cannot run traps, so a stale TMPDIR lock is recovered after 5 minutes
-# and stale cache staging dirs after 60 minutes.
+# trap that removes only this build's temp tree, staging dir and lock. The lock
+# holds the owner PID; a later run reclaims it only when that PID is dead.
+# (No age-only reclaim: a slow active build must not be evicted.)
 core_binary_build_and_publish() {
   local cache=$1 key=$2 dir=$3
-  local lock tmp built stage rc waited
+  local lock='' built='' rc=0 waited=0 owner=''
+  CORE_BINARY_LOCK= CORE_BINARY_TMP= CORE_BINARY_STAGE=
   lock="${TMPDIR:-/tmp}/remuda-core-cache-$key.lock"
-  if [[ -d $lock ]] && [[ -n $(find "$lock" -maxdepth 0 -mmin +5 2>/dev/null) ]]; then
-    rm -rf "$lock" 2>/dev/null || true
-  fi
-  waited=0
   while ! mkdir "$lock" 2>/dev/null; do
+    owner=''
+    [[ -f $lock/pid ]] && owner=$(cat "$lock/pid" 2>/dev/null || true)
+    if [[ -n $owner ]] && ! kill -0 "$owner" 2>/dev/null; then
+      rm -rf "$lock" 2>/dev/null || true
+      continue
+    fi
     waited=$((waited + 1))
     if ((waited > 300)); then
-      echo "core binary: timeout waiting for cache lock $lock" >&2
+      echo "core binary: timeout waiting for cache lock $lock (owner ${owner:-unknown})" >&2
       return 2
     fi
     sleep 0.1
   done
-  find "$cache" -maxdepth 1 -name '.stage.*' -mmin +60 -exec rm -rf {} + 2>/dev/null || true
+  if ! printf '%s\n' "$$" >"$lock/pid"; then
+    rm -rf "$lock" 2>/dev/null || true
+    return 2
+  fi
+  CORE_BINARY_LOCK=$lock
 
   (
     set -e
-    trap 'rm -rf "$tmp" "$stage" 2>/dev/null || true; rmdir "$lock" 2>/dev/null || true' EXIT
+    trap 'rm -rf "${CORE_BINARY_TMP:-}" "${CORE_BINARY_STAGE:-}" 2>/dev/null || true; rm -rf "${CORE_BINARY_LOCK:-}" 2>/dev/null || true' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
@@ -96,32 +103,33 @@ core_binary_build_and_publish() {
       exit 0
     fi
 
-    tmp=$(mktemp -d "${TMPDIR:-/tmp}/remuda-core-build.XXXXXX")
-    git clone --quiet "${CORE_URL:-https://github.com/warmblood-kr/remuda.git}" "$tmp/core"
-    git -C "$tmp/core" checkout --quiet "$CORE_REF"
-    (cd "$tmp/core" && cargo build --quiet --locked --release --bin remuda)
+    CORE_BINARY_TMP=$(mktemp -d "${TMPDIR:-/tmp}/remuda-core-build.XXXXXX") || exit 2
+    git clone --quiet "${CORE_URL:-https://github.com/warmblood-kr/remuda.git}" "$CORE_BINARY_TMP/core" || exit 2
+    git -C "$CORE_BINARY_TMP/core" checkout --quiet "$CORE_REF" || exit 2
+    (cd "$CORE_BINARY_TMP/core" && cargo build --quiet --locked --release --bin remuda) || exit 2
 
     if [[ ${CARGO_TARGET_DIR:-} == /* ]]; then
       built="$CARGO_TARGET_DIR/release/remuda"
     else
-      built="$tmp/core/${CARGO_TARGET_DIR:-target}/release/remuda"
+      built="$CORE_BINARY_TMP/core/${CARGO_TARGET_DIR:-target}/release/remuda"
     fi
-    core_binary_validate "$built"
+    core_binary_validate "$built" || exit 2
 
-    stage="$cache/.stage.$$"
-    rm -rf "$stage"
-    mkdir -p "$stage"
-    cp "$built" "$stage/remuda"
-    chmod 755 "$stage/remuda"
-    core_binary_identity >"$stage/meta"
+    CORE_BINARY_STAGE="$cache/.stage.$$"
+    rm -rf "$CORE_BINARY_STAGE"
+    mkdir -p "$CORE_BINARY_STAGE" || exit 2
+    cp "$built" "$CORE_BINARY_STAGE/remuda" || exit 2
+    chmod 755 "$CORE_BINARY_STAGE/remuda" || exit 2
+    core_binary_identity >"$CORE_BINARY_STAGE/meta" || exit 2
 
     # Publish the whole directory with one rename under the lock.
     rm -rf "$dir"
-    mv "$stage" "$dir"
-    stage=
+    mv "$CORE_BINARY_STAGE" "$dir" || exit 2
+    CORE_BINARY_STAGE=
   )
   rc=$?
-  rmdir "$lock" 2>/dev/null || true
+  rm -rf "${CORE_BINARY_LOCK:-}" 2>/dev/null || true
+  CORE_BINARY_LOCK= CORE_BINARY_TMP= CORE_BINARY_STAGE=
   return $rc
 }
 

@@ -54,7 +54,7 @@ time_file="$taskdir/time"
 write_status() {
   local rc=$1 msg=${2:-} tmp="$status.tmp.$$"
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$rc" "$start" "$(now_us)" "$user" "$sys" "$wall" "$msg" >"$tmp" &&
+    "$rc" "$start" "$(now_us)" "${user:--}" "${sys:--}" "${wall:--}" "$msg" >"$tmp" &&
     mv "$tmp" "$status"
 }
 

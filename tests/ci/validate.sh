@@ -156,6 +156,45 @@ for mode in success failure; do
   fi
 done
 
+# ---------------------------------------- token-only leak after success
+if [[ -d /proc ]]; then
+  cat >"$tmp/token_only_task.sh" <<'SH'
+#!/usr/bin/env bash
+set -uo pipefail
+perl -MPOSIX -e '
+  POSIX::setsid();
+  chdir $ENV{CI_POOL_TASK_DIR} or die $!;
+  open my $f, ">", "$ENV{CI_POOL_TASK_DIR}/token-only.pid" or die $!;
+  print $f "$$\n"; close $f;
+  exec "sleep", "300";
+' &
+for _ in $(seq 1 100); do
+  [[ -s "$CI_POOL_TASK_DIR/token-only.pid" ]] && break
+  sleep 0.01
+done
+exit 0
+SH
+  chmod +x "$tmp/token_only_task.sh"
+  printf 'token-leak\t1\tcmd\tbash %s\n' "$tmp/token_only_task.sh" >"$tmp/token.tsv"
+  (
+    POOL_CANCEL_REQUESTED=0
+    pool_run "$tmp/token.tsv" 1 "$tmp/token-logs" "$tmp/token-tasks" "$tmp" "$REPO/tests/lib/pool_task.sh"
+  ) >"$tmp/token.out" 2>&1
+  rc=$?
+  [[ $rc == 1 ]] && pass "token-only leak: detected survivor fails the suite" ||
+    fail "token-only leak: pool exit $rc, expected 1"
+  grep -q 'detached survivors detected' "$tmp/token.out" ||
+    fail "token-only leak: no detected-survivor report"
+  f=$(find "$tmp/token-tasks" -name token-only.pid -print -quit 2>/dev/null || true)
+  if [[ -n $f ]]; then
+    tp=$(head -1 "$f")
+    wait_gone "$tp" 100 && pass "token-only leak: survivor killed" ||
+      fail "token-only leak: survivor still alive"
+  fi
+else
+  echo "SKIP: token-only leak QA needs Linux /proc"
+fi
+
 # ------------------------------------- cancellation of a fixture detached child
 cat >"$tmp/cancel_task.sh" <<'SH'
 #!/usr/bin/env bash
@@ -282,6 +321,7 @@ fi
   export REMUDA_RUNTIME_DIR=/tmp/live-runtime
   export XDG_CACHE_HOME=/tmp/live-cache
   export REMUDA_BUTLER_LIVE_CODEX=1
+  export CODEX_HOME=/tmp/live-codex-home
   pool_sanitize_env
   printf 'env\t1\tcmd\tenv\n' >"$tmp/env.tsv"
   POOL_CANCEL_REQUESTED=0
@@ -290,6 +330,7 @@ fi
 rc=$?
 [[ $rc == 0 ]] || fail "env isolation: pool exit $rc"
 log=$tmp/env-logs/env.log
+grep -q '^CODEX_HOME=/tmp/live-codex-home$' "$log" && fail "env isolation: inherited CODEX_HOME leaked"
 grep -q '^REMUDA_SESSION_ID=live-session$' "$log" && fail "env isolation: live session id leaked"
 grep -q '^REMUDA_BUTLER_AGENT_ID=live-agent$' "$log" && fail "env isolation: live agent id leaked"
 grep -q '^REMUDA_BUTLER_LIVE_CODEX=1$' "$log" || fail "env isolation: deliberate knob dropped"
@@ -349,6 +390,62 @@ rc=$?
 [[ $rc == 98 && -f $tmp/direct.status && $(cut -f1 "$tmp/direct.status") == 98 ]] &&
   pass "fail-closed: wrapper refused to run outside an owned group" ||
   fail "fail-closed: wrapper did not refuse (exit $rc)"
+if [[ -f $tmp/direct.status ]]; then
+  [[ $(cut -f4 "$tmp/direct.status") == "-" && $(cut -f5 "$tmp/direct.status") == "-" &&
+    $(cut -f6 "$tmp/direct.status") == "-" ]] &&
+    [[ $(cut -f7 "$tmp/direct.status") == *"not a process-group leader"* ]] &&
+    pass "status TSV: empty rusage fields keep their placeholder columns" ||
+    fail "status TSV: placeholder columns collapsed or note moved"
+fi
+
+# ----------------------------------------- detected-leak aggregate failure
+(
+  POOL_TOKEN_PREFIX=fake-prefix-
+  POOL_SURVIVOR_FAIL=0
+  n=0
+  pool_token_survivors() { n=$((n + 1)); [[ $n == 1 ]] && echo 999999; }
+  pool_kill_owned() { return 0; }
+  pool_audit_pool >/dev/null 2>&1
+  rc=$?
+  [[ $rc == 1 && $POOL_SURVIVOR_FAIL == 1 ]]
+) && pass "aggregate: a detected-and-killed survivor still fails the suite" ||
+  fail "aggregate: detected survivor did not fail the suite"
+
+# ----------------------------------------- cache early-failure cleanup
+(
+  source "$REPO/tests/ci/core_binary.sh"
+  source "$REPO/tests/core_ref.sh"
+  t=$(mktemp -d /tmp/ci-core-cache.XXXXXX)
+  trap 'rm -rf "$t"' EXIT
+  mkdir -p "$t/cache"
+  CORE_URL="$t/no-such-core"
+  TMPDIR="$t"
+  core_binary_build_and_publish "$t/cache" testkey "$t/cache/entry" >"$t/cache-test.log" 2>&1
+  rc=$?
+  [[ $rc == 0 ]] && cat "$t/cache-test.log" >&2
+  [[ $rc != 0 ]] || exit 1
+  [[ ! -e "$t/remuda-core-cache-testkey.lock" ]] || exit 1
+  compgen -G "$t/remuda-core-build.*" >/dev/null && exit 1
+  exit 0
+) && pass "cache: early build failure removes temp tree and lock" ||
+  fail "cache: early build failure left a lock or temp tree"
+
+# ----------------------------------------- cache dead-owner lock reclaim
+(
+  source "$REPO/tests/ci/core_binary.sh"
+  source "$REPO/tests/core_ref.sh"
+  t=$(mktemp -d /tmp/ci-core-cache.XXXXXX)
+  trap 'rm -rf "$t"' EXIT
+  mkdir -p "$t/cache" "$t/remuda-core-cache-dead.lock"
+  printf '999999\n' >"$t/remuda-core-cache-dead.lock/pid"
+  start=$(date +%s)
+  CORE_URL="$t/no-such-core" TMPDIR="$t" \
+    core_binary_build_and_publish "$t/cache" dead "$t/cache/dead" >/dev/null 2>&1
+  rc=$?
+  elapsed=$(($(date +%s) - start))
+  [[ $rc != 0 && $elapsed -lt 10 && ! -e "$t/remuda-core-cache-dead.lock" ]]
+) && pass "cache: dead-owner lock reclaimed without age-only eviction" ||
+  fail "cache: dead-owner lock was not reclaimed"
 
 if ((failures > 0)); then
   echo "pool validation FAILED: $failures check(s)" >&2

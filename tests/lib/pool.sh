@@ -48,6 +48,10 @@ pool_sanitize_env() {
   if [[ -z $POOL_ORIGINAL_CODEX_HOME && -d $POOL_ORIGINAL_HOME/.codex ]]; then
     POOL_ORIGINAL_CODEX_HOME="$POOL_ORIGINAL_HOME/.codex"
   fi
+  # An inherited CODEX_HOME would otherwise reach every task and make the
+  # coordination-config fixture see a Codex layer. Only the opt-in live Codex
+  # task gets it back, via env in pool_launch.
+  unset CODEX_HOME
   for n in ${!REMUDA_BUTLER_@}; do
     [[ $n == REMUDA_BUTLER_LIVE_CODEX ]] && continue
     unset "$n"
@@ -214,20 +218,23 @@ pool_audit_task() {
 }
 
 # Final pool-wide detached audit. Covers processes that cleared REMUDA_*.
+# Any detected survivor is a suite failure even if it is successfully killed:
+# an unregistered success leak must not produce a green run.
 pool_audit_pool() {
   local pids
   pids=$(pool_token_survivors "$POOL_TOKEN_PREFIX")
   [[ -z $pids ]] && return 0
-  echo "pool: detached survivors carrying this run's token: $(printf '%s ' $pids)" >&2
+  POOL_SURVIVOR_FAIL=1
+  echo "FAIL: detached survivors detected (killing): $(printf '%s ' $pids)" >&2
   if ! pool_kill_owned token "$POOL_TOKEN_PREFIX" "" "$pids"; then
     echo "FAIL: detached survivors remain after TERM/KILL: $(printf '%s ' $pids)" >&2
-    POOL_SURVIVOR_FAIL=1
     return 1
   fi
   pids=$(pool_token_survivors "$POOL_TOKEN_PREFIX")
-  [[ -z $pids ]] && return 0
-  echo "FAIL: detached survivors remain: $(printf '%s ' $pids)" >&2
-  POOL_SURVIVOR_FAIL=1
+  if [[ -n $pids ]]; then
+    echo "FAIL: detached survivors remain: $(printf '%s ' $pids)" >&2
+    return 1
+  fi
   return 1
 }
 
@@ -300,7 +307,7 @@ pool_launch() {
   done
 
   if [[ ! -f "$taskdir/registry/root.pid" ]]; then
-    [[ -f "$status" ]] || printf '98\t%s\t%s\t\t\t%s\t%s\n' "$(pool_now_us)" "$(pool_now_us)" "" \
+    [[ -f "$status" ]] || printf '98\t%s\t%s\t-\t-\t0.00\t%s\n' "$(pool_now_us)" "$(pool_now_us)" \
       "setsid/exec failed before ownership registration" >"$status"
     pool_slot_set "$s" "$pid" "$id" "$status" "$log" "$taskdir" "$token" ""
     return 0
@@ -308,7 +315,7 @@ pool_launch() {
   IFS=$'\t' read -r rpid rpgid rsid <"$taskdir/registry/root.pid"
   if [[ $rpid != "$pid" || -z $rpgid || $rpgid != "$pid" ]] ||
     [[ -n $rsid && $rsid != "$pid" ]] || [[ $rpgid == "$POOL_SELF_PGID" ]]; then
-    printf '98\t%s\t%s\t\t\t%s\t%s\n' "$(pool_now_us)" "$(pool_now_us)" "" \
+    printf '98\t%s\t%s\t-\t-\t0.00\t%s\n' "$(pool_now_us)" "$(pool_now_us)" \
       "ownership proof failed: launcher=$pid registry=$rpid pgid=$rpgid sid=$rsid" >"$status"
     # Fail closed: direct PID only, never an unproven group.
     kill -TERM "$pid" 2>/dev/null || true
@@ -338,8 +345,20 @@ pool_collect() {
   end=$(pool_now_us)
   user= sys= wall= note=
   if [[ -f $status ]]; then
-    IFS=$'\t' read -r rc start end user sys wall note <"$status"
+    # Tab is IFS whitespace, so `read` would collapse the empty placeholder
+    # columns and put the note in `user`. Swap tabs for a non-whitespace
+    # delimiter first; empty fields then keep their positions.
+    local line
+    line=$(cat "$status" 2>/dev/null)
+    line=${line//$'\t'/|}
+    IFS='|' read -r rc start end user sys wall note <<<"$line"
   fi
+  [[ $user == - ]] && user=
+  [[ $sys == - ]] && sys=
+  [[ $wall == - ]] && wall=
+  [[ $user =~ ^[0-9]+([.][0-9]+)?$ ]] || user=
+  [[ $sys =~ ^[0-9]+([.][0-9]+)?$ ]] || sys=
+  [[ $wall =~ ^[0-9]+([.][0-9]+)?$ ]] || wall=
   [[ $rc =~ ^[0-9]+$ ]] || rc=98
   ((cancelled)) && [[ $rc == 0 ]] && rc=143
   if [[ -z ${start:-} || -z ${end:-} ]] || ((end < start)); then
