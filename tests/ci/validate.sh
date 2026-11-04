@@ -321,11 +321,14 @@ fi
   export REMUDA_RUNTIME_DIR=/tmp/live-runtime
   export XDG_CACHE_HOME=/tmp/live-cache
   export REMUDA_BUTLER_LIVE_CODEX=1
+  unset POOL_ORIGINAL_CODEX_HOME
   export CODEX_HOME=/tmp/live-codex-home
   pool_sanitize_env
+  [[ $POOL_ORIGINAL_CODEX_HOME == /tmp/live-codex-home ]] || exit 1
   printf 'env\t1\tcmd\tenv\n' >"$tmp/env.tsv"
   POOL_CANCEL_REQUESTED=0
   pool_run "$tmp/env.tsv" 1 "$tmp/env-logs" "$tmp/env-tasks" "$tmp" "$REPO/tests/lib/pool_task.sh"
+  [[ $POOL_ORIGINAL_CODEX_HOME == /tmp/live-codex-home ]] || exit 1
 ) >"$tmp/env.out" 2>&1
 rc=$?
 [[ $rc == 0 ]] || fail "env isolation: pool exit $rc"

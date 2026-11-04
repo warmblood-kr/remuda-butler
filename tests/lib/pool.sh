@@ -40,17 +40,17 @@ pool_safe_id() {
 # before each task moves HOME.
 pool_sanitize_env() {
   local n
-  POOL_ORIGINAL_HOME=${HOME:-/tmp}
+  POOL_ORIGINAL_HOME=${POOL_ORIGINAL_HOME:-${HOME:-/tmp}}
   # Do not export CODEX_HOME globally: fixtures such as the coordination-config
-  # test require "no Codex layer". Capture the real login only for the opt-in
-  # live Codex task, which explicitly moves HOME.
-  POOL_ORIGINAL_CODEX_HOME=${CODEX_HOME:-}
-  if [[ -z $POOL_ORIGINAL_CODEX_HOME && -d $POOL_ORIGINAL_HOME/.codex ]]; then
-    POOL_ORIGINAL_CODEX_HOME="$POOL_ORIGINAL_HOME/.codex"
+  # test require "no Codex layer". Capture the real login once (a second call,
+  # after CODEX_HOME is unset, must not overwrite an explicit caller path) and
+  # pass it only to the opt-in live Codex task, which explicitly moves HOME.
+  if [[ -z ${POOL_ORIGINAL_CODEX_HOME:-} ]]; then
+    POOL_ORIGINAL_CODEX_HOME=${CODEX_HOME:-}
+    if [[ -z $POOL_ORIGINAL_CODEX_HOME && -d $POOL_ORIGINAL_HOME/.codex ]]; then
+      POOL_ORIGINAL_CODEX_HOME="$POOL_ORIGINAL_HOME/.codex"
+    fi
   fi
-  # An inherited CODEX_HOME would otherwise reach every task and make the
-  # coordination-config fixture see a Codex layer. Only the opt-in live Codex
-  # task gets it back, via env in pool_launch.
   unset CODEX_HOME
   for n in ${!REMUDA_BUTLER_@}; do
     [[ $n == REMUDA_BUTLER_LIVE_CODEX ]] && continue
