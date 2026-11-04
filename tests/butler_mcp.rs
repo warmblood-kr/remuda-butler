@@ -615,6 +615,33 @@ fn screen_of(path: &Path, session: &str, until: &str) -> String {
     }
 }
 
+/// Count raw transport writes of one exact notice to one recipient at the real
+/// seam the automatic-notice capability uses. The saved original is called with
+/// every argument and its returns and errors pass through unchanged, so product
+/// behavior is identical; only the observed call is counted.
+fn probe_notice_raw_sends(path: &Path, session: &str, text_prefix: &str) {
+    let code = format!(
+        "local originals = assert(remuda._butler_dialog_originals, 'dialogs not installed') \
+         local base = assert(originals.send, 'original send missing') \
+         remuda._notice_probe_count = 0 \
+         originals.send = function(name, text, ...) \
+           if name == {:?} and type(text) == 'string' and text:sub(1, {prefix_len}) == {:?} then \
+             remuda._notice_probe_count = remuda._notice_probe_count + 1 \
+           end \
+           return base(name, text, ...) \
+         end",
+        session,
+        text_prefix,
+        prefix_len = text_prefix.len()
+    );
+    eval(path, &code);
+}
+
+/// -1 means the probe was never installed, so a missing counter fails closed.
+fn notice_raw_sends(path: &Path) -> String {
+    eval(path, "return tostring(remuda._notice_probe_count or -1)")
+}
+
 /// Automatic notices coalesce per recipient and go out as one ordinary send
 /// through the real notice-only dialogs capability. No composer policy exists.
 #[test]
@@ -625,9 +652,17 @@ fn automatic_notices_coalesce_and_send_through_the_capability() {
     eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
     eval(
         &path,
-        "remuda._butler_agent_builders.fake = function() return {'sh', '-c', 'stty -echo; cat'} end; \
+        "remuda._butler_agent_builders.fake = function() return {'sh', '-c', \
+         'stty -echo || exit 1; printf __NOTICE_READY; cat'} end; \
          remuda._butler_launch('fake', 'm1')",
     );
+    // The PTY echoes typed input until the child's stty lands, which renders
+    // one write twice. Wait for the marker the child prints only after a
+    // successful stty -echo, so screen occurrences count sends, not echoes.
+    let ready = screen_of(&path, "m1", "__NOTICE_READY");
+    assert!(ready.contains("__NOTICE_READY"), "fake agent never disabled echo: {ready}");
+    probe_notice_raw_sends(&path, "m1", "3 new Butler messages");
+    assert_eq!(notice_raw_sends(&path), "0", "no notice may be written before mail");
     eval(&path, "remuda._butler_inbox('m1')"); // fixture Welcome mail never had a notice
     // Inject the notice clock: os.time has whole-second resolution, so a real
     // sleep cannot prove the quiet window deterministically.
@@ -639,11 +674,16 @@ fn automatic_notices_coalesce_and_send_through_the_capability() {
     eval(&path, "remuda._butler_deliver_notices()");
     assert!(!screen_of(&path, "m1", "").contains("new Butler messages"),
         "the quiet window must hold before its deadline");
+    assert_eq!(notice_raw_sends(&path), "0", "the quiet window must not write a notice");
 
     eval(&path, "remuda._notice_test_now = 2; remuda._butler_deliver_notices()");
     let screen = screen_of(&path, "m1", "3 new Butler messages");
-    assert_eq!(screen.matches("3 new Butler messages").count(), 1, "{screen}");
+    assert_eq!(screen.matches("3 new Butler messages").count(), 1,
+        "raw sends={} {screen}", notice_raw_sends(&path));
     assert!(!screen.contains("Butler message message-"), "{screen}");
+    // Exactly one raw transport write, not one observable screen copy: a real
+    // duplicate send fails here even if the screen shows a single copy.
+    assert_eq!(notice_raw_sends(&path), "1", "{screen}");
     let notices = "local n = 0 for _, s in pairs(remuda.schedules) do \
                    if s.name == 'butler-notices' then n = n + 1 end end return n";
     assert_eq!(eval(&path, notices), "1");
@@ -651,6 +691,45 @@ fn automatic_notices_coalesce_and_send_through_the_capability() {
     let unread = "local ids = remuda._butler_mail.mailbox(remuda._butler_bus.agents.m1.id); \
                   return tostring(remuda._butler_mail.is_unread(remuda._butler_bus.agents.m1.id, ids[#ids]))";
     assert_eq!(eval(&path, unread), "true", "the notice must not mark the mail read");
+    // Catch a delayed duplicate after the rest of the lifecycle ran.
+    assert_eq!(notice_raw_sends(&path), "1", "{screen}");
+}
+
+/// Negative control for the PTY echo race: an agent that explicitly enables
+/// ECHO shows one raw send twice (kernel echo plus cat's read). This proves the
+/// mechanism can produce two screen copies without a duplicate send; on its own
+/// it does not prove the historical CI failure took this path.
+#[test]
+fn a_pty_with_echo_on_can_show_one_notice_twice() {
+    let dir = scratch("notice-echo-control");
+    let path = daemon::socket_path_in(&dir, "s");
+    let _daemon = daemon_at(&path);
+    eval(&path, "remuda._butler_argv = {'sh'}; remuda.exec('butler')");
+    eval(
+        &path,
+        "remuda._butler_agent_builders.fake = function() return {'sh', '-c', \
+         'stty echo || exit 1; printf __ECHO_READY; cat'} end; \
+         remuda._butler_launch('fake', 'm1')",
+    );
+    let ready = screen_of(&path, "m1", "__ECHO_READY");
+    assert!(ready.contains("__ECHO_READY"), "echo control agent did not start: {ready}");
+    probe_notice_raw_sends(&path, "m1", "2 new Butler messages");
+    eval(&path, "remuda._butler_inbox('m1')");
+    eval(&path, "remuda._notice_test_now = 0; remuda._butler_notice_clock = function() return remuda._notice_test_now end");
+    for n in 1..=2 {
+        let sent = eval(&path, &format!("return remuda._butler_send('operator', 'm1', 'hi {n}')"));
+        assert!(sent.contains("queued"), "{sent}");
+    }
+    eval(&path, "remuda._notice_test_now = 2; remuda._butler_deliver_notices()");
+    let mut screen = screen_of(&path, "m1", "2 new Butler messages");
+    let deadline = Instant::now() + PATIENCE;
+    while screen.matches("2 new Butler messages").count() < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+        screen = eval(&path, "return remuda.capture('m1')");
+    }
+    assert_eq!(notice_raw_sends(&path), "1", "the control must send once: {screen}");
+    assert_eq!(screen.matches("2 new Butler messages").count(), 2,
+        "one send with echo on must render twice (kernel echo + cat): {screen}");
 }
 
 /// Matrix relay mail reaches the same mailbox deposit hook as other mail and

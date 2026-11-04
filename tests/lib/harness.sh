@@ -122,8 +122,9 @@ harness_cleanup() {
     echo "refusing cleanup outside the harness runtime" >&2
     return 1
   }
-  local name up=()
-  for name in "$H_CHILD_SERVER" "$H_SERVER"; do
+  local name up=() names=("$H_SERVER")
+  [[ ${REMUDA_LUA_NO_CHILD:-} == 1 ]] || names=("$H_CHILD_SERVER" "$H_SERVER")
+  for name in "${names[@]}"; do
     if [[ "$name" =~ ^h[0-9]+c?$ ]] && [[ "$name" == "h$$" || "$name" == "h$$c" ]]; then
       if "$REMUDA_BIN" -s "$name" stop -f >/dev/null 2>&1; then
         echo "harness: stop requested for daemon $name"
