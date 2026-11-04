@@ -519,23 +519,28 @@ remuda._butler_contribute("butler.guidance", "cli", { order = 20,
 remuda._butler_contribute("butler.guidance", "schedule", { order = 22,
   agents_md = function()
     return [[Use Butler's persistent schedule for recurring checks or delayed follow-ups
-that should survive a Claude/Codex/OpenCode/Monocle session or harness change. First check
-`remuda butler schedule list`. A schedule sends its fixed text as timed mail; it
-does not run a shell command or CI job by itself. Read the mail and perform the
-check it describes.
+that should survive a Claude/Codex/OpenCode/Monocle session or harness change.
+First check `remuda butler schedule list`. A schedule sends its fixed text as
+timed mail; it does not run a shell command or CI job by itself. Read the mail
+and perform the check it describes.
 
-Schedules repeat. For example, this asks the operator to check a build every 20
-minutes in the Butler session:
+Schedules repeat. You can add one for your own session and remove the schedules
+created by your current Butler identity:
 
-`remuda butler schedule add ci-watch "*/20 * * * *" "Check CI for PR #123 and report its status." --to butler`
+`remuda butler schedule add NAME "*/20 * * * *" "Check CI and report its status."`
 
-The time uses the machine's local time. `*/N` supports 5, 6, 10, 12, 15, 20 or
-30 minutes; `N` means that minute each hour; the hour is `N` or `*`. This is not
-a one-shot timer or a general cron runner. Schedules can be skipped if the
-target session is absent or still has unread mail from the previous firing.
-Adding and removing schedules require the owner at a terminal, so ask them to
-run `remuda butler schedule add ...` and confirm it with `remuda butler schedule
-list`. Name a different recipient with `--to SESSION`.
+Your session is the target and the command itself is the confirmation. Adding
+one starts standing mail from the reserved sender `schedule` at every due time,
+also after restarts, until you remove it with `remuda butler schedule rm NAME`.
+Ask the owner to add or remove a schedule for another session, or to manage
+schedules from the terminal; there the add asks for confirmation and
+`--to SESSION` names the target.
+
+The schedule has five fields in the machine's local time: the minute is `N` or
+`*/N` (steps 5, 6, 10, 12, 15, 20 or 30), the hour is `N` or `*`, then `* * *`.
+This is not a one-shot timer or a general cron runner. Schedules can be skipped
+if the target session is absent or still has unread mail from the previous
+firing.
 
 ]]
   end })
@@ -575,6 +580,47 @@ remuda._butler_contribute("butler.guidance", "delegation", { order = 40,
 NAME TASK...` when useful. Internal agent subagents are separate from Butler
 team members. `remuda butler send --from FROM TO MESSAGE...` is an operator form, not
 the normal way for a member to communicate.
+
+## Delegation: STICC
+
+When directing a member, explain the assignment using STICC, scaled to the task:
+
+- **Situation:** the relevant context and current state.
+- **Task:** the concrete work and expected deliverable.
+- **Intent:** the objective and why it matters.
+- **Concern:** constraints, risks, and known uncertainties.
+- **Calibrate:** ask the member to confirm their understanding, raise concerns,
+  and report progress or results so the plan can be adjusted.
+
+Give enough context for independent action without unnecessary ceremony. If you
+direct your own members, use STICC and tell them to propagate it.
+
+]]
+  end,
+  prompt = function()
+    return "When you direct your own members, explain the assignment using STICC "
+      .. "(Situation, Task, Intent, Concern, Calibrate) and tell them to propagate it. "
+  end })
+remuda._butler_contribute("butler.guidance", "prepared-text", { order = 60,
+  agents_md = function()
+    return [[
+
+## Prepared text for owner approval
+
+Use the `butler_approve_text` MCP tool or
+`remuda butler approve-text request SESSION -` with the exact text on stdin to
+register up to 8 KiB of normalized text for the owner to review in Matrix.
+Registration needs live Matrix sync and prepared-text approval on. The
+allowlisted owner approves or denies the posted request by reply or reaction;
+the terminal `remuda butler approve` does not approve prepared text. Register
+only the intended content and target, explain its purpose to the owner, and
+never treat a request as approval. The post shows the request's expiry (default
+30 minutes; the owner can configure `approval_ttl_minutes`). On approval Butler
+checks the target session and attempts to type the stored, normalized text
+once. `typed (seen)` is a screen observation, not proof that the agent acted;
+an uncertain outcome requires inspection before a new request. The owner
+controls the `approve-text on|off` switch at a terminal; `remuda butler doctor`
+reports it.
 ]]
   end })
 remuda._butler_contribute("butler.guidance", "leader", { order = 90,

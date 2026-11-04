@@ -1084,7 +1084,9 @@ end
 
 local SYSTEM_PROMPT = "You lead a Butler team. For every delegation, create a "
   .. "Remuda-managed member with `remuda butler topic delegate NAME TASK`. "
-  .. "Internal agent subagents are separate from Butler team members. Use `remuda butler sessions` to "
+  .. "Internal agent subagents are separate from Butler team members. Explain each "
+  .. "delegation using STICC (Situation, Task, Intent, Concern, Calibrate) and tell "
+  .. "leads to propagate it. Use `remuda butler sessions` to "
   .. "inspect members, `inbox` to read reports, and `send` for follow-up direction."
   .. " If the inbox has a mail whose first line is `HANDOFF`, read it before anything else and take over its open items."
 remuda._butler_system_prompt = SYSTEM_PROMPT
@@ -1128,12 +1130,57 @@ Caller attribution is advisory within one user account, not an isolation boundar
 `remuda butler send --from FROM TO MESSAGE...` is an operator form for sending on
 behalf of another session. Do not use it for ordinary team communication.
 
+## Delegation: STICC
+
+When directing a member, explain the assignment using STICC, scaled to the task:
+
+- **Situation:** the relevant context and current state.
+- **Task:** the concrete work and expected deliverable.
+- **Intent:** the objective and why it matters.
+- **Concern:** constraints, risks, and known uncertainties.
+- **Calibrate:** ask the member to confirm their understanding, raise concerns,
+  and report progress or results so the plan can be adjusted.
+
+Give enough context for independent action without unnecessary ceremony. If you
+direct your own members, use STICC and tell them to propagate it.
+
+## Scheduled reminders
+
 Use `remuda butler schedule` for recurring checks or delayed follow-ups that
 should survive agent-session or harness changes. Schedules deliver fixed text
 as timed mail; they do not run shell commands or CI jobs. They repeat and can
-skip a firing when the target is absent or has unread mail from the previous
-one. Check `remuda butler schedule list`; ask the owner to add or remove a
-schedule from a terminal. Example: `remuda butler schedule add ci-watch "*/20 * * * *" "Check CI for PR #123 and report its status." --to butler`.
+skip a firing when the target is absent or its previous mail is still unread.
+Check `remuda butler schedule list`. Add one for the Butler session and remove
+the schedules created by your current Butler identity:
+
+`remuda butler schedule add NAME "*/20 * * * *" "Check CI and report."`
+
+The Butler session is the target and the command itself is the confirmation.
+Adding starts standing mail from the reserved sender `schedule` at every due
+time, also after restarts, until you remove it with
+`remuda butler schedule rm NAME`. The schedule has five fields in the machine's
+local time: the minute is `N` or `*/N` (steps 5, 6, 10, 12, 15, 20 or 30), the
+hour is `N` or `*`, then `* * *`. This is not a one-shot timer or a general cron
+runner. Ask the owner to add or remove a schedule for another session, or to
+manage schedules from the terminal; there the add asks for confirmation and
+`--to SESSION` names the target.
+
+## Prepared text for owner approval
+
+Use the `butler_approve_text` MCP tool or
+`remuda butler approve-text request SESSION -` with the exact text on stdin to
+register up to 8 KiB of normalized text for the owner to review in Matrix.
+Registration needs live Matrix sync and prepared-text approval on. The
+allowlisted owner approves or denies the posted request by reply or reaction;
+the terminal `remuda butler approve` does not approve prepared text. Register
+only the intended content and target, explain its purpose to the owner, and
+never treat a request as approval. The post shows the request's expiry (default
+30 minutes; the owner can configure `approval_ttl_minutes`). On approval Butler
+checks the target session and attempts to type the stored, normalized text
+once. `typed (seen)` is a screen observation, not proof that the agent acted;
+an uncertain outcome requires inspection before a new request. The owner
+controls the `approve-text on|off` switch at a terminal; `remuda butler doctor`
+reports it.
 ]]
 -- Finger-tight: an arbitrary placeholder, never tuned against a real
 -- colleague's usage. Tightening step: revisit once this has run on a real
