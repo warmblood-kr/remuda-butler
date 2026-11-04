@@ -10,12 +10,19 @@ local exe = assert(os.getenv("REMUDA_BIN"), "REMUDA_BIN is required")
 local result_path = assert(os.getenv("REMUDA_LUA_RESULT"), "REMUDA_LUA_RESULT is required")
 local child_server = assert(os.getenv("REMUDA_LUA_CHILD_SERVER"), "child server is required")
 local controller_server = assert(os.getenv("REMUDA_LUA_SERVER"), "controller server is required")
+-- Explicit opt-in: a fresh controller/home, no child daemon. Every child
+-- helper below fails closed in this mode instead of silently reaching a
+-- shared or auto-started daemon.
+local no_child = os.getenv("REMUDA_LUA_NO_CHILD") == "1"
 
 local function quote(value)
   return string.format("%q", value)
 end
 
 local function remote(code)
+  if no_child then
+    error("child daemon is disabled in no-child mode", 2)
+  end
   local result = process.run {
     argv = { exe, "-s", child_server, "-e", code },
     timeout = 10,
@@ -27,6 +34,7 @@ local function remote(code)
 end
 
 local function screen_report()
+  if no_child then return "screen: (no-child mode)" end
   local parts = {}
   for name in pairs(sessions) do
     local ok, value = pcall(remote, "return remuda.capture(" .. quote(name) .. ")")
@@ -76,6 +84,7 @@ end
 
 -- Use the real MCP transport, addressed only to the disposable child daemon.
 function T.mcp_eval(code)
+  if no_child then error("child daemon is disabled in no-child mode", 2) end
   local result = process.run {
     argv = { exe, "-s", child_server, "mcp" }, timeout = 10,
     stdin = remuda_api.json.encode { jsonrpc = "2.0", id = 431, method = "tools/call",
@@ -88,6 +97,7 @@ function T.mcp_eval(code)
 end
 
 function T.mcp_call(name, arguments, capability)
+  if no_child then error("child daemon is disabled in no-child mode", 2) end
   arguments = arguments or {}
   if next(arguments) == nil then arguments = remuda_api.json.object(arguments) end
   local options = {
@@ -194,11 +204,16 @@ end
 local function save_result(status, message, left)
   local lines = { status, message or "" }
   for _, report in ipairs(reports) do lines[#lines + 1] = report end
-  lines[#lines + 1] = "harness: killed pids: 0; stopped child: " .. child_server .. "; left: " .. tostring(left or 0)
+  if no_child then
+    lines[#lines + 1] = "harness: child: disabled (no-child mode); left: " .. tostring(left or 0)
+  else
+    lines[#lines + 1] = "harness: killed pids: 0; stopped child: " .. child_server .. "; left: " .. tostring(left or 0)
+  end
   fs.write_atomic(result_path, table.concat(lines, "\n") .. "\n")
 end
 
 local function stop_child()
+  if no_child then return true end
   for name in pairs(sessions) do
     pcall(remote, "pcall(remuda.close, " .. quote(name) .. ")")
   end
@@ -232,6 +247,10 @@ local function finish(status, message)
 end
 
 local function begin_child()
+  if no_child then
+    assert(T.child_env == nil, "T.child_env is not available in no-child mode")
+    return true
+  end
   local child_env = T.child_env
   assert(child_env == nil or type(child_env) == "table", "T.child_env must be a table")
   if child_env then

@@ -4,6 +4,12 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      jobs:
+        description: "Shell pool workers (1 = serial)"
+        required: false
+        default: "12"
 
 permissions:
   contents: read
@@ -46,6 +52,24 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - id: core-ref
+        run: |
+          source tests/core_ref.sh
+          echo "ref=$CORE_REF" >> "$GITHUB_OUTPUT"
+      - id: core-key
+        run: |
+          source tests/ci/core_binary.sh
+          echo "key=$(core_binary_key)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/remuda-core-bin
+          key: remuda-core-${{ steps.core-key.outputs.key }}
+      - name: Resolve pinned core binary
+        run: |
+          source tests/ci/core_binary.sh
+          core_binary_resolve
+          echo "REMUDA_BIN=$REMUDA_BIN" >> "$GITHUB_ENV"
+          "$REMUDA_BIN" --version
       - run: tests/golden_guidance.sh
 
   shell:
@@ -53,12 +77,37 @@ jobs:
     # pinned core. None ran in CI before, so failures went unnoticed (#32).
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      SHELL_TESTS_JOBS: ${{ github.event.inputs.jobs || vars.SHELL_TESTS_JOBS || '12' }}
+      SHELL_TESTS_ARTIFACTS: ${{ runner.temp }}/shell-tests-artifacts
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - run: sudo apt-get update && sudo apt-get install --yes luajit
+      - run: sudo apt-get update && sudo apt-get install --yes luajit time
+      - id: core-key
+        run: |
+          source tests/ci/core_binary.sh
+          echo "key=$(core_binary_key)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/remuda-core-bin
+          key: remuda-core-${{ steps.core-key.outputs.key }}
+      - name: Resolve pinned core binary
+        run: |
+          source tests/ci/core_binary.sh
+          core_binary_resolve
+          echo "REMUDA_BIN=$REMUDA_BIN" >> "$GITHUB_ENV"
+          "$REMUDA_BIN" --version
+      - run: tests/ci/validate.sh
       - run: tests/shell_tests.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: shell-tests-${{ github.run_attempt }}
+          path: ${{ env.SHELL_TESTS_ARTIFACTS }}
+          if-no-files-found: ignore
+          retention-days: 7
 
   path-windows:
     # This job runs only the pure path tables; it does not boot the Butler harness.
