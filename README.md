@@ -156,3 +156,7 @@ XDG, and runtime directories, and never targets the default daemon. Teardown
 reports `left: 0`. Keep `tests/lib/harness.lua` free of `os.execute` and
 `io.popen`.
 Test files can set `T.child_env = { PWD = "/path/" }` before startup to customize the child daemon environment.
+
+Optional [cluster session display](docs/session-display.md) publishes bounded
+Butler hierarchy/model/context facts to upgraded local and remote viewers.
+It is disabled until explicitly enabled on the publishing node.

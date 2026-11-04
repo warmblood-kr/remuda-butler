@@ -171,6 +171,7 @@ return {
     end
   end,
   stop = function(state)
+    if host._butler_session_display then host._butler_session_display.stop() end
     if dialogs then dialogs.stop() end
     if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
     local matrix = host.butler and host.butler.matrix
@@ -197,6 +198,9 @@ return {
       end },
   },
   schedules = {
+    { name = "butler-session-display", every = 2, run = function()
+      if booted and host._butler_session_display then host._butler_session_display.tick() end
+    end },
     -- Commands-only loads boot nothing. A core that ignores `start` still
     -- boots an accepted exec/reload once through this compatibility timer.
     { name = "butler-start-fallback", every = 0.05, run = function()

@@ -1,3 +1,13 @@
+local function observed_at(path, payload, instance_id)
+  local file = path and io.open(path .. ".observed", "r")
+  if not file then return nil end
+  local value = file:read(513)
+  file:close()
+  if not value or #value > 512 then return nil end
+  local at, instance, recorded = value:match("^(%d+)\n([^\n]+)\n(.*)$")
+  if type(instance_id) ~= "string" or instance ~= instance_id or recorded ~= payload then return nil end
+  return tonumber(at)
+end
 local builders = assert(remuda._butler_agent_builders)
 local support = assert(remuda._butler_agent_support)
 local telemetry = assert(remuda._butler_telemetry_adapters)
@@ -27,7 +37,7 @@ telemetry.claude = {
     if not settings_path and _butler_session_trace then _butler_session_trace("settings_not_written", tostring(why)) end
     return { status_path = status_path, settings_path = settings_path, settings_error = why }
   end,
-  read = function(state)
+  read = function(state, instance_id)
     -- The hook-written `.state` file: "<word> <unix time>", one fixed word.
     local hook_state, hook_at
     local hook = state.status_path and io.open(state.status_path .. ".state", "r")
@@ -47,6 +57,7 @@ telemetry.claude = {
     )
     if not model then return { hook_state = hook_state, hook_at = hook_at } end
     return {
+      observed_at = observed_at(state.status_path, line, instance_id),
       hook_state = hook_state,
       hook_at = hook_at,
       model = model,

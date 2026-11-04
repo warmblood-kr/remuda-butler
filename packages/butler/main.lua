@@ -378,7 +378,11 @@ local function statusline(args, caller)
     path:sub(1, 1) == "/" or path:sub(1, 2) == "\\\\" or drive_rooted
   )
   if absolute and path:match("%.status$") and path == principal.status_path then
-    pcall(remuda.fs.write_atomic, path, line .. "\n" .. (limits and (limits .. "\n") or ""))
+    local ok, wrote = pcall(remuda.fs.write_atomic, path, line .. "\n" .. (limits and (limits .. "\n") or ""))
+    if ok and wrote and type(caller.instance_id) == "string" and caller.instance_id ~= "" then
+      pcall(remuda.fs.write_atomic, path .. ".observed",
+        tostring(os.time()) .. "\n" .. caller.instance_id .. "\n" .. line, { private = true })
+    end
   end
   return line
 end
@@ -615,6 +619,12 @@ remuda._butler_agent_support = {
 }
 remuda.exec("butler/sandbox")
 remuda.exec("butler/telemetry")
+remuda._butler_session_display_config = {
+  bus = bus,
+  enabled = function() return remuda._butler_publish_session_display == true end,
+}
+remuda.exec("butler/session_display")
+
 remuda.exec("butler/agents/claudecode")
 remuda.exec("butler/agents/codex")
 remuda.exec("butler/agents/opencode")
