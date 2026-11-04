@@ -450,6 +450,34 @@ fi
 ) && pass "cache: a live lock is not deleted; waiter fails bounded" ||
   fail "cache: a live lock was deleted or not failed bounded"
 
+# ----------------------------------------- cache two-waiter lifecycle
+# Two builders share one key. Each failure releases the lock exactly once via
+# the subshell trap; the second must acquire it and both must fail cleanly.
+(
+  source "$REPO/tests/ci/core_binary.sh"
+  source "$REPO/tests/core_ref.sh"
+  t=$(mktemp -d /tmp/ci-core-cache.XXXXXX)
+  trap 'rm -rf "$t"' EXIT
+  mkdir -p "$t/cache"
+  pids=()
+  for _ in 1 2; do
+    (
+      CORE_URL="$t/no-such-core" TMPDIR="$t" \
+        core_binary_build_and_publish "$t/cache" race "$t/cache/race" >/dev/null 2>&1
+    ) &
+    pids+=($!)
+  done
+  both_failed=1
+  for p in "${pids[@]}"; do
+    if wait "$p"; then both_failed=0; fi
+  done
+  [[ $both_failed == 1 ]] || exit 1
+  [[ ! -e "$t/remuda-core-cache-race.lock" ]] || exit 1
+  if compgen -G "$t/remuda-core-build.*" >/dev/null; then exit 1; fi
+  exit 0
+) && pass "cache: two waiters both fail and leave no lock/temp" ||
+  fail "cache: two-waiter lifecycle left a lock/temp or a success"
+
 if ((failures > 0)); then
   echo "pool validation FAILED: $failures check(s)" >&2
   exit 1

@@ -64,7 +64,9 @@ core_binary_validate() {
 }
 
 # Build and publish one cache entry. Runs in a subshell with an EXIT/INT/TERM
-# trap that removes only this build's temp tree, staging dir and lock. The lock
+# trap that removes only this build's temp tree, staging dir and lock. That trap
+# is the single lock-release owner; after it exits the parent only clears its
+# variables, so a waiter cannot lose a lock it acquired in between. The lock
 # holds the owner PID for diagnostics; a SIGKILL may leave it, and a waiter then
 # fails after a bounded wait with the lock path (the next job has a fresh
 # TMPDIR). It never deletes a lock it cannot prove dead, avoiding a stale-read
@@ -128,7 +130,8 @@ core_binary_build_and_publish() {
     CORE_BINARY_STAGE=
   )
   rc=$?
-  rm -rf "${CORE_BINARY_LOCK:-}" 2>/dev/null || true
+  # The build subshell's EXIT trap is the single owner of lock removal. Do not
+  # delete it again here: a waiter could acquire between the trap and this line.
   CORE_BINARY_LOCK= CORE_BINARY_TMP= CORE_BINARY_STAGE=
   return $rc
 }
