@@ -285,6 +285,46 @@ assert(oc_concurrent_why == "session_replaced_during_adopt",
 assert(oc_concurrent.bus.agents.m1.native.path == "/already/bound",
   "the newer OpenCode decision is not overwritten")
 
+-- 7c. An old projection (no row.id) adopts with the resolved canonical id.
+local oc_nil, _, oc_nil_calls = fixture({ outcome = "adopted", generation = "10" })
+oc_nil.bus.agents.m1.kind = "opencode"
+oc_nil.list = function()
+  return { { name = "m1", alive = true, instance_id = "instance-1" } }
+end
+oc_nil.identity = { resolve = function(row, options)
+  assert(type(options.rows) == "table" and type(options.list) == "function",
+    "adoption proves the pre fleet and re-lists after")
+  return "core-id-m1"
+end }
+local oc_nil_result = assert(adopt_module.opencode(oc_nil, "m1",
+  "http://127.0.0.1:4096", "ses_abc", "x"))
+assert(oc_nil_result.generation == "10", "the nil-id adoption succeeds")
+assert(oc_nil_calls.fields.session == "core-id-m1",
+  "the helper receives the resolved canonical id")
+assert(oc_nil.bus.agents.m1.native.row_id == "core-id-m1"
+  and oc_nil.bus.agents.m1.native.session_token == "core-id-m1",
+  "the binding stores the resolved id")
+assert(oc_nil.bus.agents.m1.native.session_token ~= "instance-1",
+  "the session is never the opaque instance id")
+
+-- 7d. A nil-id row replaced during the helper is still refused.
+local oc_nil_replaced = fixture({ outcome = "adopted", generation = "10" })
+oc_nil_replaced.bus.agents.m1.kind = "opencode"
+local oc_nil_calls = 0
+oc_nil_replaced.list = function()
+  oc_nil_calls = oc_nil_calls + 1
+  if oc_nil_calls == 1 then
+    return { { name = "m1", alive = true, instance_id = "instance-1" } }
+  end
+  return { { name = "m1", alive = true, instance_id = "instance-2" } }
+end
+oc_nil_replaced.identity = { resolve = function() return "core-id-m1" end }
+local _, oc_nil_replaced_why = adopt_module.opencode(oc_nil_replaced, "m1",
+  "http://127.0.0.1:4096", "ses_abc", "x")
+assert(oc_nil_replaced_why == "session_replaced_during_adopt",
+  "a nil-id replacement is refused after the helper")
+assert(oc_nil_replaced.bus.agents.m1.native == nil, "no half-binding for a nil id")
+
 -- 8. OpenCode CLI: endpoint and conversation on argv, password only on stdin.
 local oc_parsed = assert(cli.parse({ "adopt-opencode", "m1", "--endpoint",
   "http://127.0.0.1:4096", "--conversation", "ses_abc", "--password-stdin" }))
