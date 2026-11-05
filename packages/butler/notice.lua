@@ -1324,15 +1324,18 @@ local function native_immediate(session)
   return native ~= nil and native.mode == "native"
 end
 
--- Bounded publication detection, recommended by the core: check presence of
--- the private manifest path (open/close, never read its contents). A missing
--- file is not an event claim; it avoids spawning the helper until the core has
--- published. If the core has no presence seam, let the helper decide.
+-- Bounded publication detection using core metadata only. Never `io.open`
+-- (a FIFO could block) and never follow a symlink: a manifest is a regular
+-- private file. If the core has no metadata seam, let the helper decide.
 local function native_manifest_present(native)
-  local exists = remuda._butler_paths and remuda._butler_paths.file_exists
-  if type(exists) ~= "function" then return true end
-  local ok, present = pcall(exists, native.path)
-  return not ok or present == true
+  local fs = remuda.fs
+  if type(fs) ~= "table" or type(fs.realpath) ~= "function" then return true end
+  if type(fs.is_symlink) == "function" then
+    local linked, is_link = pcall(fs.is_symlink, native.path)
+    if linked and is_link == true then return false end
+  end
+  local ok, resolved = pcall(fs.realpath, native.path)
+  return not ok or resolved ~= nil
 end
 
 local function native_row(session, native)

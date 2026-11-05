@@ -324,16 +324,17 @@ queue()
 bus.agents.lead.native.kind = "codex"
 bus.agents.lead.native.awaiting_publication = true
 bus.agents.lead.native.awaiting_since = now
-remuda._butler_paths = { file_exists = function() return false end }
+remuda.fs = { is_symlink = function() return false end, realpath = function() return nil end }
 respond({ outcome = "accepted_queue" })
 now = now + 1
 remuda._butler_deliver_notices()
 assert(#spawns == 0 and bus.notices.lead ~= nil,
-  "a missing manifest is stat-checked without spawning the helper")
-remuda._butler_paths.file_exists = function() return true end
+  "a missing manifest is metadata-checked without spawning the helper")
+remuda.fs.realpath = function() return "/private/binding/manifest.json" end
 remuda._butler_deliver_notices()
 assert(#spawns == 1 and bus.notices.lead == nil,
   "the first tick after publication flushes the queued mail")
+remuda.fs = nil
 
 -- 5k. Presence suppression is bounded: after the startup window expires with
 -- the manifest still absent, the helper runs once and the binding disables
@@ -343,13 +344,33 @@ queue()
 bus.agents.lead.native.kind = "codex"
 bus.agents.lead.native.awaiting_publication = true
 bus.agents.lead.native.awaiting_since = now - 121
-remuda._butler_paths = { file_exists = function() return false end }
+remuda.fs = { is_symlink = function() return false end, realpath = function() return nil end }
 respond({ outcome = "definitely_not_written", reason = "binding_missing" })
 remuda._butler_deliver_notices()
 assert(#spawns == 1, "an expired window still attempts the helper once")
 assert(bus.agents.lead.native.mode == "disabled",
   "an expired missing manifest disables through the existing path")
 assert(bus.notices.lead ~= nil and pty_sends == 0, "mail is preserved, never PTY")
+remuda.fs = nil
+
+-- 5m. A symlink at the manifest path is refused without opening or following
+-- it; no helper runs inside the window and the mail stays queued.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda._butler_paths = { file_exists = function() error("must not open the manifest") end }
+remuda.fs = {
+  is_symlink = function() return true end,
+  realpath = function() error("must not follow the symlink") end,
+}
+respond({ outcome = "accepted_queue" })
+now = now + 1
+remuda._butler_deliver_notices()
+assert(#spawns == 0 and bus.notices.lead ~= nil,
+  "a symlink is nonblockingly refused and the mail stays queued")
+remuda.fs, remuda._butler_paths = nil, nil
 
 -- 5l. The same bounded expiry applies to the longer Claude window.
 reset()
@@ -358,13 +379,13 @@ bus.agents.lead.native.kind = "claude"
 bus.agents.lead.native.session_token = "lead"
 bus.agents.lead.native.awaiting_publication = true
 bus.agents.lead.native.awaiting_since = now - 1801
-remuda._butler_paths = { file_exists = function() return false end }
+remuda.fs = { is_symlink = function() return false end, realpath = function() return nil end }
 respond({ outcome = "definitely_not_written", reason = "binding_missing" })
 remuda._butler_deliver_notices()
 assert(#spawns == 1 and bus.agents.lead.native.mode == "disabled",
   "the Claude startup window also expires into the dead path")
 assert(bus.notices.lead ~= nil and pty_sends == 0, "Claude mail stays unread, never PTY")
-remuda._butler_paths = nil
+remuda.fs = nil
 
 -- 5g. The startup window is bounded per protocol; an expired fresh launch is
 -- treated as dead rather than parked forever.
