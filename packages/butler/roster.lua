@@ -34,6 +34,7 @@ function M.rows()
           and agent.native.path ~= "" and type(agent.native.nonce) == "string"
           and { path = agent.native.path, nonce = agent.native.nonce,
             kind = agent.native.kind, session = agent.native.row_id,
+            session_token = agent.native.session_token,
             generation = agent.native.generation,
             awaiting_publication = agent.native.awaiting_publication,
             awaiting_since = agent.native.awaiting_since } or nil,
@@ -123,6 +124,7 @@ function M.adopt(sessions)
           reason = current and nil or "missing_row_id",
           kind = row.native.kind, path = row.native.path, nonce = row.native.nonce,
           row_id = current, instance = row.instance_id,
+          session_token = row.native.session_token,
           generation = row.native.generation,
           awaiting_publication = row.native.awaiting_publication,
           awaiting_since = row.native.awaiting_since }

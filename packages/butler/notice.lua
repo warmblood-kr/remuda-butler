@@ -1053,6 +1053,7 @@ local function frozen_native_binding(native)
   if type(native) ~= "table" or native.mode ~= "native" then return nil end
   return { mode = "native", kind = native.kind, path = native.path, nonce = native.nonce,
     row_id = native.row_id, instance = native.instance,
+    session_token = native.session_token,
     awaiting_publication = native.awaiting_publication,
     awaiting_since = native.awaiting_since }
 end
@@ -1061,7 +1062,7 @@ local function same_native_binding(left, right)
   return type(left) == "table" and type(right) == "table"
     and left.path == right.path and left.nonce == right.nonce
     and left.row_id == right.row_id and left.instance == right.instance
-    and left.kind == right.kind
+    and left.kind == right.kind and left.session_token == right.session_token
 end
 
 -- A dead result belongs to the binding that was dispatched. The reservation
@@ -1368,7 +1369,7 @@ local function native_request(native, text, ids, request_id)
     return nil, nil, "native_not_written: request_id_unavailable"
   end
   local request, why = dispatch.build({ binding = native.path, nonce = native.nonce,
-    session = native.row_id, instance = native.instance,
+    session = native.session_token or native.row_id, instance = native.instance,
     request_id = request_id, text = text, message_ids = ids })
   if not request then
     -- A broken binding target disables the session; anything else is a local

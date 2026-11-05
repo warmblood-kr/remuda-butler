@@ -67,10 +67,12 @@ local claude_plan = claude.plan("lead", "claude")
 assert(claude_plan.mode == "native" and claude_plan.kind == "claude",
   "the explicit Claude opt-in selects the channel binding")
 assert(claude_calls.probe == 0, "Claude never probes the OpenCode wrapper")
-assert(claude.env(claude_plan).REMUDA_BUTLER_BINDING_DIR == claude_plan.binding_dir,
-  "the channel entry gets only the private binding directory")
-assert(claude.env(claude_plan).REMUDA_BUTLER_BINDING_NONCE == claude_plan.nonce,
-  "the channel entry keeps the nonce correlation")
+assert(claude_plan.binding:find("/channel.json", 1, true) ~= nil,
+  "the Claude helper binding is channel.json")
+assert(claude_plan.name == "lead" and claude_plan.binding_dir ~= nil,
+  "the channel entry knows its alias and private directory")
+assert(next(claude.env(claude_plan)) == nil,
+  "the Claude member env carries no channel secret or path")
 
 -- 1c. A core without the private-dir seam is PTY, never a crash.
 local no_fs = module.new({
@@ -123,8 +125,12 @@ assert(failed_plan.mode == "pty" and failed_plan.reason:find("binding_failed", 1
 -- never falls back to PTY.
 local native = module.join(plan, { id = "ses_abc", instance_id = "instance-1" }, "instance-1")
 assert(native.mode == "native" and native.row_id == "ses_abc"
-  and native.instance == "instance-1" and native.path == plan.binding,
+  and native.instance == "instance-1" and native.path == plan.binding
+  and native.session_token == "ses_abc",
   "join uses the live row id and instance")
+local claude_native = module.join(claude_plan, { id = "ses_claude", instance_id = "instance-2" }, "instance-2")
+assert(claude_native.mode == "native" and claude_native.session_token == "lead"
+  and claude_native.row_id == "ses_claude", "Claude binds the stable alias as its session token")
 local no_id = module.join(plan, { instance_id = "instance-1" }, "instance-1")
 assert(no_id.mode == "disabled" and no_id.reason == "missing_row_identity",
   "missing row id disables, never PTY")

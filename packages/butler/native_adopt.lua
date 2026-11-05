@@ -52,7 +52,7 @@ function M.codex(self, name, socket, thread)
     return nil, "missing_row_identity"
   end
   local identity = { id = row.id, instance = row.instance_id }
-  local binding, nonce, why = self.launch.prepare(name)
+  local binding, nonce, why = self.launch.prepare(name, "codex")
   if not binding then return nil, "binding_failed: " .. tostring(why) end
   local result = self.codex.adopt({ binding = binding, nonce = nonce,
     session = row.id, socket = socket, thread = thread },

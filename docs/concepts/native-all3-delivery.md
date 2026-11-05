@@ -41,13 +41,14 @@ binding. Never kill an adopted server or the shared per-uid daemon dir.
 
 ## Claude channel
 
-Explicit `claude.enabled` adds a second `remuda-channel` MCP entry to the
+Explicit `claude.enabled` adds a second `remuda-channel` MCP entry
+(`args:["_claude_channel"]`, env binding dir, nonce, alias session) to the
 member's private 0600 config plus
 `--dangerously-load-development-channels server:remuda-channel`. Consent stays
-human; nothing auto-answers it. The ordinary `remuda` entry and argv are
-unchanged. Unopted Claude stays PTY/unavailable.
-The channel publishes `claude-channel-v1` only after `mcp_initialized`; an ACK
-is never `accepted_queue`, and possible emission is `uncertain
+human. The ordinary entry/argv are unchanged; unopted Claude stays
+PTY/unavailable. The channel publishes `<dir>/channel.json`
+(`claude-channel-v1`) only after `mcp_initialized`; an ACK is never
+`accepted_queue`, and possible emission is `uncertain
 (channel_emitted_unconfirmed)`.
 
 ## Immediate native timing
@@ -92,8 +93,8 @@ honest latency limit, not an event-driven guarantee.
 
 ## Status
 
-`remuda butler sessions` gains a read-only `NATIVE` section (alias, kind,
-state, reason, generation prefix); no path, nonce, socket, thread or token.
+`remuda butler sessions` gains a read-only `NATIVE` section; no path, nonce,
+socket, thread or token.
 
 ## Limits
 

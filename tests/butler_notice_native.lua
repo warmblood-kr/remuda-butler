@@ -328,6 +328,22 @@ respond({ outcome = "definitely_not_written", reason = "binding_missing" })
 assert(N.deliver_notice("lead") == false, "an expired startup window refuses")
 assert(bus.agents.lead.native.mode == "disabled", "no indefinite startup waiting")
 
+-- 5i. Claude uses its own verb and stable alias token, and possible emission
+-- is final uncertain: no retry, no disable, no PTY.
+reset()
+queue()
+bus.agents.lead.native.kind = "claude"
+bus.agents.lead.native.session_token = "lead"
+respond({ outcome = "uncertain", reason = "channel_emitted_unconfirmed" })
+assert(N.deliver_notice("lead") == false, "possible Claude emission is uncertain")
+assert(spawns[1].argv[2] == "_claude_notice", "Claude uses only _claude_notice")
+local claude_sent = codec.decode(spawns[1].stdin)
+assert(claude_sent.session == "lead", "Claude request carries the stable alias token")
+assert(bus.agents.lead.native.mode == "native", "uncertainty never disables Claude")
+assert(pty_sends == 0, "Claude uncertainty never falls back to PTY")
+assert(remuda._butler_delivery_journal.state_of("lead-id", "n1") == "uncertain",
+  "the Claude attempt is durably uncertain")
+
 -- 6a. A native arrival is dispatched in the notify call itself: no quiet or
 -- cap timer, no PTY, and a pending first task or attached pane does not hold
 -- it back.

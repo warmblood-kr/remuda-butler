@@ -9,6 +9,10 @@
 local M = {}
 
 local NONCE_BYTES = 16
+-- The core owns each protocol's strict manifest name. Butler only passes the
+-- expected file path; Claude uses channel.json, OpenCode/Codex manifest.json.
+local MANIFEST_FILE = { opencode = "manifest.json", codex = "manifest.json",
+  claude = "channel.json" }
 
 local function hex(bytes)
   if type(bytes) ~= "string" or bytes == "" then return nil end
@@ -72,7 +76,7 @@ function M.new(options)
   self.read_config = function(path) return self.read(path) end
   self.enabled = function() return enabled(self) end
   self.capability = function() return capability(self) end
-  self.prepare = function(name) return M.prepare(self, name) end
+  self.prepare = function(name, kind) return M.prepare(self, name, kind) end
   self.plan = function(name, kind) return M.plan(self, name, kind) end
   self.env = function(plan) return M.env(plan) end
   self.join = function(plan, row, instance) return M.join(plan, row, instance) end
@@ -130,7 +134,7 @@ end
 -- Private nonce dir: mkdir_new for each level (0700), nonce hex of the core
 -- CSPRNG. The wrapper gets `<dir>/manifest.json` and creates that file itself.
 -- A failed create is a pre-launch condition, reported explicitly.
-function M.prepare(self, name)
+function M.prepare(self, name, kind)
   local ok_name, name_err = valid_name(self.paths, name)
   if not ok_name then return nil, nil, name_err end
   local named, dir_err = private_dirs(self, name)
@@ -144,7 +148,7 @@ function M.prepare(self, name)
   end
   -- The wrapper contract takes the manifest FILE path and creates it in the
   -- parent: never hand it the owned nonce directory.
-  return binding_dir .. "/manifest.json", nonce
+  return binding_dir .. "/" .. (MANIFEST_FILE[kind or "opencode"] or "manifest.json"), nonce
 end
 
 -- One decision per NEW launch. Only a completely enabled+capable+prepared
@@ -163,22 +167,18 @@ function M.plan(self, name, kind)
     local capable, capability_reason = self.capability()
     if not capable then return { mode = "pty", reason = capability_reason } end
   end
-  local binding, nonce, why = self.prepare(name)
+  local binding, nonce, why = self.prepare(name, kind)
   if not binding then return { mode = "pty", reason = "binding_failed: " .. tostring(why) } end
   local directory = binding:match("^(.*)/[^/]+$") or binding
-  return { mode = "native", kind = kind, binding = binding, binding_dir = directory,
-    nonce = nonce, created_at = os.time() }
+  return { mode = "native", kind = kind, name = name, binding = binding,
+    binding_dir = directory, nonce = nonce, created_at = os.time() }
 end
 
--- OpenCode's wrapper reads only the nonce. The Claude channel MCP entry also
--- needs the private directory it must publish in; neither gets a token.
+-- OpenCode's wrapper reads only the nonce. The Claude channel gets its own
+-- directory and session token in the second MCP entry, not the member env.
 function M.env(plan)
-  if not plan or plan.mode ~= "native" then return {} end
-  local env = { REMUDA_BUTLER_BINDING_NONCE = plan.nonce }
-  if plan.kind == "claude" and plan.binding_dir then
-    env.REMUDA_BUTLER_BINDING_DIR = plan.binding_dir
-  end
-  return env
+  if not plan or plan.mode ~= "native" or plan.kind == "claude" then return {} end
+  return { REMUDA_BUTLER_BINDING_NONCE = plan.nonce }
 end
 
 -- Join the live row to the launch decision. Missing or mismatched identity
@@ -201,6 +201,10 @@ function M.join(plan, row, instance)
   end
   return { mode = "native", kind = plan.kind or "opencode", path = plan.binding,
     nonce = plan.nonce, row_id = row.id, instance = instance,
+    -- Claude's channel writes its manifest before the core row id exists, so
+    -- its non-secret session token is the stable alias. Other protocols use
+    -- the live row id.
+    session_token = plan.kind == "claude" and plan.name or row.id,
     -- A launch we just created may race manifest/MCP publication. Only this
     -- fresh binding may park on `binding_missing`; an adopted/reloaded binding
     -- treats a missing manifest as dead.
