@@ -353,8 +353,8 @@ assert(bus.agents.lead.native.mode == "disabled",
 assert(bus.notices.lead ~= nil and pty_sends == 0, "mail is preserved, never PTY")
 remuda.fs = nil
 
--- 5m. A symlink at the manifest path is refused without opening or following
--- it; no helper runs inside the window and the mail stays queued.
+-- 5m. A symlink at the manifest path is not definite absence: the helper, not
+-- the metadata precheck, classifies it. No io.open/FIFO path is used.
 reset()
 queue()
 bus.agents.lead.native.kind = "codex"
@@ -363,14 +363,28 @@ bus.agents.lead.native.awaiting_since = now
 remuda._butler_paths = { file_exists = function() error("must not open the manifest") end }
 remuda.fs = {
   is_symlink = function() return true end,
-  realpath = function() error("must not follow the symlink") end,
+  realpath = function() error("the precheck must not resolve a link") end,
 }
-respond({ outcome = "accepted_queue" })
+respond({ outcome = "definitely_not_written", reason = "invalid_binding" })
 now = now + 1
 remuda._butler_deliver_notices()
-assert(#spawns == 0 and bus.notices.lead ~= nil,
-  "a symlink is nonblockingly refused and the mail stays queued")
+assert(#spawns == 1 and bus.agents.lead.native.mode == "disabled",
+  "a symlink is handed to the strict helper and classified, not parked")
+assert(pty_sends == 0, "a corrupt manifest never falls back to PTY")
 remuda.fs, remuda._butler_paths = nil, nil
+
+-- 5n. A metadata error is not definite absence either: the helper decides.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { realpath = function() error("metadata denied") end }
+respond({ outcome = "definitely_not_written", reason = "invalid_binding" })
+now = now + 1
+remuda._butler_deliver_notices()
+assert(#spawns == 1, "a metadata error lets the helper classify the binding")
+remuda.fs = nil
 
 -- 5l. The same bounded expiry applies to the longer Claude window.
 reset()

@@ -1324,15 +1324,17 @@ local function native_immediate(session)
   return native ~= nil and native.mode == "native"
 end
 
--- Bounded publication detection using core metadata only. Never `io.open`
--- (a FIFO could block) and never follow a symlink: a manifest is a regular
--- private file. If the core has no metadata seam, let the helper decide.
+-- Bounded publication detection using core metadata only, never `io.open`
+-- (a FIFO could block). This is a precheck, not authority: only definite
+-- absence is suppressed. A symlink or a metadata error goes to the helper,
+-- whose strict nofollow/fingerprint validation classifies it. If the core has
+-- no metadata seam, let the helper decide.
 local function native_manifest_present(native)
   local fs = remuda.fs
   if type(fs) ~= "table" or type(fs.realpath) ~= "function" then return true end
   if type(fs.is_symlink) == "function" then
     local linked, is_link = pcall(fs.is_symlink, native.path)
-    if linked and is_link == true then return false end
+    if linked and is_link == true then return true end
   end
   local ok, resolved = pcall(fs.realpath, native.path)
   return not ok or resolved ~= nil

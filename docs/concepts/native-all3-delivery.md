@@ -89,8 +89,8 @@ The explicit entrypoint is `remuda._butler_notice.native_publication(alias)`;
 launch completion and successful adoption call it to flush queued unreserved
 mail. No core publication callback exists, so a publication after launch and
 outside a Butler-visible step uses a bounded tick (~1s) that checks the
-manifest with core metadata (no open, no symlink follow) before spawning: an
-honest limit, not an event claim.
+manifest with core metadata (no open; the helper is authority) before
+spawning: an honest limit, not an event claim.
 
 ## Status
 
