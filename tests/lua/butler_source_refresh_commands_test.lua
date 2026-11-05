@@ -55,3 +55,29 @@ T.test("both sides of the resume capability boundary refuse before replacement",
   ]])
   T.eq(result, "deferred")
 end)
+
+T.test("source refresh waits for native publication work", function()
+  T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
+  T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1; remuda.exec("butler")')
+  T.wait_until(function()
+    return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil') == "true"
+  end, 5, "root start")
+  local result = T.eval([[
+    local path = os.getenv("XDG_DATA_HOME") .. "/remuda/mods/butler/packages/butler/commands.lua"
+    local file = assert(io.open(path, "a")); file:write("\n-- native refresh guard edit\n"); file:close()
+    local function attempt()
+      local ok, err = pcall(remuda._load_extension_command, "butler", "butler", true)
+      return tostring(ok) .. "|" .. tostring(err)
+    end
+    remuda._butler_bus.notice_native_watchers = { lead = {} }
+    local watcher = attempt()
+    remuda._butler_bus.notice_native_watchers = nil
+    remuda._butler_bus.notice_native_dispatching = { lead = true }
+    local dispatching = attempt()
+    remuda._butler_bus.notice_native_dispatching = nil
+    return watcher .. "\n" .. dispatching
+  ]])
+  T.expect(result:find("false|", 1, true) ~= nil and
+    result:find("native publication is waiting", 1, true) ~= nil, result)
+  T.expect(result:find("native delivery is in flight", 1, true) ~= nil, result)
+end)
