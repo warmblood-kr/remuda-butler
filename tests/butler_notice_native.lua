@@ -384,6 +384,21 @@ respond({ outcome = "definitely_not_written", reason = "invalid_binding" })
 now = now + 1
 remuda._butler_deliver_notices()
 assert(#spawns == 1, "a metadata error lets the helper classify the binding")
+
+-- 5o. A link-check error is also helper-decides, not definite absence.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = {
+  is_symlink = function() error("link check denied") end,
+  realpath = function() return nil end,
+}
+respond({ outcome = "definitely_not_written", reason = "invalid_binding" })
+now = now + 1
+remuda._butler_deliver_notices()
+assert(#spawns == 1, "a link-check error lets the helper classify the binding")
 remuda.fs = nil
 
 -- 5l. The same bounded expiry applies to the longer Claude window.

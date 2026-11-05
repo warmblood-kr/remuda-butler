@@ -1333,8 +1333,8 @@ local function native_manifest_present(native)
   local fs = remuda.fs
   if type(fs) ~= "table" or type(fs.realpath) ~= "function" then return true end
   if type(fs.is_symlink) == "function" then
-    local linked, is_link = pcall(fs.is_symlink, native.path)
-    if linked and is_link == true then return true end
+    local checked, is_link = pcall(fs.is_symlink, native.path)
+    if not checked or is_link == true then return true end
   end
   local ok, resolved = pcall(fs.realpath, native.path)
   return not ok or resolved ~= nil
