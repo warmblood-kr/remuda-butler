@@ -1359,7 +1359,8 @@ local function native_manifest_present(native)
   return reason ~= "not_found"
 end
 
-local function native_row(session, native)
+local function native_row(session, native, options)
+  options = options or {}
   local row = {}
   local listed, rows = pcall(remuda.ls)
   -- A listing failure wrote nothing and says nothing about the binding, so it
@@ -1369,12 +1370,40 @@ local function native_row(session, native)
     if candidate.name == session then row = candidate end
   end
   if not row.name or not row.alive then return nil, "session_not_live" end
-  if type(native.row_id) ~= "string" or row.id ~= native.row_id then
+  if type(native.row_id) ~= "string" or native.row_id == "" then
     return nil, "target_missing"
   end
   if type(native.instance) ~= "string" or row.instance_id ~= native.instance then
     return nil, "stale_binding"
   end
+  if type(row.id) == "string" and row.id ~= "" then
+    if row.id ~= native.row_id then return nil, "target_missing" end
+    return row
+  end
+  -- The liveness watcher only needs the exact live instance; a real dispatch
+  -- does the full same-fleet proof below on every attempt.
+  if options.liveness_only then return row end
+  local identity = remuda._butler_native_identity
+  if not identity or type(identity.resolve) ~= "function" then
+    return nil, "target_missing"
+  end
+  local agent = bus.agents[session]
+  local module = NOTICE_MODULE
+  local id = identity.resolve(row, { rows = rows, list = remuda.ls,
+    runner = remuda.process and remuda.process.run, json = remuda.json,
+    remuda = "remuda" })
+  -- The lookup yields in a client; a replaced agent, module image or native
+  -- decision must never authorize the stale binding. `native` is the frozen
+  -- decision, so compare the exact binding fields with the live one.
+  local live_native = type(agent) == "table" and agent.native or nil
+  if bus.agents[session] ~= agent or remuda._butler_notice ~= module
+      or type(live_native) ~= "table" or live_native.mode ~= "native"
+      or not same_native_binding(frozen_native_binding(live_native),
+        frozen_native_binding(native)) then
+    return nil, "session_unverified"
+  end
+  if not id then return nil, "target_missing" end
+  if id ~= native.row_id then return nil, "stale_binding" end
   return row
 end
 local DEAD_BUILD_REASONS = { invalid_binding = true, invalid_nonce = true,
@@ -1737,7 +1766,7 @@ arm_native_watcher = function(session, native)
     -- proof of death; let the helper's own preflight decide.
     local checks = (previous or 0) + 1
     if checks == 1 or checks % 20 == 0 then
-      local row, row_why = native_row(session, live)
+      local row, row_why = native_row(session, live, { liveness_only = true })
       if not row and row_why ~= "session_unverified" then return end
     end
     if not native_manifest_present(live) then

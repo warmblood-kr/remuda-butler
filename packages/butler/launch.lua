@@ -305,15 +305,78 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   local selected_native = native_plans[kind]
   if selected_native and selected_native.mode == "native"
       and (kind == "opencode" or kind == "claude" or kind == "codex") then
-    local live_row
-    for _, row in ipairs(remuda.ls()) do
+    local live_rows, live_row = {}, nil
+    local listed, rows = pcall(remuda.ls)
+    if listed and type(rows) == "table" then live_rows = rows end
+    for _, row in ipairs(live_rows) do
       if row.name == actual then live_row = row end
     end
-    bus.agents[actual].native = remuda._butler_native_launch.join(selected_native, live_row, instance_id)
-    if bus.agents[actual].native.mode ~= "native" then
-      _butler_session_trace("native_launch_join", actual .. " mode="
-        .. tostring(bus.agents[actual].native.mode) .. " reason="
-        .. tostring(bus.agents[actual].native.reason))
+    local resolve
+    local native_identity = remuda._butler_native_identity
+    if native_identity and type(native_identity.resolve) == "function" and live_row then
+      resolve = function(target)
+        return native_identity.resolve(target, { rows = live_rows,
+          list = remuda.ls, runner = remuda.process and remuda.process.run,
+          json = remuda.json, remuda = "remuda" })
+      end
+    end
+    -- The resolver may yield in the official lookup. Fence the exact agent,
+    -- launcher image and native decision after it and never assign a stale
+    -- join over a fresh one.
+    local agent = bus.agents[actual]
+    local before_native = agent.native
+    local launcher = remuda._butler_native_launch
+    local stale = false
+    local function verify_join()
+      stale = bus.agents[actual] ~= agent
+        or remuda._butler_native_launch ~= launcher
+        or agent.native ~= before_native
+      return not stale
+    end
+    local joined = launcher.join(selected_native, live_row, instance_id, resolve, verify_join)
+    if stale or bus.agents[actual] ~= agent
+        or remuda._butler_native_launch ~= launcher
+        or agent.native ~= before_native then
+      _butler_session_trace("native_launch_join", actual .. " mode=stale reason=launch_replaced")
+      -- Abort the whole launch: never append to the parent, migrate mail,
+      -- touch the roster, queue a first task into or type into a replacement.
+      -- The original task is kept as durable mail in the parent's inbox only
+      -- when the write really succeeded; otherwise report the typed failure.
+      local kept, keep_error = false, nil
+      if task and task ~= "" then
+        -- The aborted member identity is never reused on relaunch, so keep the
+        -- task in the parent's inbox where it can actually be resent.
+        local queued, saved, save_error = pcall(queue_message,
+          { host = "local", alias = name, session = name, kind = selected_kind },
+          mail_address(parent or "butler"), task,
+          "Undelivered initial task for " .. tostring(name))
+        kept = queued and type(saved) == "table" and saved.id ~= nil
+        if not kept then keep_error = tostring(save_error or saved) end
+      end
+      local report = name
+        .. ": the native identity lookup finished after this launch was replaced."
+        .. " The session was left untouched."
+      if task and task ~= "" then
+        if kept then
+          report = report .. " The initial task was saved to your inbox; resend it after relaunch."
+        else
+          report = report .. " The initial task could NOT be saved ("
+            .. tostring(keep_error or "unknown error") .. "); resend it after relaunch."
+        end
+      end
+      report = report .. " Next: relaunch " .. name .. " when the fleet is stable."
+      pcall(remuda._butler_send, "butler", parent or "butler", report)
+      bus.launch_failures = bus.launch_failures or {}
+      bus.launch_failures[actual] = { attempts = attempts or {},
+        error = "launch replaced during native identity lookup" }
+      return nil
+    else
+      agent.native = joined
+      if agent.native.mode ~= "native" then
+        _butler_session_trace("native_launch_join", actual .. " mode="
+          .. tostring(agent.native.mode) .. " reason="
+          .. tostring(agent.native.reason))
+      end
     end
   end
   if parent and bus.agents[parent] then

@@ -147,6 +147,31 @@ assert(claude_native.mode == "native" and claude_native.session_token == "ses_cl
   and claude_native.row_id == "ses_claude" and claude_plan.name == "lead"
   and claude_native.session_token ~= claude_plan.name,
   "Claude also uses the actual row id, never the matching alias")
+-- 4b. The official id lookup yields; a replaced agent/module/decision makes
+-- the join stale instead of installing a binding over a fresh one.
+local old_row = { name = "lead", instance_id = "instance-1", alive = true }
+local resolved = module.join(plan, old_row, "instance-1",
+  function() return "core-id-lead" end, function() return true end)
+assert(resolved.mode == "native" and resolved.row_id == "core-id-lead",
+  "a verified lookup resolves the canonical id")
+local stale = module.join(plan, old_row, "instance-1",
+  function() return "core-id-lead" end, function() return false end)
+assert(stale.mode == "stale" and stale.reason == "launch_replaced",
+  "an unverified post-yield join is refused")
+-- launch.lua calls the installed instance seam, so it must forward the
+-- resolver and fence; dropping them would silently disable the old-daemon path.
+local instance_resolved = on.join(plan, old_row, "instance-1",
+  function() return "core-id-lead" end, function() return true end)
+assert(instance_resolved.mode == "native" and instance_resolved.row_id == "core-id-lead",
+  "the instance join forwards the identity resolver")
+local instance_stale = on.join(plan, old_row, "instance-1",
+  function() return "core-id-lead" end, function() return false end)
+assert(instance_stale.mode == "stale" and instance_stale.reason == "launch_replaced",
+  "the instance join forwards the stale fence")
+local no_resolver = module.join(plan, old_row, "instance-1")
+assert(no_resolver.mode == "disabled" and no_resolver.reason == "missing_row_identity",
+  "no resolver and no id stays disabled")
+
 local no_id = module.join(plan, { instance_id = "instance-1" }, "instance-1")
 assert(no_id.mode == "disabled" and no_id.reason == "missing_row_identity",
   "missing row id disables, never PTY")

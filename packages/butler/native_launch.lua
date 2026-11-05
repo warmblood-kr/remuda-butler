@@ -103,7 +103,9 @@ function M.new(options)
   self.prepare = function(name, kind) return M.prepare(self, name, kind) end
   self.plan = function(name, kind) return M.plan(self, name, kind) end
   self.env = function(plan) return M.env(plan) end
-  self.join = function(plan, row, instance) return M.join(plan, row, instance) end
+  self.join = function(plan, row, instance, resolve, verify)
+    return M.join(plan, row, instance, resolve, verify)
+  end
   self.disable = function(agent, reason) return M.disable(agent, reason) end
   return self
 end
@@ -212,14 +214,13 @@ end
 -- Join the live row to the launch decision. Missing or mismatched identity
 -- never falls back to PTY: the session stays bound/disabled so a later notice
 -- can alert, and the binding still belongs to this exact instance.
-function M.join(plan, row, instance)
+function M.join(plan, row, instance, resolve, verify)
   if not plan or plan.mode ~= "native" then return { mode = "pty" } end
   if type(instance) ~= "string" or instance == "" then
     return { mode = "disabled", reason = "missing_instance_identity",
       path = plan.binding, nonce = plan.nonce }
   end
-  if type(row) ~= "table" or type(row.id) ~= "string" or row.id == ""
-      or type(row.instance_id) ~= "string" or row.instance_id == "" then
+  if type(row) ~= "table" or type(row.instance_id) ~= "string" or row.instance_id == "" then
     return { mode = "disabled", reason = "missing_row_identity",
       path = plan.binding, nonce = plan.nonce }
   end
@@ -227,12 +228,31 @@ function M.join(plan, row, instance)
     return { mode = "disabled", reason = "instance_mismatch",
       path = plan.binding, nonce = plan.nonce }
   end
+  -- New cores expose row.id directly. An old Lua projection drops it while the
+  -- daemon wire still has it; the injected resolver returns that canonical id
+  -- only after proving the same daemon, and returns nil on any doubt.
+  local row_id = row.id
+  if type(row_id) ~= "string" or row_id == "" then
+    if type(resolve) == "function" and type(row.name) == "string" and row.name ~= "" then
+      row_id = resolve(row)
+      -- The official lookup yields. A replaced agent, a fresh native decision
+      -- or a reloaded launcher must never accept this stale join.
+      if type(verify) == "function" and verify() ~= true then
+        return { mode = "stale", reason = "launch_replaced",
+          path = plan.binding, nonce = plan.nonce }
+      end
+    end
+  end
+  if type(row_id) ~= "string" or row_id == "" then
+    return { mode = "disabled", reason = "missing_row_identity",
+      path = plan.binding, nonce = plan.nonce }
+  end
   return { mode = "native", kind = plan.kind or "opencode", path = plan.binding,
-    nonce = plan.nonce, row_id = row.id, instance = instance,
+    nonce = plan.nonce, row_id = row_id, instance = instance,
     -- Request1 session is the actual core row id for every protocol,
     -- including Claude. The alias is a human label only; the child inherits
     -- the core-assigned REMUDA_SESSION_ID at spawn.
-    session_token = row.id,
+    session_token = row_id,
     -- A launch we just created may race manifest/MCP publication. Only this
     -- fresh binding may park on `binding_missing`; an adopted/reloaded binding
     -- treats a missing manifest as dead.
