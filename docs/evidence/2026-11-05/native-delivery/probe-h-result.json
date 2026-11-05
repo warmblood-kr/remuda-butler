@@ -1,0 +1,95 @@
+{
+  "phase": "H",
+  "passed": true,
+  "scope": "actual_Lua_bridge_with_DI_storage_runner_actual_helper_TUI",
+  "binary_sha256": "ad6ce1e86648609e4401d4165554546126e65b8b81bce88a27a5d16f03fb2e1c",
+  "launch_plan_file_path": true,
+  "identity": {
+    "wrapper_pid": 96234,
+    "server_pid": 96249,
+    "tui_pid": 96257,
+    "tui_start": "Thu Nov  5 20:24:50 2026",
+    "conversation": "ses_9028373578c0ca0cb7661585bc906b23",
+    "generation": "65f85be6ddf8c-65f85be6dfda1"
+  },
+  "idle": {
+    "state": "accepted_unread",
+    "mode": "native",
+    "completed": true,
+    "alerts": 0,
+    "pty": 0,
+    "helper_calls": 1
+  },
+  "busy_draft": {
+    "first": {
+      "completed": true,
+      "pty": 0,
+      "state": "accepted_unread",
+      "alerts": 0,
+      "mode": "native",
+      "helper_calls": 1
+    },
+    "second": {
+      "alerts": 0,
+      "mode": "native",
+      "state": "accepted_unread",
+      "pty": 0,
+      "completed": true,
+      "helper_calls": 1
+    },
+    "pending": 1,
+    "exact_draft_saved": true
+  },
+  "ack_unknown": {
+    "first": {
+      "state": "uncertain",
+      "alerts": 1,
+      "mode": "native",
+      "completed": false,
+      "pty": 0,
+      "helper_calls": 1
+    },
+    "fresh_image_replay": {
+      "mode": "native",
+      "alerts": 0,
+      "pty": 0,
+      "state": "uncertain",
+      "completed": true,
+      "helper_calls": 0
+    },
+    "saved_count": 1,
+    "scope": "real_helper_ACK_discarded_by_injected_runner_not_HTTP_ACK_loss"
+  },
+  "fixed_A_UI_B": {
+    "ui_B_proven": true,
+    "notice_A_saved": true,
+    "notice_B_count": 0,
+    "bridge": {
+      "completed": true,
+      "mode": "native",
+      "state": "accepted_unread",
+      "alerts": 0,
+      "pty": 0,
+      "helper_calls": 1
+    }
+  },
+  "wrong_nonce": {
+    "state": "none",
+    "alerts": 1,
+    "completed": false,
+    "mode": "disabled",
+    "pty": 0,
+    "helper_calls": 1
+  },
+  "same_original_tui": true,
+  "server_stopped": true,
+  "stale_wrapper": {
+    "pty": 0,
+    "completed": false,
+    "state": "none",
+    "mode": "disabled",
+    "alerts": 1,
+    "helper_calls": 1
+  },
+  "owned_cleanup_complete": true
+}
