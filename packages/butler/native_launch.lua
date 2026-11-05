@@ -27,33 +27,39 @@ local function default_read(path)
   return text
 end
 
+local function config_path(paths)
+  local home = type(paths.default_config_home) == "function" and paths.default_config_home()
+  if type(home) ~= "string" or home == "" then return nil end
+  return home .. "/remuda/butler/native.json"
+end
+
+local function enabled(self)
+  local path = config_path(self.paths)
+  if not path then return { enabled = false, reason = "config_home_unavailable" } end
+  return self.config.load(path, { json = self.json, read = self.read })
+end
+
+local function capability(self)
+  local cached = self.capability_cache
+  if cached then return cached.ok, cached.reason end
+  local ok, why = self.config.probe({ json = self.json, runner = self.runner,
+    remuda = self.remuda })
+  self.capability_cache = { ok = ok, reason = why }
+  return ok, why
+end
+
 function M.new(options)
   options = options or {}
-  local paths = assert(options.paths, "native launch paths are required")
-  local config = assert(options.config, "native config module is required")
-  local fs = type(options.fs) == "table" and options.fs or {}
-  local self = { paths = paths, config = config, fs = fs,
+  local self = {
+    paths = assert(options.paths, "native launch paths are required"),
+    config = assert(options.config, "native config module is required"),
+    fs = type(options.fs) == "table" and options.fs or {},
     json = options.json, read = options.read or default_read,
     runner = options.runner, remuda = options.remuda or "remuda",
     random = options.random }
-  self.config_path = function()
-    local home = type(paths.default_config_home) == "function" and paths.default_config_home()
-    if type(home) ~= "string" or home == "" then return nil end
-    return home .. "/remuda/butler/native.json"
-  end
-  self.enabled = function()
-    if not self.config_path() then
-      return { enabled = false, reason = "config_home_unavailable" }
-    end
-    return config.load(self.config_path(), { json = self.json, read = self.read })
-  end
-  self.capability = function()
-    local cached = self.capability_cache
-    if cached then return cached.ok, cached.reason end
-    local ok, why = config.probe({ json = self.json, runner = self.runner, remuda = self.remuda })
-    self.capability_cache = { ok = ok, reason = why }
-    return ok, why
-  end
+  self.config_path = function() return config_path(self.paths) end
+  self.enabled = function() return enabled(self) end
+  self.capability = function() return capability(self) end
   self.prepare = function(name) return M.prepare(self, name) end
   self.plan = function(name, kind) return M.plan(self, name, kind) end
   self.env = function(plan) return M.env(plan) end
@@ -85,28 +91,40 @@ local function ensure_private_dir(fs, path)
   return false, tostring(reason or "mkdir_failed")
 end
 
+local function private_dirs(self, name)
+  local data_home = self.paths.data_home
+  if type(data_home) ~= "string" or data_home == "" or data_home:sub(1, 1) ~= "/" then
+    return nil, "data_home_unavailable"
+  end
+  local base = data_home .. "/remuda/butler/bindings"
+  local ok_base, base_err = ensure_private_dir(self.fs, base)
+  if not ok_base then return nil, "binding_base_failed: " .. tostring(base_err) end
+  local named = base .. "/" .. name
+  local ok_dir, dir_err = ensure_private_dir(self.fs, named)
+  if not ok_dir then return nil, "binding_parent_failed: " .. tostring(dir_err) end
+  return named
+end
+
+local function fresh_nonce(self)
+  local ok_random, bytes = pcall(self.random, NONCE_BYTES)
+  if not ok_random or type(bytes) ~= "string" or bytes == "" then
+    return nil, "nonce_unavailable"
+  end
+  local nonce = hex(bytes)
+  if not nonce then return nil, "nonce_unavailable" end
+  return nonce
+end
+
 -- Private nonce dir: mkdir_new for each level (0700), nonce hex of the core
 -- CSPRNG. The wrapper gets `<dir>/manifest.json` and creates that file itself.
 -- A failed create is a pre-launch condition, reported explicitly.
 function M.prepare(self, name)
   local ok_name, name_err = valid_name(self.paths, name)
   if not ok_name then return nil, nil, name_err end
-  local data_home = self.paths.data_home
-  if type(data_home) ~= "string" or data_home == "" or data_home:sub(1, 1) ~= "/" then
-    return nil, nil, "data_home_unavailable"
-  end
-  local base = data_home .. "/remuda/butler/bindings"
-  local ok_base, base_err = ensure_private_dir(self.fs, base)
-  if not ok_base then return nil, nil, "binding_base_failed: " .. tostring(base_err) end
-  local named = base .. "/" .. name
-  local ok_dir, dir_err = ensure_private_dir(self.fs, named)
-  if not ok_dir then return nil, nil, "binding_parent_failed: " .. tostring(dir_err) end
-  local ok_random, bytes = pcall(self.random, NONCE_BYTES)
-  if not ok_random or type(bytes) ~= "string" or bytes == "" then
-    return nil, nil, "nonce_unavailable"
-  end
-  local nonce = hex(bytes)
-  if not nonce then return nil, nil, "nonce_unavailable" end
+  local named, dir_err = private_dirs(self, name)
+  if not named then return nil, nil, dir_err end
+  local nonce, nonce_err = fresh_nonce(self)
+  if not nonce then return nil, nil, nonce_err end
   local binding_dir = named .. "/" .. nonce
   local ok_leaf, created, leaf_reason = pcall(self.fs.mkdir_new, binding_dir)
   if not ok_leaf or created ~= true then

@@ -1076,33 +1076,43 @@ local function disable_native_if_current(session, snapshot, why)
   return true
 end
 
+-- The same decision that chose the text must still belong to this agent. A
+-- change before the first yield is stale, even if it looks more capable.
+local function freeze_decision(agent, native_decision)
+  if agent.native ~= native_decision then return nil, false end
+  local frozen = frozen_native_binding(native_decision)
+  if type(native_decision) == "table" and not frozen then return nil, false end
+  return frozen, true
+end
+
+local function attempt_identity_unchanged(agent, session, recipient_id, instance, generation)
+  return remuda._butler_notice == generation and bus.agents[session] == agent
+    and agent.id == recipient_id and agent.instance_id == instance
+end
+
+-- Revalidate after the listing even for a PTY snapshot: a pty->bound change
+-- under the frozen text is just as stale as a native->disabled change.
+local function binding_unchanged_after_ls(agent, frozen)
+  if frozen then
+    return same_native_binding(frozen, frozen_native_binding(agent.native))
+  end
+  return type(agent.native) ~= "table"
+end
+
 local function notice_attempt_snapshot(session, state, text, native_decision)
   local agent = bus.agents[session]
   if not agent or not agent.id then return nil end
-  local recipient_id = agent.id
-  local agent_instance = agent.instance_id
+  local recipient_id, agent_instance = agent.id, agent.instance_id
   local generation = NOTICE_MODULE
   if remuda._butler_notice ~= generation then return nil end
-  -- The same decision that chose the text is frozen BEFORE the first yield
-  -- (remuda.ls). Capturing it after the listing would let the listing toggle
-  -- change native/PTY under text that was already chosen.
-  local captured_native = native_decision
-  if agent.native ~= captured_native then return nil end
-  local frozen = frozen_native_binding(captured_native)
-  if type(captured_native) == "table" and not frozen then return nil end
+  -- The decision and its whole binding are frozen BEFORE the first yield
+  -- (remuda.ls), so the listing cannot change native/PTY under chosen text.
+  local frozen, consistent = freeze_decision(agent, native_decision)
+  if not consistent then return nil end
   local row = notice_row(session) -- remuda.ls may yield
-  if remuda._butler_notice ~= generation or bus.agents[session] ~= agent
-      or agent.id ~= recipient_id or agent.instance_id ~= agent_instance then
-    return nil
-  end
-  -- Revalidate after the listing even for a PTY snapshot: a pty->bound change
-  -- under the frozen text is just as stale as a native->disabled change.
-  local live_frozen = frozen_native_binding(agent.native)
-  if frozen then
-    if not same_native_binding(frozen, live_frozen) then return nil end
-  elseif type(agent.native) == "table" then
-    return nil
-  end
+  if not attempt_identity_unchanged(agent, session, recipient_id, agent_instance,
+      generation) then return nil end
+  if not binding_unchanged_after_ls(agent, frozen) then return nil end
   local ids = {}
   for _, id in ipairs(state.message_ids or {}) do ids[#ids + 1] = id end
   return { generation = generation, agent = agent, session = session,
@@ -1294,13 +1304,10 @@ local function native_row(session, native)
   end
   return row
 end
--- One helper invocation; every response is mapped to the existing notice
--- outcome classes. Never a PTY fallback and never a guessed success.
-local function native_notice_send(session, native, text, ids, still_current)
-  local dispatch = remuda.butler and remuda.butler.native_dispatch
-  if not dispatch or type(dispatch.build) ~= "function" then
-    return false, "native_uncertain: dispatch_unavailable"
-  end
+local DEAD_BUILD_REASONS = { invalid_binding = true, invalid_nonce = true,
+  invalid_session = true, invalid_instance = true }
+
+local function native_target(session, native, still_current)
   local row, row_why = native_row(session, native)
   if not row then
     if row_why == "session_unverified" then
@@ -1312,21 +1319,30 @@ local function native_notice_send(session, native, text, ids, still_current)
     local ok, current = pcall(still_current)
     if not ok or current ~= true then return false, "journal_generation_changed" end
   end
-  local request, build_why = dispatch.build({ binding = native.path, nonce = native.nonce,
+  return row
+end
+
+local function native_request(native, text, ids)
+  local dispatch = remuda.butler and remuda.butler.native_dispatch
+  if not dispatch or type(dispatch.build) ~= "function" then
+    return nil, nil, "native_uncertain: dispatch_unavailable"
+  end
+  local request, why = dispatch.build({ binding = native.path, nonce = native.nonce,
     session = native.row_id, instance = native.instance,
     request_id = "msg_" .. ids[1] .. "_" .. tostring(notice_now()), text = text,
     message_ids = ids })
   if not request then
     -- A broken binding target disables the session; anything else is a local
     -- preflight refusal that wrote nothing and may use the bounded schedule.
-    if build_why == "invalid_binding" or build_why == "invalid_nonce"
-        or build_why == "invalid_session" or build_why == "invalid_instance" then
-      return false, "native_dead: " .. tostring(build_why)
+    if DEAD_BUILD_REASONS[why] then
+      return nil, nil, "native_dead: " .. tostring(why)
     end
-    return false, "native_not_written: " .. tostring(build_why)
+    return nil, nil, "native_not_written: " .. tostring(why)
   end
-  local result = dispatch.dispatch(request, { json = remuda.json,
-    runner = remuda.process and remuda.process.run, remuda = "remuda" })
+  return request, dispatch
+end
+
+local function native_outcome(result)
   if type(result) ~= "table" then return false, "native_uncertain: dispatch_failed" end
   if result.outcome == "accepted" then return true end
   if result.outcome == "dead_binding" then
@@ -1336,6 +1352,18 @@ local function native_notice_send(session, native, text, ids, still_current)
     return false, "native_not_written: " .. tostring(result.reason)
   end
   return false, "native_uncertain: " .. tostring(result.reason or "unknown")
+end
+
+-- One helper invocation; every response is mapped to the existing notice
+-- outcome classes. Never a PTY fallback and never a guessed success.
+local function native_notice_send(session, native, text, ids, still_current)
+  local row, target_why = native_target(session, native, still_current)
+  if not row then return false, target_why end
+  local request, dispatch, request_why = native_request(native, text, ids)
+  if not request then return false, request_why end
+  local result = dispatch.dispatch(request, { json = remuda.json,
+    runner = remuda.process and remuda.process.run, remuda = "remuda" })
+  return native_outcome(result)
 end
 -- The dialogs module's narrow automatic-wakeup capability is the only path
 -- that bypasses the modal prediction gate. Without that module (isolated

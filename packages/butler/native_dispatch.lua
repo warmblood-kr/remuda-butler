@@ -139,27 +139,21 @@ local function strict_response(value)
   return true
 end
 
--- Unknown, missing or wrong-typed fields/reasons are uncertain, never a
--- retryable "nothing was written".
-local function outcome(value)
-  if not strict_response(value) then
-    return { outcome = "uncertain", reason = "invalid_response" }
-  end
-  local name, reason = value.outcome, value.reason or ""
-  if name == "accepted_queue" then
-    -- The frozen core response is exactly {outcome} with no reason. Any
-    -- reason field is an unproven shape and must not be accepted.
-    if value.reason ~= nil then
-      return { outcome = "uncertain", reason = "invalid_response" }
-    end
-    return { outcome = "accepted", reason = "" }
-  end
-  if name == "definitely_not_written" then
-    if reason == "" then return { outcome = "uncertain", reason = "invalid_response" } end
-    if DEAD[reason] then return { outcome = "dead_binding", reason = reason } end
-    if NOT_WRITTEN[reason] then return { outcome = "not_written", reason = reason } end
-    return { outcome = "uncertain", reason = "unknown_reason" }
-  end
+local function accepted_outcome(value)
+  -- The frozen core response is exactly {outcome} with no reason. Any reason
+  -- field is an unproven shape and must not be accepted.
+  if value.reason ~= nil then return { outcome = "uncertain", reason = "invalid_response" } end
+  return { outcome = "accepted", reason = "" }
+end
+
+local function refused_outcome(reason)
+  if reason == "" then return { outcome = "uncertain", reason = "invalid_response" } end
+  if DEAD[reason] then return { outcome = "dead_binding", reason = reason } end
+  if NOT_WRITTEN[reason] then return { outcome = "not_written", reason = reason } end
+  return { outcome = "uncertain", reason = "unknown_reason" }
+end
+
+local function uncertain_outcome(value, name, reason)
   if name == "uncertain" then
     if reason ~= "" and not UNCERTAIN[reason] then
       return { outcome = "uncertain", reason = "unknown_reason" }
@@ -172,6 +166,18 @@ local function outcome(value)
   return { outcome = "uncertain", reason = "invalid_response" }
 end
 
+-- Unknown, missing or wrong-typed fields/reasons are uncertain, never a
+-- retryable "nothing was written".
+local function outcome(value)
+  if not strict_response(value) then
+    return { outcome = "uncertain", reason = "invalid_response" }
+  end
+  local name, reason = value.outcome, value.reason or ""
+  if name == "accepted_queue" then return accepted_outcome(value) end
+  if name == "definitely_not_written" then return refused_outcome(reason) end
+  return uncertain_outcome(value, name, reason)
+end
+
 function M.classify(stdout, options)
   local codec, why = codec_of(options)
   if not codec then return { outcome = "uncertain", reason = why } end
@@ -182,41 +188,63 @@ function M.classify(stdout, options)
   return outcome(value)
 end
 
+local function runner_of(options)
+  return options.runner or (remuda and remuda.process and remuda.process.run)
+end
+
+-- A completed helper that printed a typed refusal is authoritative even with
+-- a nonzero exit; an accepted or untyped answer is not.
+local function typed_refusal(stdout, options)
+  local result = M.classify(stdout, options)
+  if result.outcome == "dead_binding" or result.outcome == "not_written" then
+    return result
+  end
+end
+
+local function result_outcome(result, options)
+  if result.timed_out then return { outcome = "uncertain", reason = "timeout" } end
+  if result.code ~= 0 then
+    return typed_refusal(result.stdout, options)
+      or { outcome = "uncertain", reason = "helper_exit_" .. tostring(result.code) }
+  end
+  return M.classify(result.stdout, options)
+end
+
+local function encode_request(request, options)
+  local text, why = M.encode(request, options)
+  if text then return text end
+  -- A local preflight refusal wrote nothing; a live binding may retry the
+  -- bounded schedule. A missing codec cannot be classified at all.
+  if why == "request_too_large" or why == "encode_failed" then
+    return nil, { outcome = "not_written", reason = why }
+  end
+  return nil, { outcome = "uncertain", reason = why }
+end
+
+local function run_helper(runner, text, options)
+  local argv = { options.remuda or "remuda", "_agent_notice" }
+  local ok, result = pcall(runner, { argv = argv, stdin = text,
+    timeout = options.timeout or DEFAULT_TIMEOUT })
+  if not ok or type(result) ~= "table" then
+    return nil, { outcome = "uncertain", reason = "runner_failed" }
+  end
+  return result
+end
+
 -- A nonzero exit, timeout or missing runner is never "nothing was written":
 -- the helper may have POSTed before it died, so it is uncertain and never
 -- retried automatically.
 function M.dispatch(request, options)
   options = options or {}
-  local runner = options.runner or (remuda and remuda.process and remuda.process.run)
+  local runner = runner_of(options)
   if type(runner) ~= "function" then
     return { outcome = "uncertain", reason = "runner_unavailable" }
   end
-  local text, encode_err = M.encode(request, options)
-  if not text then
-    -- A local preflight refusal wrote nothing; a live binding may retry the
-    -- bounded schedule. A missing codec cannot be classified at all.
-    if encode_err == "request_too_large" or encode_err == "encode_failed" then
-      return { outcome = "not_written", reason = encode_err }
-    end
-    return { outcome = "uncertain", reason = encode_err }
-  end
-  local argv = { options.remuda or "remuda", "_agent_notice" }
-  local ok, result = pcall(runner, { argv = argv, stdin = text,
-    timeout = options.timeout or DEFAULT_TIMEOUT })
-  if not ok or type(result) ~= "table" then
-    return { outcome = "uncertain", reason = "runner_failed" }
-  end
-  if result.timed_out then return { outcome = "uncertain", reason = "timeout" } end
-  if result.code ~= 0 then
-    -- A completed helper that printed a typed refusal is authoritative even
-    -- with a nonzero exit; an accepted or untyped answer is not.
-    local typed = M.classify(result.stdout, options)
-    if typed.outcome == "dead_binding" or typed.outcome == "not_written" then
-      return typed
-    end
-    return { outcome = "uncertain", reason = "helper_exit_" .. tostring(result.code) }
-  end
-  return M.classify(result.stdout, options)
+  local text, encode_outcome = encode_request(request, options)
+  if not text then return encode_outcome end
+  local result, run_outcome = run_helper(runner, text, options)
+  if not result then return run_outcome end
+  return result_outcome(result, options)
 end
 
 M.DEFAULT_TIMEOUT = DEFAULT_TIMEOUT

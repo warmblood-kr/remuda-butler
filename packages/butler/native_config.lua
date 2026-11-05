@@ -24,31 +24,38 @@ end
 
 -- A missing file is the default: off, no error. Malformed content is also off,
 -- with an explicit reason for the launch trace (never a silent enable).
+local function valid_root(value)
+  for key in pairs(value) do
+    if key ~= "version" and key ~= "opencode" then return nil, "config_invalid: unknown_key" end
+  end
+  if type(value.version) ~= "number" or value.version ~= 1 then
+    return nil, "config_version"
+  end
+  return true
+end
+
+-- nil means invalid (with a reason); false is an explicit switch off.
+local function opencode_enabled(value)
+  local opencode = value.opencode
+  if type(opencode) ~= "table" then return nil, "config_invalid: opencode" end
+  for key in pairs(opencode) do
+    if key ~= "enabled" then return nil, "config_invalid: unknown_key" end
+  end
+  if type(opencode.enabled) ~= "boolean" then return nil, "config_invalid: enabled" end
+  return opencode.enabled
+end
+
 function M.read(text, options)
   local codec, why = codec_of(options)
   if not codec then return { enabled = false, reason = why } end
   if text == nil then return { enabled = false, reason = "config_missing" } end
   local value, decode_why = decode(codec, text)
   if not value then return { enabled = false, reason = "config_invalid: " .. decode_why } end
-  for key in pairs(value) do
-    if key ~= "version" and key ~= "opencode" then
-      return { enabled = false, reason = "config_invalid: unknown_key" }
-    end
-  end
-  if type(value.version) ~= "number" or value.version ~= 1 then
-    return { enabled = false, reason = "config_version" }
-  end
-  local opencode = value.opencode
-  if type(opencode) ~= "table" then return { enabled = false, reason = "config_invalid: opencode" } end
-  for key in pairs(opencode) do
-    if key ~= "enabled" then
-      return { enabled = false, reason = "config_invalid: unknown_key" }
-    end
-  end
-  if type(opencode.enabled) ~= "boolean" then
-    return { enabled = false, reason = "config_invalid: enabled" }
-  end
-  if opencode.enabled ~= true then return { enabled = false, reason = "disabled" } end
+  local root_ok, root_why = valid_root(value)
+  if not root_ok then return { enabled = false, reason = root_why } end
+  local enabled, enabled_why = opencode_enabled(value)
+  if enabled == nil then return { enabled = false, reason = enabled_why } end
+  if enabled ~= true then return { enabled = false, reason = "disabled" } end
   return { enabled = true, reason = "enabled" }
 end
 
