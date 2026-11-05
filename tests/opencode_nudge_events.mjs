@@ -4,7 +4,20 @@
 // written to the data home at launch). tests/opencode_nudge_events.sh extracts
 // it here as nudge.mjs and runs this driver with node or jsc, so the assertions
 // exercise the shipped source rather than a copy.
-import { createNudge, managedByButler, isLeaderReport, shellReports } from "./nudge.mjs"
+import {
+  createNudge,
+  createMachine,
+  stateOf,
+  beginRun,
+  eligible,
+  onEnqueued,
+  onDelivered,
+  claim,
+  forget,
+  managedByButler,
+  isLeaderReport,
+  shellReports,
+} from "./nudge.mjs"
 
 // jsc provides print(); node does not.
 const log = (line) => {
@@ -344,6 +357,53 @@ const reportTool = (status = "completed") => ({
     input: { code: "await tools.remuda.butler_send_to_leader({text:'done'})" },
     result: { metadata: { toolCalls: [{ tool: "remuda.butler_send_to_leader", status: "ok" }] } },
   }) === true)
+}
+
+// 15. Direct unit tests for the hoisted state units.
+{
+  const machine = createMachine({ now: () => 1_000_000, send: async () => {} })
+  const entry = stateOf(machine, SID)
+  check("stateOf creates one entry per session", stateOf(machine, SID) === entry && machine.sessions.size === 1)
+
+  const run = beginRun(entry)
+  check("beginRun opens a run with no cycle and no report", run.userID === null && run.reported === false)
+
+  check("eligible rejects a run with no user cycle", eligible(entry, run, 1_000_000) === false)
+  run.userID = "msg_a"
+  check("eligible accepts a clean cycle", eligible(entry, run, 1_000_000) === true)
+  check("eligible rejects a reported run", eligible(entry, { userID: "msg_a", reported: true }, 1_000_000) === false)
+  entry.pending = 1
+  check("eligible rejects queued work", eligible(entry, run, 1_000_000) === false)
+  entry.pending = 0
+  entry.lastNudgeAt = 990_000
+  check("eligible rejects inside the cooldown", eligible(entry, run, 1_000_000) === false)
+  check("eligible accepts at the cooldown edge", eligible(entry, run, 1_020_000) === true)
+
+  const queued = stateOf(machine, "ses_q")
+  onEnqueued(machine, queued, { sessionID: "ses_q", inboxID: "msg_q", item: { type: "user" } })
+  onEnqueued(machine, queued, { sessionID: "ses_q", inboxID: "msg_s", item: { type: "synthetic" } })
+  check("onEnqueued counts only real work", queued.pending === 1, queued.pending)
+  beginRun(queued)
+  onDelivered(machine, queued, { sessionID: "ses_q", inboxID: "msg_q" }, false)
+  check("onDelivered attaches the user item to the run", queued.run.userID === "msg_q" && queued.pending === 0)
+  onDelivered(machine, queued, { sessionID: "ses_q", inboxID: "msg_s" }, false)
+  check("onDelivered ignores a synthetic item", queued.run.userID === "msg_q")
+
+  const cancelled = stateOf(machine, "ses_c")
+  onEnqueued(machine, cancelled, { sessionID: "ses_c", inboxID: "msg_c", item: { type: "user" } })
+  beginRun(cancelled)
+  onDelivered(machine, cancelled, { sessionID: "ses_c", inboxID: "msg_c" }, true)
+  check("cancelled mail is not a work cycle", cancelled.run.userID === null && cancelled.pending === 0)
+
+  const capped = stateOf(machine, "ses_cap")
+  for (let i = 0; i < 40; i += 1) claim(machine, capped, "ses_cap", `msg_${i}`)
+  check("claim keeps a bounded cycle memory", capped.nudgedCycles.length === 32 && capped.nudgedCycles[31] === "msg_39")
+
+  const drop = stateOf(machine, "ses_drop")
+  onEnqueued(machine, drop, { sessionID: "ses_drop", inboxID: "msg_d", item: { type: "user" } })
+  forget(machine, "ses_drop")
+  check("forget removes the session and its pending mail types", !machine.sessions.has("ses_drop") && !machine.kinds.has("msg_d"))
+  await Promise.all([...machine.inflight])
 }
 
 const code = finish()

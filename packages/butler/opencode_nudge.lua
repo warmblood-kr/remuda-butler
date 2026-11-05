@@ -169,117 +169,130 @@ export function isLeaderReport(event) {
   return false
 }
 
-// Event-fed state machine, separated from the plugin so the same source can run
-// under a deterministic driver. Decisions are synchronous; only the synthetic
-// admission is asynchronous. `now` and `send` are injected for the driver.
+// Event-fed state machine. Every unit is a module-level function taking the
+// machine as its first argument, so the replay driver can test each one
+// directly. `now` and `send` are injected through createMachine.
+export function createMachine(options) {
+  return {
+    now: options.now || (() => Date.now()),
+    send: options.send,
+    sessions: new Map(),
+    kinds: new Map(),
+    inflight: new Set(),
+  }
+}
+
+export function stateOf(machine, sessionID) {
+  let entry = machine.sessions.get(sessionID)
+  if (!entry) {
+    entry = { nudgedCycles: [], pending: 0, lastNudgeAt: 0, run: null, sending: false }
+    machine.sessions.set(sessionID, entry)
+  }
+  return entry
+}
+
+// One admitted input's execution. `userID` is the user inbox item this run
+// consumed, so a queued message cannot be attributed to an earlier run.
+export function beginRun(entry) {
+  entry.run = { userID: null, reported: false }
+  return entry.run
+}
+
+export function eligible(entry, run, now) {
+  if (!run || !run.userID) return false
+  if (run.reported) return false
+  if (entry.nudgedCycles.includes(run.userID)) return false
+  if (entry.pending > 0) return false
+  return now - entry.lastNudgeAt >= COOLDOWN_MS
+}
+
+// Cooldown starts at the claim, not when the admission settles, so a slow
+// admit cannot make the next cycle look overdue.
+export function admit(machine, entry, sessionID) {
+  entry.sending = true
+  entry.lastNudgeAt = machine.now()
+  const pending = Promise.resolve()
+    .then(() => machine.send({ sessionID, text: NUDGE, description: DESCRIPTION }))
+    .catch(() => {
+      // A session that ended cannot be nudged; the cycle stays claimed.
+    })
+    .finally(() => {
+      entry.sending = false
+      machine.inflight.delete(pending)
+    })
+  machine.inflight.add(pending)
+}
+
+// Claim before anything asynchronous: a duplicate success, a cooldown expiry,
+// or a failed admission must not nudge the same input twice.
+export function claim(machine, entry, sessionID, cycle) {
+  entry.nudgedCycles.push(cycle)
+  if (entry.nudgedCycles.length > 32) entry.nudgedCycles.shift()
+  admit(machine, entry, sessionID)
+}
+
+export function completeTurn(machine, entry, sessionID) {
+  const run = entry.run
+  entry.run = null
+  if (!eligible(entry, run, machine.now())) return
+  claim(machine, entry, sessionID, run.userID)
+}
+
+export function onEnqueued(machine, entry, data) {
+  const item = data.item || {}
+  if (data.inboxID) machine.kinds.set(data.inboxID, { kind: item.type, sessionID: data.sessionID })
+  // Anything already queued means the member is about to continue.
+  if (item.type !== "synthetic") entry.pending += 1
+}
+
+export function onDelivered(machine, entry, data, cancelled) {
+  const known = data.inboxID ? machine.kinds.get(data.inboxID) : undefined
+  if (data.inboxID) machine.kinds.delete(data.inboxID)
+  if (known && known.kind !== "synthetic" && entry.pending > 0) entry.pending -= 1
+  if (cancelled || !known || known.kind !== "user") return
+  // Delivered user text belongs to the run executing it. A delivery with no
+  // open run has no provable association: the next run starts without a cycle.
+  if (entry.run) entry.run.userID = data.inboxID
+}
+
+export function forget(machine, sessionID) {
+  machine.sessions.delete(sessionID)
+  for (const [id, value] of machine.kinds) if (value.sessionID === sessionID) machine.kinds.delete(id)
+}
+
+export function applyEvent(machine, event) {
+  const sessionID = event && event.data && event.data.sessionID
+  if (!sessionID) return
+  if (event.type === "session.deleted") return forget(machine, sessionID)
+  const entry = stateOf(machine, sessionID)
+  switch (event.type) {
+    case "session.inbox.enqueued": return onEnqueued(machine, entry, event.data)
+    case "session.inbox.delivered": return onDelivered(machine, entry, event.data, false)
+    case "session.inbox.cancelled": return onDelivered(machine, entry, event.data, true)
+    case "session.execution.started": return beginRun(entry)
+    case "session.execution.succeeded": return completeTurn(machine, entry, sessionID)
+    default:
+      // Failed or interrupted work is not a finished task; a stale run must not
+      // be nudged by a later success.
+      entry.run = null
+  }
+}
+
+export function applyToolAfter(machine, event) {
+  if (!event || event.status !== "completed" || !event.sessionID) return
+  if (!isLeaderReport(event)) return
+  const entry = machine.sessions.get(event.sessionID)
+  if (entry && entry.run) entry.run.reported = true
+}
+
 export function createNudge(options) {
-  const now = options.now || (() => Date.now())
-  const send = options.send
-  const sessions = new Map()
-  const kinds = new Map()
-  const inflight = new Set()
-
-  function state(sessionID) {
-    let entry = sessions.get(sessionID)
-    if (!entry) {
-      entry = { nudgedCycles: [], pending: 0, lastNudgeAt: 0, run: null, sending: false }
-      sessions.set(sessionID, entry)
-    }
-    return entry
+  const machine = createMachine(options)
+  return {
+    onEvent: (event) => applyEvent(machine, event),
+    onToolAfter: (event) => applyToolAfter(machine, event),
+    sessions: machine.sessions,
+    settled: () => Promise.all([...machine.inflight]),
   }
-
-  function beginRun(entry) {
-    entry.run = { userID: null, reported: false }
-    return entry.run
-  }
-
-  // Cooldown starts at the claim, not when the admission settles, so a slow
-  // admit cannot make the next cycle look overdue.
-  function dispatch(entry, sessionID) {
-    entry.sending = true
-    entry.lastNudgeAt = now()
-    const pending = Promise.resolve()
-      .then(() => send({ sessionID, text: NUDGE, description: DESCRIPTION }))
-      .catch(() => {
-        // A session that ended cannot be nudged; the cycle stays claimed.
-      })
-      .finally(() => {
-        entry.sending = false
-        inflight.delete(pending)
-      })
-    inflight.add(pending)
-  }
-
-  function eligible(entry, run) {
-    if (!run || !run.userID) return false
-    if (run.reported) return false
-    if (entry.nudgedCycles.includes(run.userID)) return false
-    if (entry.pending > 0) return false
-    return now() - entry.lastNudgeAt >= COOLDOWN_MS
-  }
-
-  // Claim before anything asynchronous: a duplicate success, a cooldown expiry,
-  // or a failed admission must not nudge the same input twice.
-  function claim(entry, sessionID, cycle) {
-    entry.nudgedCycles.push(cycle)
-    if (entry.nudgedCycles.length > 32) entry.nudgedCycles.shift()
-    dispatch(entry, sessionID)
-  }
-
-  function completeTurn(entry, sessionID) {
-    const run = entry.run
-    entry.run = null
-    if (eligible(entry, run)) claim(entry, sessionID, run.userID)
-  }
-
-  function onEnqueued(entry, data) {
-    const item = data.item || {}
-    if (data.inboxID) kinds.set(data.inboxID, { kind: item.type, sessionID: data.sessionID })
-    // Anything already queued means the member is about to continue.
-    if (item.type !== "synthetic") entry.pending += 1
-  }
-
-  function onDelivered(entry, data, cancelled) {
-    const known = data.inboxID ? kinds.get(data.inboxID) : undefined
-    if (data.inboxID) kinds.delete(data.inboxID)
-    if (known && known.kind !== "synthetic" && entry.pending > 0) entry.pending -= 1
-    if (cancelled || !known || known.kind !== "user") return
-    // Delivered user text belongs to the run executing it. A delivery with no
-    // open run has no provable association: the next run starts without a cycle.
-    if (entry.run) entry.run.userID = data.inboxID
-  }
-
-  function forget(sessionID) {
-    sessions.delete(sessionID)
-    for (const [id, value] of kinds) if (value.sessionID === sessionID) kinds.delete(id)
-  }
-
-  function onEvent(event) {
-    const sessionID = event && event.data && event.data.sessionID
-    if (!sessionID) return
-    if (event.type === "session.deleted") return forget(sessionID)
-    const entry = state(sessionID)
-    switch (event.type) {
-      case "session.inbox.enqueued": return onEnqueued(entry, event.data)
-      case "session.inbox.delivered": return onDelivered(entry, event.data, false)
-      case "session.inbox.cancelled": return onDelivered(entry, event.data, true)
-      case "session.execution.started": return beginRun(entry)
-      case "session.execution.succeeded": return completeTurn(entry, sessionID)
-      default:
-        // Failed or interrupted work is not a finished task; a stale run must
-        // not be nudged by a later success.
-        entry.run = null
-    }
-  }
-
-  function onToolAfter(event) {
-    if (!event || event.status !== "completed" || !event.sessionID) return
-    if (!isLeaderReport(event)) return
-    const entry = sessions.get(event.sessionID)
-    if (entry && entry.run) entry.run.reported = true
-  }
-
-  return { onEvent, onToolAfter, sessions, settled: () => Promise.all([...inflight]) }
 }
 
 export default {
