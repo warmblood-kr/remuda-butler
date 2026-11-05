@@ -158,6 +158,16 @@ local stale = module.join(plan, old_row, "instance-1",
   function() return "core-id-lead" end, function() return false end)
 assert(stale.mode == "stale" and stale.reason == "launch_replaced",
   "an unverified post-yield join is refused")
+-- launch.lua calls the installed instance seam, so it must forward the
+-- resolver and fence; dropping them would silently disable the old-daemon path.
+local instance_resolved = on.join(plan, old_row, "instance-1",
+  function() return "core-id-lead" end, function() return true end)
+assert(instance_resolved.mode == "native" and instance_resolved.row_id == "core-id-lead",
+  "the instance join forwards the identity resolver")
+local instance_stale = on.join(plan, old_row, "instance-1",
+  function() return "core-id-lead" end, function() return false end)
+assert(instance_stale.mode == "stale" and instance_stale.reason == "launch_replaced",
+  "the instance join forwards the stale fence")
 local no_resolver = module.join(plan, old_row, "instance-1")
 assert(no_resolver.mode == "disabled" and no_resolver.reason == "missing_row_identity",
   "no resolver and no id stays disabled")

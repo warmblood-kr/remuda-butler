@@ -103,7 +103,9 @@ function M.new(options)
   self.prepare = function(name, kind) return M.prepare(self, name, kind) end
   self.plan = function(name, kind) return M.plan(self, name, kind) end
   self.env = function(plan) return M.env(plan) end
-  self.join = function(plan, row, instance) return M.join(plan, row, instance) end
+  self.join = function(plan, row, instance, resolve, verify)
+    return M.join(plan, row, instance, resolve, verify)
+  end
   self.disable = function(agent, reason) return M.disable(agent, reason) end
   return self
 end
