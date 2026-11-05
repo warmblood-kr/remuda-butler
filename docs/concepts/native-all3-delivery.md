@@ -88,9 +88,9 @@ ends the window. A missing manifest on an adopted or reloaded binding is dead.
 The explicit entrypoint is `remuda._butler_notice.native_publication(alias)`;
 launch completion and successful adoption call it to flush queued unreserved
 mail. No core publication callback exists, so a publication after launch and
-outside a Butler-visible step uses a bounded tick (~1s) that stats only the
-private manifest path (never its contents) before spawning: an honest latency
-limit, not an event-driven guarantee.
+outside a Butler-visible step uses a bounded tick (~1s) that checks presence of
+the private manifest path (never reads contents) before spawning: an honest
+limit, not an event guarantee.
 
 ## Status
 

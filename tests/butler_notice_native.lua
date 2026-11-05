@@ -334,6 +334,36 @@ remuda._butler_paths.file_exists = function() return true end
 remuda._butler_deliver_notices()
 assert(#spawns == 1 and bus.notices.lead == nil,
   "the first tick after publication flushes the queued mail")
+
+-- 5k. Presence suppression is bounded: after the startup window expires with
+-- the manifest still absent, the helper runs once and the binding disables
+-- through the existing typed path; mail stays unread and no PTY is used.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now - 121
+remuda._butler_paths = { file_exists = function() return false end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+remuda._butler_deliver_notices()
+assert(#spawns == 1, "an expired window still attempts the helper once")
+assert(bus.agents.lead.native.mode == "disabled",
+  "an expired missing manifest disables through the existing path")
+assert(bus.notices.lead ~= nil and pty_sends == 0, "mail is preserved, never PTY")
+
+-- 5l. The same bounded expiry applies to the longer Claude window.
+reset()
+queue()
+bus.agents.lead.native.kind = "claude"
+bus.agents.lead.native.session_token = "lead"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now - 1801
+remuda._butler_paths = { file_exists = function() return false end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+remuda._butler_deliver_notices()
+assert(#spawns == 1 and bus.agents.lead.native.mode == "disabled",
+  "the Claude startup window also expires into the dead path")
+assert(bus.notices.lead ~= nil and pty_sends == 0, "Claude mail stays unread, never PTY")
 remuda._butler_paths = nil
 
 -- 5g. The startup window is bounded per protocol; an expired fresh launch is
