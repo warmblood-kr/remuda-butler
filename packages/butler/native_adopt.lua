@@ -6,17 +6,34 @@
 -- No socket, thread or auth material is stored on the agent or in the roster.
 local M = {}
 
-local function live_row(list, name)
-  local ok, rows = pcall(list)
-  if not ok or type(rows) ~= "table" then return nil end
+local function live_row(rows, name)
+  if type(rows) ~= "table" then return nil end
   for _, row in ipairs(rows) do
     if row.name == name then return row end
   end
 end
 
+-- The live row's canonical id: the projection's id when present, else the
+-- official lookup (same-daemon proof) once. No alias and no instance-as-id.
+local function resolve_identity(self, row, rows)
+  if type(row) ~= "table" then return nil, "missing_row_identity" end
+  if type(row.id) == "string" and row.id ~= "" then return row.id end
+  local identity = self.identity
+  if not identity or type(identity.resolve) ~= "function" then
+    return nil, "missing_row_identity"
+  end
+  local ok, id, why = pcall(identity.resolve, row, { rows = rows,
+    list = self.list, runner = self.runner, json = self.json, remuda = self.remuda })
+  if not ok then return nil, "identity_unavailable" end
+  return id, why
+end
+
+-- A projected id, when present, must match the resolved id. An old projection
+-- omits the field entirely; the exact instance_id remains the start identity.
 local function same_identity(row, identity)
-  return row ~= nil and row.alive == true and row.id == identity.id
+  return row ~= nil and row.alive == true
     and row.instance_id == identity.instance
+    and (row.id == nil or row.id == "" or row.id == identity.id)
 end
 
 local function free_of_native(agent)
@@ -81,13 +98,15 @@ function M.codex(self, name, socket, thread)
   if state.enabled ~= true then
     return nil, "codex_not_opted_in: " .. tostring(state.reason or "disabled")
   end
-  local row = live_row(self.list, name)
+  local rows = self.list()
+  local row = live_row(rows, name)
   if not row or row.alive ~= true then return nil, "session_not_live" end
-  if type(row.id) ~= "string" or row.id == ""
-      or type(row.instance_id) ~= "string" or row.instance_id == "" then
+  if type(row.instance_id) ~= "string" or row.instance_id == "" then
     return nil, "missing_row_identity"
   end
-  local identity = { id = row.id, instance = row.instance_id }
+  local id, id_why = resolve_identity(self, row, rows)
+  if not id then return nil, id_why end
+  local identity = { id = id, instance = row.instance_id }
   -- A replacement during the first listing must not even reach the helper.
   if not still_current(self, name, agent, decision) then
     return nil, "session_replaced_during_adopt"
@@ -95,11 +114,11 @@ function M.codex(self, name, socket, thread)
   local binding, nonce, why = self.launch.prepare(name, "codex")
   if not binding then return nil, "binding_failed: " .. tostring(why) end
   local result = self.codex.adopt({ binding = binding, nonce = nonce,
-    session = row.id, socket = socket, thread = thread },
+    session = id, socket = socket, thread = thread },
     { json = self.json, runner = self.runner, remuda = self.remuda })
   -- Adoption yields in the helper. Never attach a binding to a replaced row,
   -- a replaced agent object/module or a decision another adoption already made.
-  if not same_identity(live_row(self.list, name), identity)
+  if not same_identity(live_row(self.list(), name), identity)
       or not still_current(self, name, agent, decision) then
     return nil, "session_replaced_during_adopt"
   end
@@ -142,13 +161,15 @@ function M.opencode(self, name, endpoint, conversation, password)
   if state.enabled ~= true then
     return nil, "opencode_not_opted_in: " .. tostring(state.reason or "disabled")
   end
-  local row = live_row(self.list, name)
+  local rows = self.list()
+  local row = live_row(rows, name)
   if not row or row.alive ~= true then return nil, "session_not_live" end
-  if type(row.id) ~= "string" or row.id == ""
-      or type(row.instance_id) ~= "string" or row.instance_id == "" then
+  if type(row.instance_id) ~= "string" or row.instance_id == "" then
     return nil, "missing_row_identity"
   end
-  local identity = { id = row.id, instance = row.instance_id }
+  local id, id_why = resolve_identity(self, row, rows)
+  if not id then return nil, id_why end
+  local identity = { id = id, instance = row.instance_id }
   -- A replacement during the first listing must not even reach the helper.
   if not still_current(self, name, agent, decision) then
     return nil, "session_replaced_during_adopt"
@@ -156,12 +177,12 @@ function M.opencode(self, name, endpoint, conversation, password)
   local binding, nonce, why = self.launch.prepare(name, "opencode")
   if not binding then return nil, "binding_failed: " .. tostring(why) end
   local result = self.opencode.adopt({ binding = binding, nonce = nonce,
-    session = row.id, endpoint = endpoint, conversation = conversation,
+    session = id, endpoint = endpoint, conversation = conversation,
     password = password },
     { json = self.json, runner = self.runner, remuda = self.remuda })
   -- Adoption yields in the helper. Never attach a binding to a replaced row,
   -- a replaced agent object/module or a decision another adoption already made.
-  if not same_identity(live_row(self.list, name), identity)
+  if not same_identity(live_row(self.list(), name), identity)
       or not still_current(self, name, agent, decision) then
     return nil, "session_replaced_during_adopt"
   end
@@ -197,6 +218,7 @@ function M.install(options)
     config = assert(options.config, "adoption needs the native config"),
     codex = assert(options.codex, "adoption needs the Codex helper client"),
     opencode = assert(options.opencode, "adoption needs the OpenCode helper client"),
+    identity = options.identity or (remuda.butler and remuda.butler.native_identity),
     json = options.json or (remuda and remuda.json),
     read = options.read,
     runner = options.runner or (remuda and remuda.process and remuda.process.run),

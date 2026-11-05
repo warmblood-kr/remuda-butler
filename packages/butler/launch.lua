@@ -305,11 +305,23 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   local selected_native = native_plans[kind]
   if selected_native and selected_native.mode == "native"
       and (kind == "opencode" or kind == "claude" or kind == "codex") then
-    local live_row
-    for _, row in ipairs(remuda.ls()) do
+    local live_rows, live_row = {}, nil
+    local listed, rows = pcall(remuda.ls)
+    if listed and type(rows) == "table" then live_rows = rows end
+    for _, row in ipairs(live_rows) do
       if row.name == actual then live_row = row end
     end
-    bus.agents[actual].native = remuda._butler_native_launch.join(selected_native, live_row, instance_id)
+    local resolve
+    local identity = remuda._butler_native_identity
+    if identity and type(identity.resolve) == "function" and live_row then
+      resolve = function(target)
+        return identity.resolve(target, { rows = live_rows,
+          list = remuda.ls, runner = remuda.process and remuda.process.run,
+          json = remuda.json, remuda = "remuda" })
+      end
+    end
+    bus.agents[actual].native = remuda._butler_native_launch.join(
+      selected_native, live_row, instance_id, resolve)
     if bus.agents[actual].native.mode ~= "native" then
       _butler_session_trace("native_launch_join", actual .. " mode="
         .. tostring(bus.agents[actual].native.mode) .. " reason="

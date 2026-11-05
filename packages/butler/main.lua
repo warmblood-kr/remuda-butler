@@ -684,12 +684,14 @@ remuda.butler.native_launch.install({ paths = remuda._butler_paths,
   random = remuda.random_bytes })
 remuda.exec("butler/native_codex")
 remuda.exec("butler/native_opencode")
+remuda.exec("butler/native_identity")
 remuda.exec("butler/native_task")
 remuda.exec("butler/native_adopt")
 remuda.exec("butler/native_cli")
 remuda.butler.native_adopt.install({ bus = bus, launch = remuda.butler.native_launch,
   config = remuda.butler.native_config, codex = remuda.butler.native_codex,
   opencode = remuda.butler.native_opencode,
+  identity = remuda.butler.native_identity,
   json = remuda.json, runner = remuda.process and remuda.process.run,
   roster_save = function()
     if remuda._butler_roster_save then return remuda._butler_roster_save() end
