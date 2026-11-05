@@ -610,7 +610,10 @@ rows[1].id = nil
 bus.agents.lead.native.kind = "opencode"
 bus.agents.lead.native.row_id = "core-id-lead"
 bus.agents.lead.native.session_token = "core-id-lead"
-remuda._butler_native_identity = { resolve = function(row, options)
+assert(rawget(remuda, "_butler_native_identity") == nil,
+  "the dispatch must not read a private identity alias")
+remuda.butler = remuda.butler or {}
+remuda.butler.native_identity = { resolve = function(row, options)
   assert(type(options.rows) == "table" and type(options.list) == "function",
     "the proof gets the pre fleet and a post re-list")
   return "core-id-lead"
@@ -629,7 +632,7 @@ rows[1].id = nil
 bus.agents.lead.native.kind = "opencode"
 bus.agents.lead.native.row_id = "core-id-lead"
 bus.agents.lead.native.session_token = "core-id-lead"
-remuda._butler_native_identity = { resolve = function()
+remuda.butler.native_identity = { resolve = function()
   bus.agents.lead.native = { mode = "native", kind = "opencode",
     path = "/fresh/manifest.json", nonce = string.rep("b", 32),
     row_id = "fresh-id", instance = "instance-1" }
@@ -639,7 +642,20 @@ respond({ outcome = "accepted_queue" })
 assert(N.deliver_notice("lead") == false, "a replaced decision is not dispatched")
 assert(#spawns == 0, "no helper call for the stale decision")
 assert(bus.agents.lead.native.row_id == "fresh-id", "the fresh decision is preserved")
-remuda._butler_native_identity = nil
+remuda.butler.native_identity = nil
+
+-- 5y. With no public identity module an old projection cannot prove its id:
+-- the dispatch fails closed with no helper call and no PTY fallback.
+reset()
+queue()
+rows[1].id = nil
+bus.agents.lead.native.kind = "opencode"
+bus.agents.lead.native.row_id = "core-id-lead"
+bus.agents.lead.native.session_token = "core-id-lead"
+respond({ outcome = "accepted_queue" })
+assert(N.deliver_notice("lead") == false, "a missing public module fails closed")
+assert(#spawns == 0, "no helper call without the canonical proof")
+assert(pty_sends == 0, "no PTY fallback without the canonical proof")
 
 -- 6a. A native arrival is dispatched in the notify call itself: no quiet or
 -- cap timer, no PTY, and a pending first task or attached pane does not hold

@@ -1383,7 +1383,7 @@ local function native_row(session, native, options)
   -- The liveness watcher only needs the exact live instance; a real dispatch
   -- does the full same-fleet proof below on every attempt.
   if options.liveness_only then return row end
-  local identity = remuda._butler_native_identity
+  local identity = remuda.butler and remuda.butler.native_identity
   if not identity or type(identity.resolve) ~= "function" then
     return nil, "target_missing"
   end
