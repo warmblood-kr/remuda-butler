@@ -52,6 +52,25 @@ local extra_inner = module.read(codec.encode({ version = 1,
   opencode = { enabled = true, extra = true } }), options)
 assert(extra_inner.enabled == false and extra_inner.reason:find("unknown_key", 1, true),
   "unknown opencode keys are refused")
+-- 1b. Each kind has its own strict default-off section.
+local all = module.read(codec.encode({ version = 1, opencode = { enabled = true },
+  codex = { enabled = true }, claude = { enabled = false } }), options)
+assert(all.enabled == true and module.kind(all, "codex").enabled == true
+  and module.kind(all, "claude").enabled == false
+  and module.kind(all, "claude").reason == "disabled",
+  "each kind is independent")
+local section_missing = module.read(codec.encode({ version = 1,
+  opencode = { enabled = true } }), options)
+assert(module.kind(section_missing, "codex").enabled == false
+  and module.kind(section_missing, "codex").reason == "config_missing_section",
+  "a missing section stays unavailable")
+local codex_extra = module.read(codec.encode({ version = 1,
+  opencode = { enabled = true }, codex = { enabled = true, extra = true } }), options)
+assert(codex_extra.enabled == true, "a bad Codex section does not disable OpenCode")
+assert(module.kind(codex_extra, "codex").enabled == false
+  and module.kind(codex_extra, "codex").reason:find("unknown_key", 1, true) ~= nil,
+  "a bad Codex section is refused locally")
+
 local nofile = module.load("cfg", { json = codec, read = function() return nil, "missing" end })
 assert(nofile.enabled == false and nofile.reason == "config_missing", "missing file is off")
 local unreadable = module.load("cfg", { json = codec, read = function() error("denied") end })
