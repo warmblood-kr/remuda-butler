@@ -91,3 +91,11 @@ membership authentication and remote polling; it must label each node and
 show unavailable/stale plus the last successful observation age. Missing peers
 must never be represented as an empty healthy event list. No second transport,
 remote execution, state changes or new listener configuration is proposed.
+
+## Automatic delivery state
+
+`remuda butler doctor` prints one `Automatic delivery` block from the durable
+delivery journal: uncertain/accepted-unread/dispatching counts, oldest age,
+recipient and message IDs, and the recorded reason, or an explicit
+corrupt/blocked/full/hash-pending line. It is read-only: no endpoint, password,
+nonce, path or message body appears, and there is no reconcile command.

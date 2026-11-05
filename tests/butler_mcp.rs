@@ -2126,21 +2126,22 @@ fn a_draft_screen_does_not_block_or_leak_the_notice() {
     assert!(!events.contains("type "), "no separate typing: {events}");
 }
 
-/// An attached human is the one refusal: no bytes, no capture, queue retained.
+/// Attachment is not an admission gate (owner decision 2026-11-05): the
+/// notice still uses one atomic send and clears the queue on transport
+/// acceptance. No screen read or separate typing is involved.
 #[test]
-fn an_attached_human_refuses_the_notice() {
-    let (path, _daemon) = butler_with_member("notice-attached-refusal");
+fn an_attached_human_still_receives_the_notice() {
+    let (path, _daemon) = butler_with_member("notice-attached-delivery");
     let got = eval(
         &path,
         r#"
-        local row = { name = 'm1', alive = true, attached = true }
+        local agent = remuda._butler_bus.agents.m1
+        local row = { name = 'm1', alive = true, attached = true, instance_id = agent.instance_id }
         remuda.ls = function() return { row } end
         remuda._butler_bus.agents.m1.kind = 'codex'
-        local state = { sends = 0, now = 0 }
-        remuda._notice_attached_state = state
-        remuda._butler_notice_clock = function() return state.now end
-        -- Keep the real capability (and its attached preflight); only the raw
-        -- core write is stubbed so a refusal never reaches a pane.
+        local state = { sends = 0 }
+        remuda._butler_notice_clock = function() return 0 end
+        -- Keep the real capability; only the raw core write is stubbed.
         local originals = remuda._butler_dialog_originals
         if originals and originals.send then
           originals.send = function() state.sends = state.sends + 1; return true end
@@ -2155,7 +2156,7 @@ fn an_attached_human_refuses_the_notice() {
           tostring(remuda._butler_bus.notices.m1 and remuda._butler_bus.notices.m1.due_at) }, '|')
         "#,
     );
-    assert_eq!(got, "0|true|1", "an attached pane receives nothing and rechecks in a second: {got}");
+    assert_eq!(got, "1|false|nil", "an attached pane still receives one atomic notice: {got}");
 }
 
 #[test]

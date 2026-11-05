@@ -299,6 +299,11 @@ telemetry.opencode = {
 
 builders.opencode = function(spec)
   assert(type(spec.name) == "string", "OpenCode agent spec requires a string name")
+  if spec.native and spec.native.mode == "native" and type(spec.native.binding) == "string" then
+    -- Launch-owned fixed session: the core wrapper creates the server, the
+    -- session and the TUI; Butler only supplies the private binding path.
+    return { "remuda", "_opencode_tui", "--binding", spec.native.binding, "--cwd", spec.cwd }
+  end
   local argv = { "opencode", "--standalone" }
   if type(spec.cwd) == "string" and spec.cwd ~= "" then argv[#argv + 1] = spec.cwd end
   return argv

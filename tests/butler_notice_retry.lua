@@ -41,6 +41,7 @@ remuda = {
   capture = function() return "› Ask Codex to do anything" end,
   session = function() return { is_busy = true } end,
 }
+dofile("tests/notice_journal_stub.lua")
 dofile("packages/butler/notice.lua")
 local failure_id = 0
 remuda._butler_send = function(_, to, body)
@@ -145,7 +146,7 @@ remuda.send = function(_, value)
   end
   assert(value:find("queued notice", 1, true), "the coalesced notice text is sent")
 end
-assert(not remuda._butler_notify("lead", "queued notice"))
+assert(not remuda._butler_notify("lead", "queued notice", "q1"))
 now = now + 2
 local retry_at = now
 remuda._butler_deliver_notices()
@@ -165,7 +166,7 @@ bus.notices.lead, bus.notice_recoveries.lead = nil, nil
 bus.agents.lead.id = "lead-id"
 local draft_sends = 0
 remuda.send = function() draft_sends = draft_sends + 1 end
-assert(not remuda._butler_notify("lead", "notice beside a draft"))
+assert(not remuda._butler_notify("lead", "notice beside a draft", "q2"))
 now = now + 2
 remuda._butler_deliver_notices()
 assert(draft_sends == 1 and bus.notices.lead == nil,
@@ -184,7 +185,7 @@ remuda.send = function()
   error("an earlier write to this pane stalled for over 30s and its Return was not sent; "
     .. "the pane may hold unsent text; this text was not typed", 0)
 end
-assert(not remuda._butler_notify("lead", "notice after a stalled write"))
+assert(not remuda._butler_notify("lead", "notice after a stalled write", "q3"))
 now = now + 2
 remuda._butler_deliver_notices()
 assert(not_typed_sends == 1 and bus.notices.lead.delivery_attempts == 1

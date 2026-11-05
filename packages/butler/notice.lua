@@ -21,6 +21,9 @@ local notify_mail_delivery = assert(config.notify_mail_delivery)
 local deliver_message = assert(config.deliver_message)
 local known_startup_modal = assert(remuda._butler_chooser).known_startup_modal
 local startup_action_safe
+-- The originating module identity, captured at load. Never read
+-- remuda._butler_notice when deciding whether an attempt is still current.
+local NOTICE_MODULE = {}
 
 -- #201: the Codex sandbox blocks the CLI, so a Codex member is pointed at the MCP tool first.
 local function inbox_hint(kind)
@@ -57,6 +60,9 @@ bus.notice_retry_reasons = bus.notice_retry_reasons or {}
 bus.notice_fallbacks = bus.notice_fallbacks or {}
 bus.notice_failure_alerts = bus.notice_failure_alerts or {}
 bus.notice_uncertain_alerts = bus.notice_uncertain_alerts or {}
+bus.notice_journal_alerts = bus.notice_journal_alerts or {}
+bus.notice_journal_failure_alerts = bus.notice_journal_failure_alerts or {}
+bus.notice_native_alerts = bus.notice_native_alerts or {}
 -- Durable-for-this-image uncertainty tombstones: recipient identity id ->
 -- message id. They outlive the report/stuck record and are never cleared by
 -- reads or reminders, so a compaction re-show or a preserved-bus reload cannot
@@ -611,13 +617,14 @@ end
 -- and Return in a single burst) through the dialogs module's narrow
 -- `automatic_notice_send` capability. The old empty-composer/modal/idle
 -- predictions, probe, 20-second recovery and extra Return are gone (owner
--- decision 2026-11-03). The capability keeps an unconditional attached,
--- live-session and instance preflight and its own audit; it bypasses only the
--- modal *prediction* gate, and only for generated notice text. A core accept
--- means the write path returned; it never means the agent read the mail. Only
--- an inbox read drains mail. Known residual race: the core send word is
--- name-addressed, so a human attaching, or a name being reused, between the
--- preflight and the write is not excluded atomically.
+-- decisions 2026-11-03 and 2026-11-05). Attachment, busy state and composer
+-- contents are not admission gates; the capability keeps a live-session and
+-- bound-instance preflight, its own audit and the agent/generation recheck;
+-- it bypasses only the modal *prediction* gate, and only for generated notice
+-- text. A core accept means the write path returned; it never means the agent
+-- read the mail. Only an inbox read drains mail. Known residual race: the core
+-- send word is name-addressed, so a human attaching, or a name being reused,
+-- between the preflight and the write is not excluded atomically.
 local function first_line(value)
   local line = tostring(value or ""):match("^[^\r\n]*") or ""
   return line:gsub("[\r\n]+", " "):gsub("%s+$", "")
@@ -646,7 +653,10 @@ local NOTICE_SEND_OUTCOMES = {
   { kind = "busy", pattern = "session input is busy" },
   { kind = "busy", pattern = "session input write is already in flight" },
   { kind = "busy", pattern = "a session input write is already in flight" },
-  { kind = "attached", pattern = "a human is attached to this session" },
+  -- Core transport limitation, not a policy gate on human attachment: the
+  -- notice is still admitted and written; if the core refuses, nothing was
+  -- written and the explicit transport reason is retried like busy.
+  { kind = "transport_attached", pattern = "a human is attached to this session" },
   { kind = "dialog", pattern = "butler dialog blocked" },
   { kind = "dialog", pattern = "butler dialog audit unavailable" },
   { kind = "dialog", pattern = "butler dialog target is not registered" },
@@ -662,13 +672,20 @@ local NOTICE_SEND_OUTCOMES = {
   { kind = "uncertain", pattern = "delivery may be partial or late" },
   { kind = "uncertain", pattern = "agent io error" },
   { kind = "uncertain", pattern = "input outcome is uncertain" },
+  -- Native outcomes are prefixed, so they win over the generic session words.
+  { kind = "native_dead", pattern = "native_dead" },
+  { kind = "native_not_written", pattern = "native_not_written" },
+  { kind = "uncertain", pattern = "native_uncertain" },
   -- Preflight/refusal tokens from the dialogs capability and the local fallback.
-  { kind = "attached", pattern = "human_attached" },
+  { kind = "transport_attached", pattern = "human_attached" },
   { kind = "gone", pattern = "session_not_live" },
   { kind = "gone", pattern = "session_replaced" },
   { kind = "gone", pattern = "session_instance_missing" },
   { kind = "gone", pattern = "session_changed" },
   { kind = "gone", pattern = "session_unknown" },
+  { kind = "journal", pattern = "journal_generation_changed" },
+  { kind = "journal", pattern = "attempt_replaced" },
+  { kind = "journal", pattern = "journal_replaced" },
   { kind = "not_typed", pattern = "audit_unavailable" },
   { kind = "not_typed", pattern = "send_unavailable" },
   { kind = "not_typed", pattern = "dialogs_unavailable" },
@@ -869,11 +886,43 @@ local function defer_notice_send(session, pending, kind, why)
       remuda._butler_notice_open_stuck(session, pending.message_order,
         kind .. ": " .. first_line(why))
     end
-    local reason = kind == "attached" and "human_attached"
-      or kind == "dialog" and "dialog_blocked" or "prompt_busy"
+    local reason = kind == "transport_attached" and "attach_refused"
+      or kind == "dialog" and "dialog_blocked"
+      or kind == "native_disabled" and "native_disabled"
+      or kind == "target_changed" and "target_changed"
+      or kind == "journal" and "journal_blocked" or "prompt_busy"
     if pending.diagnostic_reason ~= reason then
-      diagnostic("deferred", reason, session)
+      diagnostic(kind == "journal" and "error" or "deferred", reason, session)
       pending.diagnostic_reason = reason
+    end
+    if kind == "native_disabled" then
+      local alerts = bus.notice_native_alerts[session] or {}
+      bus.notice_native_alerts[session] = alerts
+      if not alerts.disabled then
+        alerts.disabled = true
+        send_notice_alert(session, pending.message_order, "butler-notice-native-disabled", function(ids)
+          return "Native delivery to " .. session .. " is disabled ("
+            .. first_line(why) .. "). No PTY fallback was attempted; mail stays unread until a"
+            .. " later launch or inspection. Message IDs: " .. table.concat(ids, ",") .. "."
+        end)
+      end
+      trace_notice_defer(session, pending, kind)
+      return false, kind
+    end
+    if kind == "journal" then
+      _butler_session_trace("notice_journal_blocked", "message_ids="
+        .. table.concat(pending.message_order or {}, ",") .. " session=" .. session
+        .. " reason=" .. first_line(why))
+      local alerts = bus.notice_journal_alerts[session] or {}
+      bus.notice_journal_alerts[session] = alerts
+      if not alerts.reported then
+        alerts.reported = true
+        send_notice_alert(session, pending.message_order, "butler-notice-journal", function(ids)
+          return "Automatic mail delivery to " .. session .. " is blocked by its delivery journal ("
+            .. first_line(why) .. "). No bytes were written. Inspect `remuda butler doctor`; "
+            .. "mail stays unread. Message IDs: " .. table.concat(ids, ",") .. "."
+        end)
+      end
     end
     trace_notice_defer(session, pending, kind)
   end
@@ -934,6 +983,9 @@ complete_notice_recovery = function(session, state)
   bus.notice_recoveries[session] = nil
   bus.notice_retry_reasons[session] = nil
   bus.notice_failure_alerts[session] = nil
+  bus.notice_journal_alerts[session] = nil
+  bus.notice_journal_failure_alerts[session] = nil
+  bus.notice_native_alerts[session] = nil
   local stuck = bus.notice_stuck[session]
   if stuck then
     -- Close only what this delivery covered; other stuck mail keeps its record and throttle.
@@ -949,14 +1001,385 @@ complete_notice_recovery = function(session, state)
   clear_notice_fallbacks(session, state.message_ids)
   return true
 end
+-- The durable delivery journal is the authority for automatic attempts. It is
+-- required: without it, or while it is blocked/corrupt/full, no automatic write
+-- happens (explicit status, no PTY bypass). Helpers stay small and file-scope.
+local function notice_journal()
+  return remuda._butler_delivery_journal
+end
+local function notice_recipient_id(session)
+  local agent = bus.agents[session]
+  return agent and agent.id
+end
+local function notice_row(session)
+  local listed, rows = pcall(remuda.ls)
+  if not listed or type(rows) ~= "table" then return nil end
+  for _, row in ipairs(rows) do
+    if row.name == session then return row end
+  end
+end
+local function notice_journal_record(session, state, text, snapshot)
+  local agent = (snapshot and snapshot.agent) or bus.agents[session]
+  local recipient_id = agent and agent.id
+  if not recipient_id then return nil, "recipient_unknown" end
+  local row
+  if not snapshot then row = notice_row(session) end
+  return { recipient_id = recipient_id, message_ids = state.message_ids,
+    protocol = (snapshot and snapshot.protocol) or "pty",
+    instance = (snapshot and snapshot.instance)
+      or agent.instance_id or (row and row.instance_id),
+    row_id = (snapshot and snapshot.row_id) or (row and row.id), body = text }
+end
+local function notice_journal_begin(session, state, text, snapshot)
+  local journal = notice_journal()
+  if not journal or type(journal.begin) ~= "function" then return nil, "journal_unavailable" end
+  local record, record_err = notice_journal_record(session, state, text, snapshot)
+  if not record then return nil, record_err end
+  local ok, entry, err = pcall(journal.begin, record)
+  if not ok then return nil, tostring(entry) end
+  return entry, err, journal
+end
+-- The attempt's generation claim: the same journal object, the same entry in
+-- it, still DISPATCHING, and the journal still current. Checked immediately
+-- before any raw transport and again after an audit yield.
+-- Everything the attempt decided BEFORE any yield: the originating notice
+-- module, the exact agent object, instance/row identity, frozen body and the
+-- full ID list. Capturing after journal.begin would let a writer-yield reload
+-- or same-id agent replacement become the "current" identity.
+local function frozen_native_binding(native)
+  if type(native) ~= "table" or native.mode ~= "native" then return nil end
+  return { mode = "native", path = native.path, nonce = native.nonce,
+    row_id = native.row_id, instance = native.instance }
+end
+
+local function same_native_binding(left, right)
+  return type(left) == "table" and type(right) == "table"
+    and left.path == right.path and left.nonce == right.nonce
+    and left.row_id == right.row_id and left.instance == right.instance
+end
+
+-- A dead result belongs to the binding that was dispatched. The reservation
+-- release yields, so only disable if the same generation and binding are still
+-- in place; never mutate a replacement agent.
+local function disable_native_if_current(session, snapshot, why)
+  if not snapshot or not snapshot.native then return false end
+  local agent = bus.agents[session]
+  if agent ~= snapshot.agent or remuda._butler_notice ~= snapshot.generation then
+    return false
+  end
+  if not same_native_binding(snapshot.native, frozen_native_binding(agent.native)) then
+    return false
+  end
+  if remuda.butler and remuda.butler.native_launch then
+    remuda.butler.native_launch.disable(agent, why)
+  end
+  return true
+end
+
+-- The same decision that chose the text must still belong to this agent. A
+-- change before the first yield is stale, even if it looks more capable.
+local function freeze_decision(agent, native_decision)
+  if agent.native ~= native_decision then return nil, false end
+  local frozen = frozen_native_binding(native_decision)
+  if type(native_decision) == "table" and not frozen then return nil, false end
+  return frozen, true
+end
+
+local function attempt_identity_unchanged(agent, session, recipient_id, instance, generation)
+  return remuda._butler_notice == generation and bus.agents[session] == agent
+    and agent.id == recipient_id and agent.instance_id == instance
+end
+
+-- Revalidate after the listing even for a PTY snapshot: a pty->bound change
+-- under the frozen text is just as stale as a native->disabled change.
+local function binding_unchanged_after_ls(agent, frozen)
+  if frozen then
+    return same_native_binding(frozen, frozen_native_binding(agent.native))
+  end
+  return type(agent.native) ~= "table"
+end
+
+local function notice_attempt_snapshot(session, state, text, native_decision)
+  local agent = bus.agents[session]
+  if not agent or not agent.id then return nil end
+  local recipient_id, agent_instance = agent.id, agent.instance_id
+  local generation = NOTICE_MODULE
+  if remuda._butler_notice ~= generation then return nil end
+  -- The decision and its whole binding are frozen BEFORE the first yield
+  -- (remuda.ls), so the listing cannot change native/PTY under chosen text.
+  local frozen, consistent = freeze_decision(agent, native_decision)
+  if not consistent then return nil end
+  local row = notice_row(session) -- remuda.ls may yield
+  if not attempt_identity_unchanged(agent, session, recipient_id, agent_instance,
+      generation) then return nil end
+  if not binding_unchanged_after_ls(agent, frozen) then return nil end
+  local ids = {}
+  for _, id in ipairs(state.message_ids or {}) do ids[#ids + 1] = id end
+  return { generation = generation, agent = agent, session = session,
+    protocol = frozen and "native" or "pty", native = frozen,
+    agent_instance = agent_instance,
+    recipient_id = recipient_id, instance = agent_instance or (row and row.instance_id),
+    row_instance = row and row.instance_id,
+    row_id = row and row.id, body = text, message_ids = ids }
+end
+
+local function notice_attempt_current(journal, entry, snapshot, observed)
+  if not journal or not entry or not snapshot then return false end
+  if remuda._butler_notice ~= snapshot.generation then return false end
+  local live_agent = bus.agents[snapshot.session]
+  if live_agent ~= snapshot.agent then return false end
+  if live_agent.id ~= snapshot.recipient_id then return false end
+  if snapshot.agent.instance_id ~= snapshot.agent_instance then return false end
+  if snapshot.native then
+    -- A replaced binding is a different generation: never send to it, and
+    -- never fall back to PTY with text frozen for native delivery.
+    if not same_native_binding(snapshot.native, frozen_native_binding(live_agent.native)) then
+      return false
+    end
+  elseif type(live_agent.native) == "table" then
+    -- A previously unbound (PTY) attempt cannot become bound mid-write.
+    return false
+  end
+  if notice_journal() ~= journal then return false end
+  if entry.state ~= "dispatching" then return false end
+  if entry.recipient_id ~= snapshot.recipient_id then return false end
+  if entry.body ~= snapshot.body then return false end
+  if entry.instance ~= "" and snapshot.instance and entry.instance ~= snapshot.instance then
+    return false
+  end
+  if snapshot.row_instance and entry.instance ~= snapshot.row_instance then return false end
+  if entry.row_id ~= "" and snapshot.row_id and entry.row_id ~= snapshot.row_id then
+    return false
+  end
+  if #entry.message_ids ~= #snapshot.message_ids then return false end
+  for index, id in ipairs(snapshot.message_ids) do
+    if entry.message_ids[index] ~= id then return false end
+  end
+  if type(journal.current) == "function" then
+    local ok, current = pcall(journal.current)
+    if not ok or current ~= true then return false end
+  end
+  -- The pre-transport preflight must observe the same target as the snapshot.
+  -- This is what catches a legacy nil agent.instance_id whose row instance
+  -- changed while the agent record stayed identical.
+  if observed then
+    if observed.recipient_id ~= snapshot.recipient_id then return false end
+    if observed.agent_instance ~= snapshot.agent_instance then return false end
+    if observed.instance ~= snapshot.instance then return false end
+    if snapshot.row_id and observed.row_id ~= snapshot.row_id then return false end
+  end
+  local ok, found = pcall(journal.find, entry.recipient_id, entry.message_ids[1])
+  return ok and found == entry
+end
+local function notice_journal_mutable(journal, entry)
+  if not journal or not entry or notice_journal() ~= journal then return false, "attempt_replaced" end
+  if type(journal.current) == "function" then
+    local ok, current = pcall(journal.current)
+    if not ok or current ~= true then return false, "attempt_replaced" end
+  end
+  return true
+end
+local function notice_journal_accepted(entry, journal)
+  local mutable, why = notice_journal_mutable(journal, entry)
+  if not mutable then return false, why end
+  local ok, result, err
+  if entry.protocol == "native" then
+    ok, result, err = pcall(journal.mark, entry, "accepted_unread", "native accepted")
+    if not ok then return false, tostring(result) end
+    return result, err
+  end
+  ok, result, err = pcall(journal.retire, entry)
+  if not ok then return false, tostring(result) end
+  return result, err
+end
+local function notice_journal_uncertain(entry, why, journal)
+  local mutable, replaced = notice_journal_mutable(journal, entry)
+  if not mutable then return false, replaced end
+  local ok, result, err = pcall(journal.mark, entry, "uncertain", first_line(why))
+  if not ok then return false, tostring(result) end
+  return result, err
+end
+local function notice_journal_abandon(entry, journal)
+  local mutable, replaced = notice_journal_mutable(journal, entry)
+  if not mutable then return false, replaced end
+  local ok, result, err = pcall(journal.retire, entry, { restore = true })
+  if not ok then return false, tostring(result) end
+  return result, err
+end
+-- A resolution write can fail after the transport already ran (disk full, a
+-- reload mid-save). Surface it explicitly instead of swallowing pcall results;
+-- the entry stays reserved, so no automatic resend follows.
+local function notice_journal_resolve_failed(session, ids, stage, why)
+  diagnostic("error", "journal_resolve_failed", session)
+  _butler_session_trace("notice_journal_resolve_failed", "message_ids="
+    .. table.concat(ids or {}, ",") .. " session=" .. session .. " stage=" .. stage
+    .. " reason=" .. first_line(why))
+  local alerts = bus.notice_journal_failure_alerts[session] or {}
+  bus.notice_journal_failure_alerts[session] = alerts
+  if alerts.reported then return end
+  alerts.reported = true
+  local advice = {
+    accepted = "The transport write was accepted, but its journal outcome could not be"
+      .. " recorded. Legacy unread reminders may still run, and a restart may treat the"
+      .. " attempt as uncertain.",
+    uncertain = "The send outcome is uncertain and could not be recorded. The attempt"
+      .. " stays reserved for this runtime, and a restart keeps it uncertain.",
+    release = "A pre-write refusal could not release its reservation, so it is kept"
+      .. " conservatively; no automatic resend runs until the journal is repaired.",
+  }
+  send_notice_alert(session, ids, "butler-notice-journal-failure", function(fresh)
+    return "Butler could not record the " .. stage .. " outcome for automatic mail to "
+      .. session .. " (" .. first_line(why) .. "). " .. (advice[stage] or "")
+      .. " Inspect `remuda butler doctor`. Message IDs: " .. table.concat(fresh, ",") .. "."
+  end)
+end
+local function notice_journal_suppressed(journal, recipient_id, message_id)
+  local ok, value = pcall(journal.suppresses, recipient_id, message_id)
+  return ok and value == true
+end
+-- A pending queue can outlive a reload. Drop IDs the journal already owns
+-- (DISPATCHING/UNCERTAIN/accepted) before building a new attempt.
+local function pending_without_reserved(session, pending)
+  local journal = notice_journal()
+  if not journal or not pending or not pending.message_order then return pending end
+  local recipient_id = notice_recipient_id(session)
+  if not recipient_id then return pending end
+  local keep, dropped = {}, false
+  for _, id in ipairs(pending.message_order) do
+    if notice_journal_suppressed(journal, recipient_id, id) then dropped = true
+    else keep[#keep + 1] = id end
+  end
+  if not dropped then return pending end
+  if #keep == 0 then
+    bus.notices[session], bus.notice_recoveries[session] = nil, nil
+    bus.notice_retry_reasons[session] = nil
+    return nil
+  end
+  local rebuilt = { count = #keep, message_ids = {}, message_order = keep,
+    message_times = {}, reshow = {}, reminders = {}, kind = pending.kind,
+    first_at = pending.first_at, last_at = pending.last_at, due_at = pending.due_at,
+    delivery_attempts = pending.delivery_attempts, retry_at = pending.retry_at,
+    busy_since = pending.busy_since, text = pending.message_ids[keep[#keep]] }
+  for _, id in ipairs(keep) do
+    rebuilt.message_ids[id] = pending.message_ids[id]
+    rebuilt.message_times[id] = pending.message_times and pending.message_times[id]
+    if pending.reshow and pending.reshow[id] then rebuilt.reshow[id] = true end
+    if pending.reminders and pending.reminders[id] then rebuilt.reminders[id] = true end
+  end
+  bus.notices[session] = rebuilt
+  return rebuilt
+end
+-- Native pointer text is frozen by the core contract: no sender detail, a
+-- fixed MCP-first hint, and the original ID for a re-show.
+local NATIVE_INBOX = "MCP butler_inbox (or remuda butler inbox)"
+local function native_notice_text(pending)
+  if pending.count == 1 then
+    local id = pending.message_order[#pending.message_order]
+    return "Butler message " .. id .. " arrived. Read it: " .. NATIVE_INBOX
+  end
+  return pending.count .. " new Butler messages arrived. Read them: " .. NATIVE_INBOX
+end
+local function native_state(session)
+  local agent = bus.agents[session]
+  local native = agent and agent.native
+  if type(native) == "table" and (native.mode == "native" or native.mode == "disabled") then
+    return native
+  end
+end
+local function native_row(session, native)
+  local row = {}
+  local listed, rows = pcall(remuda.ls)
+  -- A listing failure wrote nothing and says nothing about the binding, so it
+  -- is retryable; only a confirmed missing/stale target disables.
+  if not listed or type(rows) ~= "table" then return nil, "session_unverified" end
+  for _, candidate in ipairs(rows) do
+    if candidate.name == session then row = candidate end
+  end
+  if not row.name or not row.alive then return nil, "session_not_live" end
+  if type(native.row_id) ~= "string" or row.id ~= native.row_id then
+    return nil, "target_missing"
+  end
+  if type(native.instance) ~= "string" or row.instance_id ~= native.instance then
+    return nil, "stale_binding"
+  end
+  return row
+end
+local DEAD_BUILD_REASONS = { invalid_binding = true, invalid_nonce = true,
+  invalid_session = true, invalid_instance = true }
+
+local function native_target(session, native, still_current)
+  local row, row_why = native_row(session, native)
+  if not row then
+    if row_why == "session_unverified" then
+      return false, "native_not_written: " .. row_why
+    end
+    return false, "native_dead: " .. row_why
+  end
+  if type(still_current) == "function" then
+    local ok, current = pcall(still_current)
+    if not ok or current ~= true then return false, "journal_generation_changed" end
+  end
+  return row
+end
+
+local function native_request(native, text, ids)
+  local dispatch = remuda.butler and remuda.butler.native_dispatch
+  if not dispatch or type(dispatch.build) ~= "function" then
+    return nil, nil, "native_uncertain: dispatch_unavailable"
+  end
+  local request, why = dispatch.build({ binding = native.path, nonce = native.nonce,
+    session = native.row_id, instance = native.instance,
+    request_id = "msg_" .. ids[1] .. "_" .. tostring(notice_now()), text = text,
+    message_ids = ids })
+  if not request then
+    -- A broken binding target disables the session; anything else is a local
+    -- preflight refusal that wrote nothing and may use the bounded schedule.
+    if DEAD_BUILD_REASONS[why] then
+      return nil, nil, "native_dead: " .. tostring(why)
+    end
+    return nil, nil, "native_not_written: " .. tostring(why)
+  end
+  return request, dispatch
+end
+
+local function native_outcome(result)
+  if type(result) ~= "table" then return false, "native_uncertain: dispatch_failed" end
+  if result.outcome == "accepted" then return true end
+  if result.outcome == "dead_binding" then
+    return false, "native_dead: " .. tostring(result.reason)
+  end
+  if result.outcome == "not_written" then
+    return false, "native_not_written: " .. tostring(result.reason)
+  end
+  return false, "native_uncertain: " .. tostring(result.reason or "unknown")
+end
+
+-- One helper invocation; every response is mapped to the existing notice
+-- outcome classes. Never a PTY fallback and never a guessed success.
+local function native_notice_send(session, native, text, ids, still_current)
+  local row, target_why = native_target(session, native, still_current)
+  if not row then return false, target_why end
+  local request, dispatch, request_why = native_request(native, text, ids)
+  if not request then return false, request_why end
+  local result = dispatch.dispatch(request, { json = remuda.json,
+    runner = remuda.process and remuda.process.run, remuda = "remuda" })
+  return native_outcome(result)
+end
 -- The dialogs module's narrow automatic-wakeup capability is the only path
 -- that bypasses the modal prediction gate. Without that module (isolated
 -- tests or an older image) the raw core word is used after the same
--- unconditional attached/live/instance preflight.
-local function notice_send(session, text, ids)
+-- live-session/bound-instance preflight and, when supplied, the generation
+-- fence. Attachment itself is not an admission gate.
+local function notice_send(session, text, ids, still_current, frozen_native)
+  -- Only the frozen decision can select native: a mode change during the
+  -- journal write must never turn this attempt into a PTY write.
+  local native = frozen_native
+  if native and native.mode == "native" then
+    return native_notice_send(session, native, text, ids, still_current)
+  end
   local dialogs = remuda.butler and remuda.butler.dialogs
   if dialogs and type(dialogs.automatic_notice_send) == "function" then
-    local ok, sent, reason = pcall(dialogs.automatic_notice_send, session, text, ids)
+    local ok, sent, reason = pcall(dialogs.automatic_notice_send, session, text, ids, still_current)
     if not ok then return false, tostring(sent) end
     return sent == true, reason
   end
@@ -967,7 +1390,6 @@ local function notice_send(session, text, ids)
     if candidate.name == session then row = candidate end
   end
   if not row or not row.alive then return false, "session_not_live" end
-  if row.attached then return false, "human_attached" end
   local expected, actual = agent.instance_id, row.instance_id
   if type(expected) == "string" and expected ~= "" then
     -- A bound instance with no readable row instance cannot be verified.
@@ -975,33 +1397,97 @@ local function notice_send(session, text, ids)
     if actual ~= expected then return false, "session_replaced" end
   end
   if type(remuda.send) ~= "function" then return false, "send_unavailable" end
+  if type(still_current) == "function" then
+    local ok_guard, current = pcall(still_current, { recipient_id = agent.id,
+      agent_instance = agent.instance_id, instance = actual, row_id = row.id })
+    if not ok_guard or current ~= true then return false, "journal_generation_changed" end
+  end
   local ok, result, detail = pcall(remuda.send, session, text)
   if ok and result ~= false then return true end
   if ok then return false, "send_refused: " .. tostring(detail or result or "refused") end
   return false, tostring(result or "send error")
 end
 -- One send per coalesced notice. No screen parsing, no composer prediction,
--- no modal prediction, no Return retry: the capability's unconditional
--- attached/live preflight and the core's in-flight write guard decide.
+-- no modal prediction, no Return retry: the live-session/bound-instance
+-- preflight, the generation fence and the core's in-flight write guard decide.
 local function deliver_notice(session)
   local pending = bus.notices[session]
   if not pending then return true end
   pending = refresh_pending_notice(session, pending)
+  pending = pending and pending_without_reserved(session, pending)
   if not pending then return true end
   if bus.pending_tasks[session] then return false end
   local state = { count = pending.count, message_ids = {} }
   for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
-  local text = pending_notice_text(pending)
-  local sent, why = notice_send(session, text, state.message_ids)
+  local native = native_state(session)
+  if native and native.mode == "disabled" then
+    return defer_notice_send(session, pending, "native_disabled",
+      native.reason or "native delivery is disabled")
+  end
+  local text = native and native_notice_text(pending) or pending_notice_text(pending)
+  -- DISPATCHING is persisted before any bytes are written; without that write
+  -- there is no dispatch at all (no PTY bypass).
+  local snapshot = notice_attempt_snapshot(session, state, text, native)
+  if not snapshot then
+    return defer_notice_send(session, pending, "journal", "journal_generation_changed")
+  end
+  local entry, journal_why, journal = notice_journal_begin(session, state, text, snapshot)
+  if not entry then
+    return defer_notice_send(session, pending, "journal", journal_why)
+  end
+  local function still_current(observed)
+    return notice_attempt_current(journal, entry, snapshot, observed)
+  end
+  local sent, why = notice_send(session, text, state.message_ids, still_current,
+    snapshot.native)
   if sent then
+    local recorded, record_err = notice_journal_accepted(entry, journal)
+    if not recorded then
+      notice_journal_resolve_failed(session, state.message_ids, "accepted", record_err)
+    end
     return complete_notice_recovery(session, state)
   end
   local kind = notice_send_error_kind(why)
-  if kind == "busy" or kind == "attached" or kind == "dialog" or kind == "rate" then
-    return defer_notice_send(session, pending, kind, why)
-  end
   if kind == "uncertain" then
+    local recorded, record_err = notice_journal_uncertain(entry, why, journal)
+    if not recorded then
+      notice_journal_resolve_failed(session, state.message_ids, "uncertain", record_err)
+    end
     return notice_delivery_uncertain(session, state, why)
+  end
+  -- Everything else provably wrote nothing, so its reservation is released.
+  if kind == "native_dead" then
+    local released, release_err = notice_journal_abandon(entry, journal)
+    if not released then
+      notice_journal_resolve_failed(session, state.message_ids, "release", release_err)
+    end
+    if disable_native_if_current(session, snapshot, why) then
+      return defer_notice_send(session, pending, "native_disabled", why)
+    end
+    return defer_notice_send(session, pending, "target_changed", why)
+  end
+  if kind == "native_not_written" then
+    local released, release_err = notice_journal_abandon(entry, journal)
+    if not released then
+      notice_journal_resolve_failed(session, state.message_ids, "release", release_err)
+    end
+    return notice_recovery_error(session, state, why)
+  end
+  if kind == "journal" and why and tostring(why):find("journal_generation_changed", 1, true) then
+    -- An invalidated attempt stays reserved. If this journal object is still the
+    -- owner, mark it UNCERTAIN now; a replacement journal already recovered it
+    -- from DISPATCHING on load, so never retire or abandon it here.
+    local mutable = notice_journal_mutable(journal, entry)
+    if mutable then pcall(journal.mark, entry, "uncertain", "journal_generation_changed") end
+    return defer_notice_send(session, pending, "journal", "journal_generation_changed")
+  end
+  local released, release_err = notice_journal_abandon(entry, journal)
+  if not released then
+    notice_journal_resolve_failed(session, state.message_ids, "release", release_err)
+    return defer_notice_send(session, pending, "journal", release_err)
+  end
+  if kind == "busy" or kind == "transport_attached" or kind == "dialog" or kind == "rate" then
+    return defer_notice_send(session, pending, kind, why)
   end
   -- not_typed / gone: nothing was written, so the bounded schedule owns it.
   return notice_recovery_error(session, state,
@@ -1047,6 +1533,11 @@ local function notice_id_stuck(alias, message_id)
   local agent = bus.agents[alias]
   local recipient_id = agent and agent.id or mail_id(alias, false)
   if type(recipient_id) ~= "string" then return false end
+  local journal = notice_journal()
+  if journal and type(journal.suppresses) == "function"
+      and notice_journal_suppressed(journal, recipient_id, message_id) then
+    return true
+  end
   local uncertain = bus.notice_uncertain[recipient_id]
   if uncertain and uncertain[message_id] then return true end
   local stuck = bus.notice_stuck[alias]
@@ -1165,8 +1656,16 @@ local function report_stuck_notice(alias, agent, stuck, now)
     .. tostring(stuck.reason) .. "). Inspect its composer, then `remuda butler send \"" .. alias
     .. "\" \"read your inbox\"`.")
 end
+local function prune_accepted_entries(agent)
+  local journal = notice_journal()
+  if not journal or not agent.id or type(journal.prune_accepted) ~= "function" then return end
+  pcall(journal.prune_accepted, agent.id, function(message_id)
+    return not mail.is_unread(agent.id, message_id)
+  end)
+end
 local function remind_unread_notices(alias, agent, now)
   if not agent.id or bus.pending_tasks[alias] then return end
+  prune_accepted_entries(agent)
   local stuck = bus.notice_stuck[alias]
   if stuck and stuck.agent_id ~= agent.id then bus.notice_stuck[alias], stuck = nil, nil end -- relaunched member
   if stuck then return report_stuck_notice(alias, agent, stuck, now) end
@@ -1415,11 +1914,10 @@ function remuda._butler_schedule_tick()
   if not ok then remuda._butler_schedule_env.trace("schedule_tick_error", tostring(err)) end
 end
 
-remuda._butler_notice = {
-  mail_notice_text = mail_notice_text,
-  startup_action_safe = startup_action_safe,
-  notice_recovery_error = notice_recovery_error,
-  deliver_notice = deliver_notice,
-  remind_unread_notices = remind_unread_notices,
-  complete_notice_recovery = complete_notice_recovery,
-}
+NOTICE_MODULE.mail_notice_text = mail_notice_text
+NOTICE_MODULE.startup_action_safe = startup_action_safe
+NOTICE_MODULE.notice_recovery_error = notice_recovery_error
+NOTICE_MODULE.deliver_notice = deliver_notice
+NOTICE_MODULE.remind_unread_notices = remind_unread_notices
+NOTICE_MODULE.complete_notice_recovery = complete_notice_recovery
+remuda._butler_notice = NOTICE_MODULE

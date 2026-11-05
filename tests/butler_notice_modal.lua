@@ -39,6 +39,7 @@ remuda._butler_notice_config = {
   take_delivery_notice_result = function() end, notify_mail_delivery = function() end,
   deliver_message = function() end,
 }
+dofile('tests/notice_journal_stub.lua')
 dofile('packages/butler/notice.lua')
 remuda._butler_send = function() return 'queued' end
 local N = remuda._butler_notice
@@ -79,12 +80,14 @@ assert(select(2, D.automatic_notice_send('ghost', NOTICE, { 'm1' })) == 'session
   'unknown sessions are refused')
 assert(#writes == 0, 'narrow refusals write nothing')
 
--- 4. Attached humans are refused unconditionally, before any write or audit.
+-- 4. Attachment is not an admission gate (owner decision 2026-11-05): the one
+-- atomic write still happens and is audited.
 attached = true
 writes, audits = {}, {}
-assert(select(2, D.automatic_notice_send('child', NOTICE, { 'm1' })) == 'human_attached',
-  'an attached pane is refused')
-assert(#writes == 0 and #audits == 0, 'an attached pane receives no bytes and no wakeup audit')
+assert(D.automatic_notice_send('child', NOTICE, { 'm1' }) == true,
+  'an attached pane still receives the one atomic send')
+assert(#writes == 1 and writes[1][2] == NOTICE, 'an attached pane receives one notice write')
+assert(#audits >= 1, 'the attached wakeup is audited')
 attached = false
 
 -- 5. A replaced instance is refused; the supported preflight is tested, not an
@@ -124,18 +127,35 @@ assert(select(2, D.automatic_notice_send('child', NOTICE, { 'm1' })) == 'send_re
 remuda._butler_dialog_originals.send = legacy_send
 assert(#writes == 0, 'the legacy seam wrote nothing')
 
--- 5d. A human attaching while the audit yields is caught by the post-audit recheck.
+-- 5d. An attachment appearing while the audit yields is not a refusal: the
+-- same agent object and instance still decide, and the write proceeds.
 writes = {}
 local audit_once = remuda.butler.guard_policy.append
 remuda.butler.guard_policy.append = function(record)
   attached = true
   return audit_once(record)
 end
-assert(select(2, D.automatic_notice_send('child', NOTICE, { 'm1' })) == 'human_attached',
-  'the post-audit recheck refuses an attachment that appeared during the audit')
-assert(#writes == 0, 'no bytes are written after the recheck refuses')
-assert(audits[#audits].summary == 'not_written', 'the refused wakeup is audited as not written')
+assert(D.automatic_notice_send('child', NOTICE, { 'm1' }) == true,
+  'an attachment during the audit does not refuse the transport write')
+assert(#writes == 1, 'the post-audit write still happens once')
 attached = false
+remuda.butler.guard_policy.append = audit_once
+
+-- 5d2. A reload during the audit: the caller's still-current claim is refused
+-- immediately before the raw write, so zero bytes reach the pane.
+writes = {}
+local previous_journal = remuda._butler_delivery_journal
+local journal_current = function() return remuda._butler_delivery_journal == previous_journal end
+remuda.butler.guard_policy.append = function(record)
+  local ok = audit_once(record)
+  remuda._butler_delivery_journal = remuda._butler_notice_test_journal.new()
+  return ok
+end
+assert(select(2, D.automatic_notice_send('child', NOTICE, { 'm1' }, journal_current)) == 'journal_generation_changed',
+  'a reload during the audit refuses the attempt')
+assert(#writes == 0, 'zero raw transport after an audit-yield reload')
+assert(audits[#audits].summary == 'not_written', 'the fenced attempt is audited as not written')
+remuda._butler_delivery_journal = previous_journal
 remuda.butler.guard_policy.append = audit_once
 
 -- 5e. The same agent object and the same captured instance must survive the
@@ -209,17 +229,15 @@ assert(#writes == 0, 'an unaudited wakeup never writes')
 remuda.butler.guard_policy.append = audit_wrapper
 
 -- 7. End to end: notice delivery uses the capability under an open modal, and
--- attachment still defers without writing.
+-- attachment does not block the atomic write.
 screens.child = MODAL
 writes = {}
 bus.pending_tasks = {}
 bus.notices.child = { count = 1, message_order = { 'm1' }, message_ids = { m1 = NOTICE },
   text = NOTICE, kind = 'claude', due_at = 1000 }
 attached = true
-assert(N.deliver_notice('child') == false, 'an attached pane keeps the notice queued')
-assert(#writes == 0, 'an attached pane receives no notice bytes')
-assert(bus.notices.child and bus.notices.child.due_at == 1001, 'attachment rechecks in one second')
-attached = false
+assert(N.deliver_notice('child') == true, 'an attached pane receives the notice')
+assert(#writes == 1, 'an attached pane receives exactly one notice write')
 assert(N.deliver_notice('child') == true, 'the notice sends through the capability')
 assert(#writes == 1 and writes[1][2] == NOTICE, 'the notice is one atomic write')
 assert(bus.notices.child == nil, 'transport acceptance clears the queue')

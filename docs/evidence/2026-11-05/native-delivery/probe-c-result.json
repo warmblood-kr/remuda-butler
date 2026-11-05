@@ -1,0 +1,36 @@
+{
+  "phase": "C",
+  "passed": true,
+  "original_server": {
+    "version": "2.2.5",
+    "pid": 75155,
+    "start": "Thu Nov  5 18:43:53 2026",
+    "port": 53435,
+    "absent_auth": 401,
+    "wrong_auth": 401
+  },
+  "original_tui_pid": 75159,
+  "launch_target_a": "ses_e54e8162affeVFOO9HmALjQL3u",
+  "ui_target_b": "ses_e54e81624ffeXKrDOzxNM4PVJ5",
+  "ui_b_proven_by_saved_pty_sentinel": true,
+  "fixed_a_while_ui_b": {
+    "a_count": 1,
+    "b_count": 0,
+    "pty_writes_during_native": 0
+  },
+  "refusal": {
+    "auth_refusal_status": 401,
+    "native_prompt_dispatched": false,
+    "pty_writes_after_refusal": 0,
+    "b_refusal_notice_count": 0,
+    "scope": "harness_only_product_adapter_not_implemented"
+  },
+  "original_server_unchanged": true,
+  "original_tui_alive": true,
+  "mock_calls": [
+    "QA_A_LAUNCH_SMOKE",
+    "QA_UI_SELECTED_B",
+    "QA_FIXED_A_UI_ON_B"
+  ],
+  "owned_cleanup_complete": true
+}

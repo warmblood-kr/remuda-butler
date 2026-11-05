@@ -1,0 +1,19 @@
+{
+  "phase": "G",
+  "passed": true,
+  "scope": "normal_wrapper_teardown_after_owned_TUI_SIGTERM",
+  "original_identity": {
+    "wrapper_pid": 85704,
+    "server_pid": 85715,
+    "generation": "65f85058aa9dd-65f85058ac8c7",
+    "conversation": "ses_ba2645d18a38cb0f4a10ca54b6841553",
+    "tui_pid": 85720,
+    "tui_start": "Thu Nov  5 19:33:08 2026"
+  },
+  "wrapper_code": 130,
+  "manifest_removed": true,
+  "server_stopped": true,
+  "tui_stopped": true,
+  "watcher_stopped": true,
+  "owned_cleanup_complete": true
+}

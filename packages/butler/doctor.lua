@@ -157,6 +157,14 @@ local function render(probe_results, platform)
     if type(agent) == "table" and not (principal and principal.bound(agent)) then unbound = unbound + 1 end
   end
   if unbound > 0 then lines[#lines + 1] = unbound .. " members not instance-bound: relaunch to bind" end
+  -- Read-only automatic-delivery journal state (states/counts/IDs/reasons only).
+  local delivery = remuda.butler and remuda.butler.delivery_status
+  if delivery and type(delivery.lines) == "function" then
+    local delivered, status_lines = pcall(delivery.lines, remuda._butler_delivery_journal, os.time())
+    if delivered and type(status_lines) == "table" then
+      for _, line in ipairs(status_lines) do lines[#lines + 1] = line end
+    end
+  end
   -- After a reload: an adopted member's MCP bridge is re-bound on its first call
   -- only when core attributes that call to the member's session (remuda#800).
   local waiting = {}

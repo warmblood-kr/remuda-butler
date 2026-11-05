@@ -1,0 +1,27 @@
+{
+  "phase": "E",
+  "passed": true,
+  "original_identity": {
+    "wrapper_pid": 87271,
+    "server_pid": 87283,
+    "generation": "65f851c5d6ba3-65f851c5e1552",
+    "conversation": "ses_3d4968e83ce5e1cb4387f1788b53784a",
+    "server_version": "2.2.5"
+  },
+  "stage": "native_fixed_A",
+  "ui_b_proven": true,
+  "fixed_a_count": 1,
+  "ui_b_count": 0,
+  "wrong_nonce": {
+    "outcome": "definitely_not_written",
+    "reason": "invalid_binding"
+  },
+  "pty_writes_during_native_and_refusal": 0,
+  "original_wrapper_alive": true,
+  "normal_wrapper_teardown_after_tui_termination": {
+    "wrapper_code": 130,
+    "manifest_removed": true,
+    "server_stopped": true
+  },
+  "owned_cleanup_complete": true
+}

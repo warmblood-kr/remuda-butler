@@ -703,18 +703,19 @@ function M.register_queue_writer(register)
   return true
 end
 
--- Narrow automatic-mail-wakeup capability (owner decision 2026-11-03).
--- A notice is a Butler-generated pointer, not owner text, so it bypasses the
--- modal *prediction* gate (M.check) and nothing else: every general
--- send/type_text/key still passes that gate, and startup/approved flows are
--- untouched. The capability keeps its own unconditional preflight and audit.
--- Honest limitation: the core send word is name-addressed and has no attached
--- guard (private QA wrote into an attached PTY), so this preflight is the
--- guard and it is NOT atomic. A human can attach, or a name can be reused,
--- between the row check and the write. There is no expected-instance-bound
--- atomic send word usable here.
+-- Narrow automatic-mail-wakeup capability (owner decisions 2026-11-03 and
+-- 2026-11-05). A notice is a Butler-generated pointer, not owner text, so it
+-- bypasses the modal *prediction* gate (M.check) and nothing else: every
+-- general send/type_text/key still passes that gate, and startup/approved
+-- flows are untouched. Attachment, busy state and composer contents are not
+-- automatic admission gates; this capability no longer refuses an attached
+-- pane. It keeps its live-session and bound-instance preflight, its own audit
+-- and the agent-object/generation recheck. The core send word is still
+-- name-addressed, so a human attaching or a name being reused between the row
+-- check and the write is not excluded atomically; if the core itself refuses
+-- with a transport limitation, the notice path records that explicit reason.
 local NOTICE_TEXT_PREFIXES = { 'Butler message ' }
-function M.automatic_notice_send(name, text, message_ids)
+function M.automatic_notice_send(name, text, message_ids, still_current)
   if butler.dialogs ~= M or not M._installed then return false, 'dialogs_unavailable' end
   local originals = remuda._butler_dialog_originals
   local send = originals and originals.send
@@ -732,6 +733,7 @@ function M.automatic_notice_send(name, text, message_ids)
   for _, id in ipairs(message_ids) do
     if type(id) ~= 'string' or not id:match('^%w+$') then return false, 'invalid_notice' end
   end
+  if still_current ~= nil and type(still_current) ~= 'function' then return false, 'invalid_notice' end
   -- Canonical identity field: launch stores the live session instance here
   -- (dialogs.check uses the same one; session_instance_id is not that field).
   local function preflight()
@@ -742,14 +744,13 @@ function M.automatic_notice_send(name, text, message_ids)
       if candidate.name == name then row = candidate end
     end
     if not row or not row.alive then return nil, 'session_not_live' end
-    if row.attached then return nil, 'human_attached' end
     local expected, actual = agent.instance_id, row.instance_id
     if type(expected) == 'string' and expected ~= '' then
       -- A bound instance with no readable row instance cannot be verified.
       if type(actual) ~= 'string' or actual == '' then return nil, 'session_instance_missing' end
       if actual ~= expected then return nil, 'session_replaced' end
     end
-    return agent, actual
+    return agent, actual, row
   end
   local agent, actual = preflight()
   if not agent then return false, actual end
@@ -762,7 +763,7 @@ function M.automatic_notice_send(name, text, message_ids)
   -- captured instance, this module generation and the guards immediately
   -- before the raw write. The remaining race is not eliminable with a
   -- name-addressed core word.
-  local rechecked, again = preflight()
+  local rechecked, again, fresh_row = preflight()
   if not rechecked then
     audit(name, agent, state, 'automatic-mail-wakeup-result', 'send', 'not_written')
     return false, again
@@ -771,6 +772,20 @@ function M.automatic_notice_send(name, text, message_ids)
       or not M._installed or butler.dialogs ~= M then
     audit(name, agent, state, 'automatic-mail-wakeup-result', 'send', 'not_written')
     return false, 'session_changed'
+  end
+  -- The transport claim is generation-fenced: the caller retains its journal
+  -- and notice identity across the audit yield, so a reload during the audit
+  -- (or a replaced journal) must stop this attempt before any raw write.
+  if type(still_current) == 'function' then
+    -- Hand the caller the fresh preflight target; it must equal the snapshot
+    -- (this catches a legacy nil agent.instance_id whose row instance changed).
+    local current_ok, current = pcall(still_current, {
+      recipient_id = rechecked.id, agent_instance = rechecked.instance_id,
+      instance = again, row_id = fresh_row and fresh_row.id })
+    if not current_ok or current ~= true then
+      audit(name, agent, state, 'automatic-mail-wakeup-result', 'send', 'not_written')
+      return false, 'journal_generation_changed'
+    end
   end
   local ok, result, detail = pcall(send, name, text)
   if ok and result ~= false then

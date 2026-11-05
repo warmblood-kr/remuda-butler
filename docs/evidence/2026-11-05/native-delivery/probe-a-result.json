@@ -1,0 +1,35 @@
+{
+  "phase": "A",
+  "model_calls_requested": 0,
+  "passed": true,
+  "first_identity": {
+    "version": "2.2.5",
+    "pid": 74189,
+    "start": "Thu Nov  5 18:22:36 2026",
+    "port": 50783,
+    "absent_auth": 401,
+    "wrong_auth": 401
+  },
+  "admission": {
+    "session": "ses_e54fb929bffeb1wlwKgsAxZyPB",
+    "message": "msg_356a0d2509c34447ab010f7af7179a19",
+    "pending_count": 1,
+    "same_id_same_body_equal": true,
+    "same_id_changed_body_first_wins": true,
+    "cross_session_status": 409,
+    "admitted": true,
+    "consumed": false
+  },
+  "restart_identity": {
+    "version": "2.2.5",
+    "pid": 74199,
+    "start": "Thu Nov  5 18:22:36 2026",
+    "port": 50806,
+    "absent_auth": 401,
+    "wrong_auth": 401
+  },
+  "restart_pending_count": 1,
+  "restart_same_id": true,
+  "owned_process_stopped": true,
+  "private_root_removed": true
+}
