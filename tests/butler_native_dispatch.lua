@@ -186,9 +186,9 @@ assert(huge_result.outcome == "not_written" and huge_result.reason == "request_t
 
 -- 7. The fixed per-kind command map: unknown kinds never run, and each
 -- protocol keeps its own strict pre-write/uncertain vocabulary.
-assert(module.VERBS.opencode == "_agent_notice"
-  and module.VERBS.codex == "_codex_notice" and module.VERBS.claude == "_claude_notice",
-  "the verb map is closed and fixed")
+assert(module.verb("opencode") == "_agent_notice"
+  and module.verb("codex") == "_codex_notice" and module.verb("claude") == "_claude_notice"
+  and module.verb("ruby") == nil, "the verb map is closed and fixed")
 local function kind_case(kind, payload)
   local spec
   local outcome = module.dispatch(request, { json = codec, kind = kind,

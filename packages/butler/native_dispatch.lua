@@ -12,7 +12,9 @@ local M = {}
 -- is never used for Codex/Claude.
 local VERBS = { opencode = "_agent_notice", codex = "_codex_notice",
   claude = "_claude_notice" }
-M.VERBS = VERBS
+-- Read-only lookup for callers/tests; the table itself stays module-local so
+-- no caller can substitute an arbitrary command.
+function M.verb(kind) return VERBS[kind] end
 
 local VERSION = 1
 local DEFAULT_TIMEOUT = 15
