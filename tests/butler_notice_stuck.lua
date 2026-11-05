@@ -27,6 +27,7 @@ remuda = {
   _butler_session_trace = function() end,
   ls = function() return {} end,
 }
+dofile("tests/notice_journal_stub.lua")
 dofile("packages/butler/notice.lua")
 remuda._butler_send = function(_, to, body) sent[#sent + 1] = { to, body } end
 local N = remuda._butler_notice

@@ -12,29 +12,37 @@ owner-approved typing policies are unchanged.
 
 ## What remains
 
-- An unconditional preflight before the write: the agent record exists, the
-  session row is alive, the row is not attached (a human at the keyboard owns
-  the pane), and a bound `agent.instance_id` matches the row's instance (a
-  missing row instance is refused, never assumed). The audit append can yield,
-  so the same checks, the same agent object, the same captured instance, the
-  dialogs module generation and identity (`butler.dialogs == M`, `_installed`)
-  are rechecked immediately before the raw write. The capability is audited as
-  `automatic-mail-wakeup` / `transport_only`, with a transport-only result.
+- A preflight before the write: the agent record exists, the session row is
+  alive, and a bound `agent.instance_id` matches the row's instance (a missing
+  row instance is refused, never assumed). Attachment, busy state and composer
+  contents are not admission gates (owner decision 2026-11-05). The audit append
+  can yield, so the same checks, the same agent object, the same captured
+  instance, the dialogs module generation and identity (`butler.dialogs == M`,
+  `_installed`) are rechecked immediately before the raw write. The capability
+  is audited as `automatic-mail-wakeup` / `transport_only`, with a
+  transport-only result.
 - A pending delegated first task keeps mail queued until the task clears. A
   picker or any other dialog no longer holds an automatic notice.
 - 2-second quiet / 10-second cap coalescing and the unread reminder.
 - The bounded retry schedule (20s, 60s, 300s, 900s) for a refusal that wrote
   nothing, then one failure alert naming the message IDs.
-- An uncertainty path for outcomes that may have written bytes: report once
-  with the IDs, open the stuck record, and write a tombstone in
-  `bus.notice_uncertain` keyed by the recipient's durable identity id and the
-  message id. The tombstone is never cleared by a read, a reminder or the stuck
-  record closing, so a compaction re-show or a preserved-bus reload of the same
-  ID is suppressed at the single `_butler_notify` admission point. New message
-  IDs still notify. A daemon restart clears the in-memory map.
+- A durable, bounded journal (`docs/concepts/notice-delivery-journal.md`):
+  every automatic PTY or native attempt is DISPATCHING on disk before any bytes
+  are written, keyed by recipient identity id and message id. An outcome that
+  may have written bytes is reported once with the IDs, opens the stuck record,
+  and becomes UNCERTAIN. Uncertainty is never cleared by an inbox read, a
+  reminder, stuck-record closure, a compaction re-show, a reload or a full
+  restart, and a new session instance or nonce does not release it. New message
+  IDs still notify. A full journal, failed save or corrupt file blocks every
+  automatic write with an explicit reason and an alert; there is no eviction
+  and no PTY bypass. DISPATCHING itself reserves the IDs, so re-entry cannot
+  create a second attempt for the same mail. PTY transport acceptance retires
+  its entry (legacy reminders continue); a native `accepted_unread` entry stays
+  until the canonical inbox read.
 - Durable mail: transport acceptance is not a read. Only an inbox read marks a
-  message read; a full daemon restart can nudge still-unread mail again
-  (at-least-once, not exactly-once).
+  message read. Journal-uncertain mail is never re-nudged, even by a restart;
+  other still-unread mail may be re-seeded after a restart (at-least-once for
+  accepted-but-unread, not exactly-once).
 
 ## Consequences accepted by the owner
 
@@ -49,7 +57,11 @@ owner-approved typing policies are unchanged.
 - A human attaching, or a session name being reused, between the preflight and
   the name-addressed core write is not excluded atomically. There is no
   expected-instance-bound send word on this core; the residual race is
-  documented rather than claimed away.
+  documented rather than claimed away. A core refusal naming attachment is an
+  explicit transport limitation, retried like busy, not a policy gate.
+- Journal uncertainty favors a missed reminder over a duplicate write. A
+  corrupt or unwritable journal therefore stops automatic wakeups (explicit
+  status and alert) until an operator inspects it.
 
 ## History
 

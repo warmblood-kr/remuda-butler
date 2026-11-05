@@ -1,0 +1,130 @@
+{
+  "phase": "B",
+  "passed": true,
+  "identity": {
+    "version": "2.2.5",
+    "pid": 74521,
+    "start": "Thu Nov  5 18:30:26 2026",
+    "port": 51837,
+    "absent_auth": 401,
+    "wrong_auth": 401
+  },
+  "session": "ses_e54f46499ffeglY6MpLaInY8Tt",
+  "smoke_consumed": true,
+  "tui_pid": 74525,
+  "idle_message_id": "msg_70ddaf484c204e01958a434c8e98f451",
+  "post_consume_replay_count": 1,
+  "busy_queue": {
+    "delivery": "queue",
+    "calls_while_held": [
+      "QA_BUSY_QUEUE"
+    ],
+    "pending_while_held": 1,
+    "calls_after_release": [
+      "QA_BUSY_QUEUE",
+      "QA_FOLLOW_QUEUE"
+    ],
+    "user_sentinels": [
+      "QA_SMOKE",
+      "QA_IDLE",
+      "QA_BUSY_QUEUE",
+      "QA_FOLLOW_QUEUE"
+    ]
+  },
+  "busy_steer": {
+    "delivery": "steer",
+    "calls_while_held": [
+      "QA_BUSY_STEER"
+    ],
+    "pending_while_held": 1,
+    "calls_after_release": [
+      "QA_BUSY_STEER",
+      "QA_FOLLOW_STEER"
+    ],
+    "user_sentinels": [
+      "QA_SMOKE",
+      "QA_IDLE",
+      "QA_BUSY_QUEUE",
+      "QA_FOLLOW_QUEUE",
+      "QA_BUSY_STEER",
+      "QA_FOLLOW_STEER"
+    ]
+  },
+  "draft_idle": {
+    "draft_exact_saved": true,
+    "draft_occurrences": 1,
+    "native_separate": true
+  },
+  "draft_busy": {
+    "draft_exact_saved": true,
+    "draft_occurrences": 1,
+    "native_separate": true
+  },
+  "ack_loss": {
+    "response_intentionally_unread": true,
+    "saved_before_reconcile": 1,
+    "saved_after_same_id_retry": 1
+  },
+  "original_server_still_same": true,
+  "original_tui_alive": true,
+  "tui_rendered_markers": {
+    "QA_IDLE": true,
+    "QA_FOLLOW_QUEUE": true,
+    "QA_FOLLOW_STEER": true
+  },
+  "mock_hold_timeout": false,
+  "mock_calls": [
+    "QA_SMOKE",
+    "QA_IDLE",
+    "QA_BUSY_QUEUE",
+    "QA_FOLLOW_QUEUE",
+    "QA_BUSY_STEER",
+    "QA_FOLLOW_STEER",
+    "QA_NATIVE_WITH_DRAFT",
+    "QA_DRAFT_EXACT_123",
+    "QA_BUSY_DRAFT",
+    "QA_NATIVE_WITH_BUSY_DRAFT",
+    "QA_DRAFT_BUSY_456",
+    "QA_ACK_LOSS"
+  ],
+  "mock_timeline": [
+    "start:QA_SMOKE",
+    "done:QA_SMOKE",
+    "start:QA_IDLE",
+    "done:QA_IDLE",
+    "start:QA_BUSY_QUEUE",
+    "done:QA_BUSY_QUEUE",
+    "start:QA_FOLLOW_QUEUE",
+    "done:QA_FOLLOW_QUEUE",
+    "start:QA_BUSY_STEER",
+    "done:QA_BUSY_STEER",
+    "start:QA_FOLLOW_STEER",
+    "done:QA_FOLLOW_STEER",
+    "start:QA_NATIVE_WITH_DRAFT",
+    "done:QA_NATIVE_WITH_DRAFT",
+    "start:QA_DRAFT_EXACT_123",
+    "done:QA_DRAFT_EXACT_123",
+    "start:QA_BUSY_DRAFT",
+    "done:QA_BUSY_DRAFT",
+    "start:QA_NATIVE_WITH_BUSY_DRAFT",
+    "done:QA_NATIVE_WITH_BUSY_DRAFT",
+    "start:QA_DRAFT_BUSY_456",
+    "done:QA_DRAFT_BUSY_456",
+    "start:QA_ACK_LOSS",
+    "done:QA_ACK_LOSS"
+  ],
+  "restart_consumed_replay": {
+    "new_identity": {
+      "version": "2.2.5",
+      "pid": 74529,
+      "start": "Thu Nov  5 18:30:32 2026",
+      "port": 51940,
+      "absent_auth": 401,
+      "wrong_auth": 401
+    },
+    "same_id_history_count": 1,
+    "new_mock_calls": 0,
+    "same_engine_claim": false
+  },
+  "owned_cleanup_complete": true
+}

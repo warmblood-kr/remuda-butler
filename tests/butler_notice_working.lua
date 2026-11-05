@@ -46,6 +46,7 @@ remuda = {
   key = function() error("notice delivery must never press a key") end,
   type_text = function() error("notice delivery must use one atomic send") end,
 }
+dofile("tests/notice_journal_stub.lua")
 dofile("packages/butler/notice.lua")
 remuda._butler_send = function(_, to, body) sent[#sent + 1] = { to, body } end
 local deliver = remuda._butler_notice.deliver_notice
@@ -106,13 +107,13 @@ now = now + 1
 deliver("lead")
 assert(#sends == 1 and bus.notices.lead == nil, "the retained notice sends when the writer frees")
 
--- 4. Attachment refusal never writes and never fabricates delivery.
+-- 4. Attachment is not an admission gate: the one atomic send still happens.
 reset(working)
 remuda.ls = function() return { { name = "lead", alive = true, attached = true } } end
 sends = {}
 deliver("lead")
-assert(#sends == 0, "an attached human receives nothing")
-assert(bus.notices.lead and bus.notices.lead.due_at == now + 1, "attachment waits for a later recheck")
+assert(#sends == 1, "an attached pane receives the one atomic send")
+assert(bus.notices.lead == nil, "the attached delivery completes")
 remuda.ls = function() return { { name = "lead", alive = true, attached = false } } end
 
 -- 5. A live pane whose send outcome is unconfirmed is reported, never claimed.

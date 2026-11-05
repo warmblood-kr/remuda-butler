@@ -1,0 +1,120 @@
+{
+  "phase": "D",
+  "passed": false,
+  "binary_sha256": "c85e0ae86194054dfe0936f307a40fc1e5f8e7ba895a481c8c114ebaaccf03c3",
+  "verified_effective_model": {
+    "providerID": "qa",
+    "id": "qa-model"
+  },
+  "original_identity": {
+    "wrapper_pid": 85306,
+    "server_pid": 85317,
+    "tui_pid": 85322,
+    "wrapper_start": "Thu Nov  5 19:30:22 2026",
+    "server_start": "Thu Nov  5 19:30:22 2026",
+    "tui_start": "Thu Nov  5 19:30:22 2026",
+    "generation": "65f84fba4c59c-65f84fba4e8fb",
+    "version": "2.2.5",
+    "conversation": "ses_4ae021d7b1a0e0b64c571541599e5afd",
+    "manifest_mode": "0o600"
+  },
+  "idle_saved_rendered": true,
+  "busy": {
+    "calls_while_held": [
+      "QA_BUSY_WRAPPER_QUEUE"
+    ],
+    "pending_while_held": 1,
+    "calls_after_release": [
+      "QA_BUSY_WRAPPER_QUEUE",
+      "QA_FOLLOW_WRAPPER_QUEUE"
+    ]
+  },
+  "draft_idle": {
+    "draft_exact_count": 1,
+    "native_separate_count": 1
+  },
+  "draft_busy": {
+    "draft_exact_count": 1,
+    "native_separate_count": 1
+  },
+  "fixed_target": {
+    "not_proven": true,
+    "separate_probe_pending": true
+  },
+  "ack_loss": {
+    "caller_discarded_ack": true,
+    "helper_invocations": 1,
+    "saved_count_without_retry": 1
+  },
+  "same_original_engine_tui": true,
+  "mock_calls": [
+    "QA_WRAPPER_IDLE",
+    "QA_WRAPPER_IDLE",
+    "QA_BUSY_WRAPPER_QUEUE",
+    "QA_FOLLOW_WRAPPER_QUEUE",
+    "QA_NATIVE_IDLE_DRAFT",
+    "QA_WRAPPER_DRAFT_IDLE",
+    "QA_BUSY_WRAPPER_DRAFT",
+    "QA_NATIVE_BUSY_DRAFT",
+    "QA_WRAPPER_DRAFT_BUSY",
+    "QA_WRAPPER_ACK_DISCARDED"
+  ],
+  "mock_timeline": [
+    "start:QA_WRAPPER_IDLE",
+    "done:QA_WRAPPER_IDLE",
+    "start:QA_WRAPPER_IDLE",
+    "done:QA_WRAPPER_IDLE",
+    "start:QA_BUSY_WRAPPER_QUEUE",
+    "done:QA_BUSY_WRAPPER_QUEUE",
+    "start:QA_FOLLOW_WRAPPER_QUEUE",
+    "done:QA_FOLLOW_WRAPPER_QUEUE",
+    "start:QA_NATIVE_IDLE_DRAFT",
+    "done:QA_NATIVE_IDLE_DRAFT",
+    "start:QA_WRAPPER_DRAFT_IDLE",
+    "done:QA_WRAPPER_DRAFT_IDLE",
+    "start:QA_BUSY_WRAPPER_DRAFT",
+    "done:QA_BUSY_WRAPPER_DRAFT",
+    "start:QA_NATIVE_BUSY_DRAFT",
+    "done:QA_NATIVE_BUSY_DRAFT",
+    "start:QA_WRAPPER_DRAFT_BUSY",
+    "done:QA_WRAPPER_DRAFT_BUSY",
+    "start:QA_WRAPPER_ACK_DISCARDED",
+    "done:QA_WRAPPER_ACK_DISCARDED"
+  ],
+  "mock_hold_timeout": false,
+  "safe_ui_words": [
+    "QA_BUSY_WRAPPER_DRAFT",
+    "QA_START_QA_BUSY_WRAPPER_DRAFTQA_DONE_QA_BUSY_WRAPPER_DRAFT",
+    "QA_NATIVE_BUSY_DRAFT",
+    "QA_START_QA_NATIVE_BUSY_DRAFTQA_DONE_QA_NATIVE_BUSY_DRAFT",
+    "QA_WRAPPER_DRAFT_BUSY",
+    "QA_START_QA_WRAPPER_DRAFT_BUSYQA_DONE_QA_WRAPPER_DRAFT_BUSY",
+    "QA_WRAPPER_ACK_DISCARDED",
+    "QA_START_QA_WRAPPER_IDLEQA_DONE_QA_WR",
+    "QA_START_QA_WRAPPER_IDLEQA_DO",
+    "QA_WRAPPER_DRAFT_IDLE",
+    "QA_START_QA_WRAPPER_DRAFT_IDLEQA_DONE_QA_WRAPPER_DRAFT_IDLE",
+    "QA_BUSY_WRAPPER_DRAFT",
+    "QA_START_QA_BUSY_WRAPPER_DRAFTQA_DONE_QA_BUSY_WRAPPER_DRAFT",
+    "QA_NATIVE_BUSY_DRAFT",
+    "QA_START_QA_NATIVE_BUSY_DRAFTQA_DONE_QA_NATIVE_BUSY_DRAFT",
+    "QA_WRAPPER_DRAFT_BUSY",
+    "QA_START_QA_WRAPPER_DRAFT_BUSYQA_DONE_QA_WRAPPER_DRAFT_BUSY",
+    "QA_WRAPPER_ACK_DISCARDED",
+    "QA_START_QA_WRAPPER_IDLEQA_DONE_QA_WR",
+    "QA_START_QA_WRAPPER_ACK_DISCARDEDQA_DONE_QA_WRAPPER_ACK_DISCARDED",
+    "QA_START_QA_WRAPPER_IDLEQA_DO",
+    "QA_START_QA_WRAPPER_IDLEQA_DO",
+    "QA_START_QA_WRAPPER_IDLEQA_DO",
+    "QA_START_QA_WRAPPER_IDLEQA_DO",
+    "QA_START_QA_WRAPPER_IDLEQA_DO",
+    "QA_START_QA_WRAPPER_IDLEQA_DO",
+    "QA_START_QA_WRAPPER_IDLEQA_DO",
+    "QA_START_QA_WRAPPER_IDLEQA_DO",
+    "QA_START_QA_WRAPPER_IDLEQA_DO",
+    "QA_START_QA_WRAPPER_IDLEQA_DO"
+  ],
+  "error_type": "RuntimeError",
+  "error": "normal_tui_quit_timeout",
+  "owned_cleanup_complete": true
+}

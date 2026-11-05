@@ -30,6 +30,9 @@ function M.rows()
         session_name = agent.session_name or alias, parent = agent.parent, parent_id = agent.parent_id,
         cwd = agent.cwd, sandbox = agent.sandbox, writable = list(agent.writable),
         instance_id = agent.instance_id,
+        native = type(agent.native) == "table" and type(agent.native.path) == "string"
+          and agent.native.path ~= "" and type(agent.native.nonce) == "string"
+          and { path = agent.native.path, nonce = agent.native.nonce } or nil,
         status_path = type(agent.telemetry) == "table" and agent.telemetry.status_path or nil }
     end
   end
@@ -86,10 +89,11 @@ end
 function M.adopt(sessions)
   -- Any row at all means this image already knows its team (an in-image mod reload).
   if next(bus.agents) ~= nil then return {} end
-  local live = {}
+  local live, live_id = {}, {}
   for _, session in ipairs(type(sessions) == "table" and sessions or {}) do
     if session.alive and type(session.name) == "string" and type(session.instance_id) == "string" then
       live[session.name] = session.instance_id
+      if type(session.id) == "string" and session.id ~= "" then live_id[session.name] = session.id end
     end
   end
   local adopted = {}
@@ -103,6 +107,14 @@ function M.adopt(sessions)
         session_start_marker = config.new_ulid(), cwd = row.cwd, sandbox = row.sandbox,
         writable = list(row.writable), instance_id = row.instance_id, instance_binding = 1,
         telemetry = row.status_path and { status_path = row.status_path } or nil, adopted = true }
+      if type(row.native) == "table" and type(row.native.path) == "string" and row.native.path ~= "" then
+        -- Bound native mode is sticky: a missing session row id disables
+        -- delivery for this incarnation; it never falls back to PTY.
+        agent.native = { mode = live_id[name] and "native" or "disabled",
+          reason = live_id[name] and nil or "missing_row_id",
+          path = row.native.path, nonce = row.native.nonce,
+          row_id = live_id[name], instance = row.instance_id }
+      end
       if row.alias == "butler" then
         -- main.lua finishes the root row (telemetry, token, marker) from here.
         local root = bus.agents.butler or {}

@@ -39,6 +39,7 @@ remuda = {
   key = function() error("notice delivery must not press keys") end,
   butler = { dialogs = { check = function() return true end } },
 }
+dofile("tests/notice_journal_stub.lua")
 dofile("packages/butler/notice.lua")
 remuda._butler_send = function() end
 local N = remuda._butler_notice

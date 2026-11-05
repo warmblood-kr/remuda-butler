@@ -660,6 +660,13 @@ remuda._butler_launch_config = { bus = bus,
   queue_message = queue_message,
   migrate_legacy_mail = migrate_legacy_mail,
   startup_action_safe = function(...) return startup_action_safe(...) end }
+remuda.exec("butler/native_config")
+remuda.exec("butler/native_dispatch")
+remuda.exec("butler/native_launch")
+remuda.butler.native_launch.install({ paths = remuda._butler_paths,
+  config = remuda.butler.native_config, json = remuda.json,
+  runner = remuda.process and remuda.process.run, fs = remuda.fs,
+  random = remuda.random_bytes })
 remuda.exec("butler/launch")
 local launch_agent = remuda._butler_launch_impl.launch_agent
 -- Mail notice policy, recovery and delivery live in notice.lua.
@@ -672,6 +679,8 @@ remuda._butler_notice_config = { bus = bus,
   notify_mail_delivery = notify_mail_delivery,
   deliver_message = deliver_message,
 }
+remuda.exec("butler/delivery_journal")
+remuda.exec("butler/delivery_status")
 remuda.exec("butler/notice")
 -- The launch configs above call main.lua's startup_action_safe late; set it here.
 startup_action_safe = remuda._butler_notice.startup_action_safe

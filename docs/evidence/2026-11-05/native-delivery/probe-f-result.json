@@ -1,0 +1,29 @@
+{
+  "phase": "F",
+  "passed": true,
+  "startup_failure": {
+    "wrapper_code": 1,
+    "preexisting_preserved": true,
+    "owned_children_stopped": true,
+    "observed_children_count": 3
+  },
+  "startup_wrapper_death": {
+    "phase": "startup",
+    "manifest_before_kill": false,
+    "server_stopped": true,
+    "stale_manifest_helper": null,
+    "watcher_fenced_only_not_pre_watcher_gap": true
+  },
+  "published_wrapper_death": {
+    "phase": "published",
+    "manifest_before_kill": true,
+    "server_stopped": true,
+    "stale_manifest_helper": {
+      "outcome": "definitely_not_written",
+      "reason": "wrapper_gone"
+    },
+    "watcher_fenced_only_not_pre_watcher_gap": true
+  },
+  "mock_calls": [],
+  "owned_cleanup_complete": true
+}

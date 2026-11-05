@@ -20,9 +20,12 @@ for _, path in ipairs({ 'tests/butler_notice_retry.lua', 'tests/butler_notice_st
 -- boundary directly: accepted, uncertain, busy deferral and attachment.
 local bus = remuda._butler_notice_config.bus
 local N = remuda._butler_notice
+local queue_id = 0
 local function queue()
-  bus.notices.lead = { count = 1, message_order = { "synthetic" },
-    message_ids = { synthetic = "Butler message synthetic" }, text = "Butler message synthetic" }
+  queue_id = queue_id + 1
+  local id = "synthetic" .. queue_id
+  bus.notices.lead = { count = 1, message_order = { id },
+    message_ids = { [id] = "Butler message " .. id }, text = "Butler message " .. id }
   bus.notice_recoveries, bus.notice_stuck, bus.notice_uncertain_alerts = {}, {}, {}
   bus.notice_failure_alerts = {}
 end
@@ -48,15 +51,18 @@ local busy_before = events.prompt_busy or 0
 for _ = 1, 4 do N.deliver_notice("lead") end
 assert((events.prompt_busy or 0) == busy_before + 1, "busy deferral records only its transition")
 
+-- Attachment itself is not a gate; a core transport refusal is the explicit,
+-- non-uncertain reason that defers.
 queue()
 remuda.ls = function() return { { name = "lead", alive = true, attached = true, instance_id = "instance-1" } } end
-remuda.send = function() error("must not be called") end
-local attached_before = events.human_attached or 0
+remuda.send = function() error("a human is attached to this session", 0) end
+local attach_before = events.attach_refused or 0
 assert(N.deliver_notice("lead") == false)
-assert((events.human_attached or 0) == attached_before + 1, "attachment is reported as a deferral, not a delivery")
+assert((events.attach_refused or 0) == attach_before + 1,
+  "a core attachment transport refusal is reported explicitly, not as a policy gate")
 
 for _, reason in ipairs({ 'delivery_failed', 'retry_scheduled', 'transport_accepted',
-    'delivery_uncertain', 'prompt_busy', 'human_attached' }) do
+    'delivery_uncertain', 'prompt_busy', 'attach_refused' }) do
   assert(events[reason] and events[reason] > 0, 'missing actual notice transition: ' .. reason)
 end
 -- Identical scenarios retain their control assertions with a broken observer.

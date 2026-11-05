@@ -36,6 +36,7 @@ remuda = {
   type_text = function() error("notice delivery must use one atomic send") end,
   clear_input = function() error("notice delivery must never clear input") end,
 }
+dofile("tests/notice_journal_stub.lua")
 dofile("packages/butler/notice.lua")
 remuda._butler_send = function() end
 local deliver = remuda._butler_notice.deliver_notice
@@ -77,12 +78,12 @@ for _, kind in ipairs({ "claude", "codex", "opencode" }) do
   assert(#sends == 1 and bus.notice_recoveries.lead == nil, kind .. ": one send, no recovery state")
 end
 
--- 3. An attached human is the only refusal here: nothing is written.
+-- 3. Attachment is not an admission gate: one atomic send, no deferral.
 reset("claude")
 remuda.ls = function() return { { name = "lead", alive = true, attached = true, instance_id = "instance-1" } } end
-assert(deliver("lead") == false, "an attached pane defers")
-assert(#sends == 0, "an attached pane receives no bytes")
-assert(bus.notices.lead and bus.notices.lead.due_at == now + 1, "attachment rechecks in one second")
+assert(deliver("lead") == true, "an attached pane receives the notice")
+assert(#sends == 1, "an attached pane receives exactly one send")
+assert(bus.notices.lead == nil, "the attached delivery completes")
 remuda.ls = function() return { { name = "lead", alive = true, attached = false, instance_id = "instance-1" } } end
 
 -- 4. A first task still owns the pane: that is a task-state guard, not a

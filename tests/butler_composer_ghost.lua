@@ -20,6 +20,7 @@ remuda = {
     return { cursor = { row = 2 }, rows = { {}, { { text = "❯ " }, { text = "remuda butler inbox", dim = true } } } }
   end,
 }
+dofile("tests/notice_journal_stub.lua")
 dofile("packages/butler/notice.lua")
 
 assert(remuda._butler_prompt_is_empty("claude", ghost_screen) == "NON-EMPTY", "raw screen reads the ghost as text")

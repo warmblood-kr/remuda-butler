@@ -39,6 +39,7 @@ remuda = {
   capture = function() return "› Ask Codex to do anything" end,
   session = function() return { is_busy = false } end,
 }
+dofile("tests/notice_journal_stub.lua")
 dofile("packages/butler/notice.lua")
 remuda._butler_notify_policy = function() return true end
 

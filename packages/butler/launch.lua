@@ -160,6 +160,9 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       and directory_is_under(cwd, sessions_root)
   end
   local launch_cwd = cwd or "."
+  -- One decision per launch, made before remuda.new so the wrapper argv/env
+  -- and the binding path belong to this exact launch only.
+  local native_plan
   -- Owner scope: any session THIS Butler launches in a guarded project or worktree directory.
   local trust_checked, trust_ok = pcall(function() return chooser.trust_eligible(launch_cwd, trust_env()) end)
   local trust_eligible = trust_checked and trust_ok == true
@@ -190,7 +193,14 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       local telemetry = telemetry_by_kind[candidate_kind]
         or setup_telemetry(candidate_kind, { name = name, model = models[candidate_kind], memory_dir = memory_dir })
       telemetry_by_kind[candidate_kind] = telemetry
+      if candidate_kind == "opencode" and not native_plan and remuda._butler_native_launch then
+        local decided, plan = pcall(remuda._butler_native_launch.plan, name, candidate_kind)
+        native_plan = decided and plan or { mode = "pty", reason = "native_plan_failed: " .. tostring(plan) }
+        _butler_session_trace("native_launch_plan", name .. " mode=" .. tostring(native_plan.mode)
+          .. " reason=" .. tostring(native_plan.reason or "ok"))
+      end
       return { name = name, token = token, model = models[candidate_kind], cwd = launch_cwd,
+        native = native_plan and native_plan.mode == "native" and native_plan or nil,
         sandbox = profile and profile.sandbox,
         writable = candidate_kind == "codex" and remuda._butler_codex_memory_writable
           and remuda._butler_codex_memory_writable(profile and profile.writable, memory_dir)
@@ -208,6 +218,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if candidate_kind == "opencode" then
         values.OPENCODE_CONFIG_CONTENT = remuda._butler_agent_support.opencode_config_content(
           spec and spec.token, spec and spec.model)
+        if spec and spec.native and remuda.butler and remuda.butler.native_launch then
+          local extra = remuda.butler.native_launch.env(spec.native)
+          for key, value in pairs(extra) do values[key] = value end
+        end
       end
       return values
     end,
@@ -282,6 +296,18 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   if remuda._butler_done then remuda._butler_done[actual] = nil end
   bus.tokens[token] = { id = identity.id, generation = bus.agents[actual].session_start_marker,
     instance_id = instance_id, instance_binding = instance_id and 1 or nil }
+  if native_plan and native_plan.mode == "native" and kind == "opencode" then
+    local live_row
+    for _, row in ipairs(remuda.ls()) do
+      if row.name == actual then live_row = row end
+    end
+    bus.agents[actual].native = remuda._butler_native_launch.join(native_plan, live_row, instance_id)
+    if bus.agents[actual].native.mode ~= "native" then
+      _butler_session_trace("native_launch_join", actual .. " mode="
+        .. tostring(bus.agents[actual].native.mode) .. " reason="
+        .. tostring(bus.agents[actual].native.reason))
+    end
+  end
   if parent and bus.agents[parent] then
     local children = bus.agents[parent].children
     children[#children + 1] = actual

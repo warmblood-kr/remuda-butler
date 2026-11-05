@@ -32,6 +32,7 @@ remuda = {
   capture = function() return "› Ask Codex to do anything" end,
   session = function() return { is_busy = false } end,
 }
+dofile("tests/notice_journal_stub.lua")
 dofile("packages/butler/notice.lua")
 remuda._butler_send = function(_, to, body) sent[#sent + 1] = { to, body } end
 
@@ -44,28 +45,16 @@ local blank_draft = remuda._butler_prompt_is_empty("codex", "› \n⚠ my own no
 assert(blank_draft == "NON-EMPTY", "only the warning-count footer ends the composer, got " .. blank_draft)
 
 -- No stall clock exists any more: the first due tick attempts the ordinary
--- atomic send. An attached human is refused by preflight (nothing written) and
--- rechecked in a second; a dead pane takes the bounded retry schedule.
+-- atomic send, even while a human is attached (owner decision 2026-11-05).
+-- Attachment is not an admission gate and there is no attachment stall record.
 local deliver = remuda._butler_notice.deliver_notice
 local sends = 0
 remuda.send = function() sends = sends + 1 end
 deliver("lead")
-assert(sends == 0, "an attached human never receives the notice")
-assert(bus.notices.lead.due_at == now + 1, "attachment is rechecked in one second")
-assert(bus.notices.lead.delivery_attempts == nil, "attachment spends no delivery attempt")
-for _ = 1, 901 do
-  now = now + 1
-  deliver("lead")
-end
-assert(sends == 0, "a long attachment never writes into the human's pane")
-assert(bus.notice_stuck.lead, "the busy cap still opens the hourly stuck record")
-assert(#sent == 0, "no failure mail while the human is attached")
-
--- Detached: the same queued notice sends and the queue clears.
-remuda.ls = function() return { { name = "lead", alive = true, attached = false } } end
-now = now + 1
-deliver("lead")
-assert(sends == 1 and bus.notices.lead == nil, "the notice sends once the pane is detached")
+assert(sends == 1, "an attached pane receives the notice")
+assert(bus.notices.lead == nil, "the attached delivery completes")
+assert(bus.notice_stuck.lead == nil, "attachment creates no stuck record")
+assert(#sent == 0, "no failure mail for an attached pane")
 
 -- A dead session takes the bounded schedule and eventually alerts the sender.
 bus.agents.lead.id = "lead-id"
