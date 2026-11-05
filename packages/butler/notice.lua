@@ -65,6 +65,7 @@ bus.notice_journal_failure_alerts = bus.notice_journal_failure_alerts or {}
 bus.notice_native_alerts = bus.notice_native_alerts or {}
 bus.notice_native_dispatching = bus.notice_native_dispatching or {}
 bus.notice_native_watchers = bus.notice_native_watchers or {}
+bus.notice_native_watcher_checks = bus.notice_native_watcher_checks or {}
 local arm_native_watcher, cancel_native_watcher
 -- Durable-for-this-image uncertainty tombstones: recipient identity id ->
 -- message id. They outlive the report/stuck record and are never cleared by
@@ -1683,12 +1684,20 @@ local function native_publication(alias)
   return deliver_native_now(alias)
 end
 
-cancel_native_watcher = function(session)
+-- The watcher re-arms after every tick, so its sampling counter cannot be a
+-- closure local: a fresh closure would restart at 0 and the row check would
+-- run on every 50ms tick. Keep it beside the watcher and clear both together.
+local function drop_native_watcher(session)
   local entry = bus.notice_native_watchers[session]
   bus.notice_native_watchers[session] = nil
+  bus.notice_native_watcher_checks[session] = nil
   if entry and entry.handle and type(entry.handle.cancel) == "function" then
     pcall(entry.handle.cancel, entry.handle)
   end
+end
+
+cancel_native_watcher = function(session)
+  drop_native_watcher(session)
 end
 
 -- Arm only for a known initializing launch whose private manifest is
@@ -1706,14 +1715,19 @@ arm_native_watcher = function(session, native)
   local frozen = frozen_native_binding(native)
   local generation = NOTICE_MODULE
   local agent_generation = bus.agents[session]
-  local checks = 0
   local entry = {}
   local function tick()
     if bus.notice_native_watchers[session] ~= entry then return end
     bus.notice_native_watchers[session] = nil
-    if remuda._butler_notice ~= generation then return end
+    if remuda._butler_notice ~= generation then
+      bus.notice_native_watcher_checks[session] = nil
+      return
+    end
     local agent = bus.agents[session]
-    if agent == nil or agent ~= agent_generation then return end
+    if agent == nil or agent ~= agent_generation then
+      bus.notice_native_watcher_checks[session] = nil
+      return
+    end
     local live = agent.native
     if type(live) ~= "table" or live.mode ~= "native" then return end
     if not same_native_binding(frozen_native_binding(live), frozen) then return end
@@ -1722,15 +1736,20 @@ arm_native_watcher = function(session, native)
     -- tick, then about once a second so a long Claude consent wait does not
     -- enumerate the roster every 50ms. A transient listing failure is not
     -- proof of death; let the helper's own preflight decide.
-    checks = checks + 1
+    local checks = (bus.notice_native_watcher_checks[session] or 0) + 1
+    bus.notice_native_watcher_checks[session] = checks
     if checks == 1 or checks % 20 == 0 then
       local row, row_why = native_row(session, live)
-      if not row and row_why ~= "session_unverified" then return end
+      if not row and row_why ~= "session_unverified" then
+        bus.notice_native_watcher_checks[session] = nil
+        return
+      end
     end
     if not native_manifest_present(live) then
       arm_native_watcher(session, live)
       return
     end
+    bus.notice_native_watcher_checks[session] = nil
     native_publication(session)
   end
   local ok, handle = pcall(after, NATIVE_WATCH_S, tick)

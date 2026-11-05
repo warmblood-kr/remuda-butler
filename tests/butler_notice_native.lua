@@ -43,6 +43,7 @@ local mail = {
 }
 local alerts, spawns, pty_sends, timers = {}, {}, 0, {}
 local timer_callbacks, random_calls = {}, 0
+local ls_calls = 0
 local rows = { { name = "lead", alive = true, attached = false, id = "ses_abc",
   instance_id = "instance-1" } }
 remuda = {
@@ -91,6 +92,7 @@ local function reset()
   rows = { { name = "lead", alive = true, attached = false, id = "ses_abc",
     instance_id = "instance-1" } }
   remuda.ls = function()
+    ls_calls = ls_calls + 1
     if on_ls then local hook = on_ls; on_ls = nil; hook() end
     return rows
   end
@@ -98,6 +100,8 @@ local function reset()
   alerts, spawns, pty_sends, timers = {}, {}, 0, {}
   timer_callbacks, random_calls = {}, 0
   bus.notice_native_watchers = {}
+  bus.notice_native_watcher_checks = {}
+  ls_calls = 0
   on_ls, on_retire = nil, nil
   local files = remuda._butler_notice_test_journal.files
   for key in pairs(files) do files[key] = nil end
@@ -515,6 +519,31 @@ timer_callbacks[#timer_callbacks]()
 assert(#spawns == 1 and bus.notice_native_watchers.lead == nil,
   "a dead live row stops the watcher without a helper")
 remuda.fs = nil
+
+-- 5t. The row-liveness sample survives rearms: the counter cannot be a
+-- closure local, or every re-armed tick would look like the first one and
+-- enumerate the roster every 50ms. 39 absent ticks must sample twice.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "park before the cadence check")
+local base_ls = ls_calls
+for _ = 1, 39 do
+  timer_callbacks[#timer_callbacks]()
+end
+assert(ls_calls - base_ls == 2,
+  "39 absent ticks sample the row on tick 1 and tick 20 only, got "
+    .. tostring(ls_calls - base_ls))
+assert(bus.notice_native_watchers.lead ~= nil, "the watcher keeps re-arming")
+remuda.fs = nil
+N.complete_notice_recovery("lead", { message_ids = {} })
+assert(bus.notice_native_watcher_checks.lead == nil,
+  "a terminal outcome clears the sampling counter")
 
 -- 5g. The startup window is bounded per protocol; an expired fresh launch is
 -- treated as dead rather than parked forever.
