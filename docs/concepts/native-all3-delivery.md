@@ -88,17 +88,17 @@ ends the window. A missing manifest on an adopted or reloaded binding is dead.
 The explicit entrypoint is `remuda._butler_notice.native_publication(alias)`;
 launch completion and successful adoption call it to flush queued unreserved
 mail. No core publication callback exists, so a publication after launch and
-outside a Butler-visible step still uses the bounded notice tick (~1s): an
-honest latency limit, not an event-driven guarantee.
+outside a Butler-visible step uses a bounded tick (~1s) that stats only the
+private manifest path (never its contents) before spawning: an honest latency
+limit, not an event-driven guarantee.
 
 ## Status
 
 `remuda butler sessions` gains a read-only `NATIVE` section; no path, nonce,
-socket, thread or token.
+socket or token.
 
 ## Limits
 
-Codex adoption is proven against core 0.166 helpers; live-row coverage is QA's.
-Claude helpers are not in the pinned binary yet; the builder entry is
-config/argv-tested only. Full owned launch smoke is QA-owned. No merge,
-install, reload or rollout.
+Codex adoption uses 0.166 helpers; live-row coverage is QA's. Claude helpers
+are not in the pinned binary yet; the builder entry is config-tested. Launch
+smoke is QA's. No merge, install, reload or rollout.

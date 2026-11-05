@@ -317,6 +317,25 @@ assert(N.deliver_notice("lead") == false, "a malformed binding refuses")
 assert(bus.agents.lead.native.mode == "disabled",
   "a generic invalid binding is dead, never parked")
 
+-- 5j. A fresh launch with no manifest is detected by a private-path stat, so
+-- no helper is spawned on every tick; the same tick flushes once it exists.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda._butler_paths = { file_exists = function() return false end }
+respond({ outcome = "accepted_queue" })
+now = now + 1
+remuda._butler_deliver_notices()
+assert(#spawns == 0 and bus.notices.lead ~= nil,
+  "a missing manifest is stat-checked without spawning the helper")
+remuda._butler_paths.file_exists = function() return true end
+remuda._butler_deliver_notices()
+assert(#spawns == 1 and bus.notices.lead == nil,
+  "the first tick after publication flushes the queued mail")
+remuda._butler_paths = nil
+
 -- 5g. The startup window is bounded per protocol; an expired fresh launch is
 -- treated as dead rather than parked forever.
 reset()

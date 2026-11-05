@@ -1324,6 +1324,17 @@ local function native_immediate(session)
   return native ~= nil and native.mode == "native"
 end
 
+-- Bounded publication detection, recommended by the core: stat the private
+-- manifest path only, never read it. A missing file is not an event claim; it
+-- avoids spawning the helper until the core has published. If the core has no
+-- stat seam, let the helper decide.
+local function native_manifest_present(native)
+  local exists = remuda._butler_paths and remuda._butler_paths.file_exists
+  if type(exists) ~= "function" then return true end
+  local ok, present = pcall(exists, native.path)
+  return not ok or present == true
+end
+
 local function native_row(session, native)
   local row = {}
   local listed, rows = pcall(remuda.ls)
@@ -1595,8 +1606,15 @@ local function deliver_due_notice(session, now)
     bus.notices[session] = nil
   elseif native_immediate(session) then
     -- No quiet window or task gate for a native queue. A proven pre-write
-    -- refusal keeps its bounded retry backoff.
+    -- refusal keeps its bounded retry backoff. A fresh launch awaits an
+    -- unpublished manifest: stat the private path first, never the contents.
     if pending and pending.retry_at and now < pending.retry_at then return end
+    local native = native_state(session)
+    if pending and native and native.awaiting_publication
+        and not native_manifest_present(native) then
+      pending.due_at = now + 1
+      return
+    end
     cancel_notice_timers(session)
     if pending and pending.retry_at then pending.retry_at = nil end
     deliver_notice(session)
