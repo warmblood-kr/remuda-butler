@@ -171,7 +171,7 @@ export function isLeaderReport(event) {
 
 // Event-fed state machine, separated from the plugin so the same source can run
 // under a deterministic driver. Decisions are synchronous; only the synthetic
-// admission is asynchronous.
+// admission is asynchronous. `now` and `send` are injected for the driver.
 export function createNudge(options) {
   const now = options.now || (() => Date.now())
   const send = options.send
@@ -188,17 +188,15 @@ export function createNudge(options) {
     return entry
   }
 
-  // One admitted input's execution. `userID` is the user inbox item this run
-  // consumed, so a queued message cannot be attributed to an earlier run.
   function beginRun(entry) {
     entry.run = { userID: null, reported: false }
     return entry.run
   }
 
+  // Cooldown starts at the claim, not when the admission settles, so a slow
+  // admit cannot make the next cycle look overdue.
   function dispatch(entry, sessionID) {
     entry.sending = true
-    // Cooldown starts at the claim, not when the admission settles, so a slow
-    // admit cannot make the next cycle look overdue.
     entry.lastNudgeAt = now()
     const pending = Promise.resolve()
       .then(() => send({ sessionID, text: NUDGE, description: DESCRIPTION }))
@@ -212,61 +210,66 @@ export function createNudge(options) {
     inflight.add(pending)
   }
 
+  function eligible(entry, run) {
+    if (!run || !run.userID) return false
+    if (run.reported) return false
+    if (entry.nudgedCycles.includes(run.userID)) return false
+    if (entry.pending > 0) return false
+    return now() - entry.lastNudgeAt >= COOLDOWN_MS
+  }
+
+  // Claim before anything asynchronous: a duplicate success, a cooldown expiry,
+  // or a failed admission must not nudge the same input twice.
+  function claim(entry, sessionID, cycle) {
+    entry.nudgedCycles.push(cycle)
+    if (entry.nudgedCycles.length > 32) entry.nudgedCycles.shift()
+    dispatch(entry, sessionID)
+  }
+
+  function completeTurn(entry, sessionID) {
+    const run = entry.run
+    entry.run = null
+    if (eligible(entry, run)) claim(entry, sessionID, run.userID)
+  }
+
+  function onEnqueued(entry, data) {
+    const item = data.item || {}
+    if (data.inboxID) kinds.set(data.inboxID, { kind: item.type, sessionID: data.sessionID })
+    // Anything already queued means the member is about to continue.
+    if (item.type !== "synthetic") entry.pending += 1
+  }
+
+  function onDelivered(entry, data, cancelled) {
+    const known = data.inboxID ? kinds.get(data.inboxID) : undefined
+    if (data.inboxID) kinds.delete(data.inboxID)
+    if (known && known.kind !== "synthetic" && entry.pending > 0) entry.pending -= 1
+    if (cancelled || !known || known.kind !== "user") return
+    // Delivered user text belongs to the run executing it. A delivery with no
+    // open run has no provable association: the next run starts without a cycle.
+    if (entry.run) entry.run.userID = data.inboxID
+  }
+
+  function forget(sessionID) {
+    sessions.delete(sessionID)
+    for (const [id, value] of kinds) if (value.sessionID === sessionID) kinds.delete(id)
+  }
+
   function onEvent(event) {
     const sessionID = event && event.data && event.data.sessionID
     if (!sessionID) return
-    if (event.type === "session.deleted") {
-      sessions.delete(sessionID)
-      for (const [id, value] of kinds) if (value.sessionID === sessionID) kinds.delete(id)
-      return
-    }
+    if (event.type === "session.deleted") return forget(sessionID)
     const entry = state(sessionID)
-    const data = event.data
-
-    if (event.type === "session.inbox.enqueued") {
-      const item = data.item || {}
-      if (data.inboxID) kinds.set(data.inboxID, { kind: item.type, sessionID })
-      // Anything already queued means the member is about to continue.
-      if (item.type !== "synthetic") entry.pending += 1
-      return
+    switch (event.type) {
+      case "session.inbox.enqueued": return onEnqueued(entry, event.data)
+      case "session.inbox.delivered": return onDelivered(entry, event.data, false)
+      case "session.inbox.cancelled": return onDelivered(entry, event.data, true)
+      case "session.execution.started": return beginRun(entry)
+      case "session.execution.succeeded": return completeTurn(entry, sessionID)
+      default:
+        // Failed or interrupted work is not a finished task; a stale run must
+        // not be nudged by a later success.
+        entry.run = null
     }
-    if (event.type === "session.inbox.delivered" || event.type === "session.inbox.cancelled") {
-      const known = data.inboxID ? kinds.get(data.inboxID) : undefined
-      if (data.inboxID) kinds.delete(data.inboxID)
-      if (known && known.kind !== "synthetic" && entry.pending > 0) entry.pending -= 1
-      if (event.type === "session.inbox.delivered" && known && known.kind === "user") {
-        // Delivered user text belongs to the run that is executing it. A
-        // delivery with no open run has no provable association; the next
-        // execution starts without a cycle and is never nudged.
-        if (entry.run) entry.run.userID = data.inboxID
-      }
-      return
-    }
-    if (event.type === "session.execution.started") {
-      beginRun(entry)
-      return
-    }
-    if (event.type !== "session.execution.succeeded") {
-      // Failed or interrupted work is not a finished task; a stale run must not
-      // be nudged by a later success.
-      entry.run = null
-      return
-    }
-
-    const run = entry.run
-    entry.run = null
-    if (!run || !run.userID) return
-    if (run.reported) return
-    if (entry.nudgedCycles.includes(run.userID)) return
-    if (entry.pending > 0) return
-    if (now() - entry.lastNudgeAt < COOLDOWN_MS) return
-
-    // Claim the cycle before anything asynchronous: a duplicate success, a
-    // cooldown expiry, or a failed admission must not produce a second nudge
-    // for the same user input.
-    entry.nudgedCycles.push(run.userID)
-    if (entry.nudgedCycles.length > 32) entry.nudgedCycles.shift()
-    dispatch(entry, sessionID)
   }
 
   function onToolAfter(event) {
