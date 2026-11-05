@@ -312,7 +312,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if row.name == actual then live_row = row end
     end
     local resolve
-    local native_identity = remuda._butler_native_identity
+    local native_identity = remuda.butler and remuda.butler.native_identity
     if native_identity and type(native_identity.resolve) == "function" and live_row then
       resolve = function(target)
         return native_identity.resolve(target, { rows = live_rows,

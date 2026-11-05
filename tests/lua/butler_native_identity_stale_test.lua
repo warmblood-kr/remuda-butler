@@ -1,24 +1,35 @@
--- A native identity lookup may finish after the launch it was started for has
--- been replaced. The whole registration must abort at that fence: no parent
--- child, no legacy migration, no mailbox, no roster write, no first task and
--- no composer/PTY act into the replacement. The original task is kept only
--- when the durable write really succeeds; otherwise the report says so.
+-- The fallback must be wired through the module main.lua actually exports. A
+-- private alias that the image never sets would leave every old-daemon launch
+-- and notice without the canonical proof. This boots the real Butler image and
+-- composes the public module, never a fake private alias.
 T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
 T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true; remuda.exec("butler")')
 T.wait_until(function()
   return T.eval('return remuda._butler_bus ~= nil and remuda._butler_bus.agents.butler ~= nil') == "true"
 end, 5, "root start")
 
+T.test("main exports the public identity module and no private alias", function()
+  T.eq(T.eval("return tostring(remuda.butler ~= nil and remuda.butler.native_identity ~= nil)"),
+    "true", "remuda.butler.native_identity is exported")
+  T.eq(T.eval("return type(remuda.butler.native_identity.resolve)"), "function",
+    "the public module carries resolve")
+  T.eq(T.eval("return tostring(rawget(remuda, '_butler_native_identity'))"), "nil",
+    "no private identity alias exists")
+end)
+
 T.eval([=[
   local t = {}
   remuda._stale_t = t
   t.real = { new = remuda.new, ls = remuda.ls,
     launch = remuda._butler_native_launch, send = remuda._butler_send,
-    roster = remuda._butler_roster_save }
+    roster = remuda._butler_roster_save,
+    identity = remuda.butler.native_identity,
+    resolve = remuda.butler.native_identity.resolve,
+    process_run = remuda.process and remuda.process.run }
   t.rows, t.reports = {}, {}
   function t.install()
-    -- A fake core registry: the old projection drops row.id and the daemon has
-    -- not listed the fresh row yet, so ls must expose it from the spawn itself.
+    -- The old projection drops row.id and the daemon has not listed the fresh
+    -- row yet, so ls exposes it from the spawn itself.
     remuda.new = function(name)
       t.rows[name] = "inst-" .. name
       return name, "inst-" .. name
@@ -26,7 +37,8 @@ T.eval([=[
     remuda.ls = function(...)
       local out = {}
       for _, row in ipairs(t.real.ls(...)) do
-        if not t.rows[row.name] then
+        if not t.rows[row.name] and type(row.instance_id) == "string"
+            and row.instance_id ~= "" and type(row.alive) == "boolean" then
           out[#out + 1] = { name = row.name, alive = row.alive,
             instance_id = row.instance_id }
         end
@@ -46,12 +58,14 @@ T.eval([=[
     fence.join = t.real.launch.join
     remuda._butler_native_launch = fence
     remuda.butler.native_launch = fence
-    remuda._butler_native_identity = { resolve = function(row)
+    -- The production lookup is the public module; spy on its resolve only.
+    remuda.butler.native_identity = t.real.identity
+    remuda.butler.native_identity.resolve = function(row)
       t.probe = true
       remuda._butler_bus.agents[row.name] =
         { kind = "codex", id = "replacement-id", children = {} }
       return "core-id-stale"
-    end }
+    end
     t.real_send = remuda._butler_send
     remuda._butler_send = function(from, to, text)
       t.reports[#t.reports + 1] = tostring(text)
@@ -68,11 +82,30 @@ T.eval([=[
     remuda._butler_agent_builders.codex =
       function() return {"sh", "-c", "sleep 60"} end
   end
+  function t.install_real_helper()
+    t.install()
+    -- Use the real canonical helper. Its official CLI answer describes the
+    -- exact same fleet the in-image listing exposes, with ids only in the CLI.
+    remuda.butler.native_identity.resolve = t.real.resolve
+    remuda.process = remuda.process or {}
+    remuda.process.run = function()
+      local listed = {}
+      for _, row in ipairs(remuda.ls()) do
+        listed[#listed + 1] = { name = row.name, instance_id = row.instance_id,
+          alive = row.alive, id = "core-" .. row.name }
+      end
+      return { code = 0, stdout = remuda.json.encode(listed), stderr = "" }
+    end
+  end
   function t.restore()
     remuda.new, remuda.ls = t.real.new, t.real.ls
     remuda._butler_native_launch = t.real.launch
     remuda.butler.native_launch = t.real.launch
-    remuda._butler_native_identity = nil
+    remuda.butler.native_identity = t.real.identity
+    remuda.butler.native_identity.resolve = t.real.resolve
+    if remuda.process and t.real.process_run then
+      remuda.process.run = t.real.process_run
+    end
     remuda._butler_send = t.real_send
     remuda._butler_roster_save = t.real.roster
     t.rows, t.reports, t.probe, t.roster = {}, {}, nil, 0
@@ -86,8 +119,8 @@ T.eval([=[
     end
     local failure = bus.launch_failures and bus.launch_failures[name]
     return table.concat({ tostring(agent.id), tostring(child),
-      tostring(agent.native), tostring(agent.token), tostring(agent.task),
-      tostring(bus.unread_seeded and bus.unread_seeded[name]),
+      tostring(agent.native and agent.native.mode), tostring(agent.token),
+      tostring(agent.task), tostring(bus.unread_seeded and bus.unread_seeded[name]),
       tostring(t.roster), tostring(t.probe),
       tostring(failure and failure.error or "none") }, "|")
   end
@@ -157,4 +190,54 @@ T.test("a failed durable keep is reported, never claimed", function()
   T.ok(text:find("could NOT be saved", 1, true) ~= nil, text)
   T.ok(text:find("recipient has no Butler ULID", 1, true) ~= nil, text)
   T.ok(text:find("was saved to your inbox", 1, true) == nil, text)
+end)
+
+T.test("the installed join reaches the real canonical helper", function()
+  T.eval([[
+    local t = remuda._stale_t
+    t.install_real_helper()
+    remuda._butler_launch_impl.launch_agent("codex", "liveX", nil, nil, "butler",
+      nil, nil, nil, nil)
+  ]])
+  local result = T.eval([[
+    local t = remuda._stale_t
+    local bus = remuda._butler_bus
+    local agent = bus.agents.liveX
+    local child = false
+    for _, entry in ipairs(bus.agents.butler.children or {}) do
+      if entry == "liveX" then child = true end
+    end
+    local report = table.concat({ tostring(agent.native and agent.native.mode),
+      tostring(agent.native and agent.native.row_id),
+      tostring(agent.native and agent.native.session_token),
+      tostring(agent.native and agent.native.instance),
+      tostring(child), tostring(t.roster), tostring(t.probe) }, "|")
+    t.restore()
+    return report
+  ]])
+  T.eq(result, "native|core-liveX|core-liveX|inst-liveX|true|1|nil", result)
+end)
+
+T.test("a missing public identity module fails closed", function()
+  T.eval([[
+    local t = remuda._stale_t
+    t.install()
+    remuda.butler.native_identity = nil
+    remuda._butler_launch_impl.launch_agent("codex", "nowire", nil, nil, "butler",
+      nil, nil, nil, nil)
+  ]])
+  local result = T.eval([[
+    local t = remuda._stale_t
+    local agent = remuda._butler_bus.agents.nowire
+    local report = table.concat({ tostring(agent.native and agent.native.mode),
+      tostring(agent.native and agent.native.reason), tostring(t.probe),
+      tostring(agent.id) }, "|")
+    t.restore()
+    return report
+  ]])
+  local mode, reason, probe, id = result:match("^(.-)|(.-)|(.-)|(.-)$")
+  T.eq(mode, "disabled", result)
+  T.eq(reason, "missing_row_identity", result)
+  T.eq(probe, "nil", result)
+  T.ok(id ~= "" and id ~= "nil", "the aborted proof still registers no replacement")
 end)
