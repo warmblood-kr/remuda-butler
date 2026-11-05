@@ -1704,12 +1704,16 @@ arm_native_watcher = function(session, native)
   local after = remuda._butler_notice_after or remuda.after
   if type(after) ~= "function" then return end
   local frozen = frozen_native_binding(native)
+  local generation = NOTICE_MODULE
+  local agent_generation = bus.agents[session]
   local entry = {}
   local function tick()
     if bus.notice_native_watchers[session] ~= entry then return end
     bus.notice_native_watchers[session] = nil
+    if remuda._butler_notice ~= generation then return end
     local agent = bus.agents[session]
-    local live = agent and agent.native
+    if agent == nil or agent ~= agent_generation then return end
+    local live = agent.native
     if type(live) ~= "table" or live.mode ~= "native" then return end
     if not same_native_binding(frozen_native_binding(live), frozen) then return end
     if not missing_manifest_is_startup(live) then return end

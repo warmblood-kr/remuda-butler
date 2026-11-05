@@ -460,6 +460,44 @@ timer_callbacks[#timer_callbacks]()
 assert(#spawns == 1, "a replaced binding is not flushed by the old watcher")
 remuda.fs = nil
 
+-- 5r. Agent replacement and module replacement both stop the old watcher.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "park before replacement")
+local stale_agent = bus.agents.lead
+bus.agents.lead = { kind = "codex", id = stale_agent.id, instance_id = stale_agent.instance_id,
+  native = stale_agent.native }
+remuda.fs.realpath = function() return "/private/binding/manifest.json", nil end
+respond({ outcome = "accepted_queue" })
+timer_callbacks[#timer_callbacks]()
+assert(#spawns == 1 and bus.notice_native_watchers.lead == nil,
+  "agent replacement stops the old watcher without a helper")
+
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "park before module replacement")
+local live_module = remuda._butler_notice
+remuda._butler_notice = {}
+remuda.fs.realpath = function() return "/private/binding/manifest.json", nil end
+respond({ outcome = "accepted_queue" })
+timer_callbacks[#timer_callbacks]()
+assert(#spawns == 1 and bus.notice_native_watchers.lead == nil,
+  "module replacement stops the old watcher without a helper")
+remuda._butler_notice = live_module
+remuda.fs = nil
+
 -- 5g. The startup window is bounded per protocol; an expired fresh launch is
 -- treated as dead rather than parked forever.
 reset()
