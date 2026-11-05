@@ -138,6 +138,7 @@ local function choose(candidates, opts, done)
     if not replaced(current.name, current.instance_id) then ok, err = pcall(remuda.close, current.name) end
     current.closing, current.close_error, current.close_ticks = true, ok and nil or err, 0
   end
+  local register_native
   local function start_next()
     index = index + 1
     local id = candidates[index]
@@ -202,7 +203,27 @@ local function choose(candidates, opts, done)
     if opts.skip_probe or (test_builder and not force_test_probe) then
       attempt.reason, attempt.session = "ready", name
       callback(name, id)
+      state = nil
+      return
     end
+    -- A native candidate is registered as soon as the core owns the exact
+    -- live instance. Transport/binding publication is handled by native
+    -- availability (a typed binding_missing), and the first task is already
+    -- durable mail. Never wait for a composer, screen or startup modal.
+    if type(spec) == "table" and type(spec.native) == "table"
+        and spec.native.mode == "native" then
+      state.native_pending = true
+      if register_native then register_native() end
+    end
+  end
+  register_native = function()
+    if not state or not state.native_pending then return false end
+    if not (state.instance_id and alive(state.name, state.instance_id)) then return false end
+    state.attempt.reason, state.attempt.session = "native_transport_pending", state.name
+    local registered_name, registered_kind = state.name, state.id
+    callback(registered_name, registered_kind)
+    state = nil
+    return true
   end
   local function tick()
     if not state then return end
@@ -218,6 +239,7 @@ local function choose(candidates, opts, done)
       end
       return
     end
+    if register_native() then return end
     if not alive(state.name, state.instance_id) then fail_candidate("exited", "session exited before prompt became ready"); return end
     local captured, screen = pcall(remuda.capture, state.name)
     if not captured then

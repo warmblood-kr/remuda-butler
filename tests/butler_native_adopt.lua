@@ -121,6 +121,31 @@ assert(reloaded_why == "session_replaced_during_adopt",
   "a reloaded module never installs through the old image")
 assert(reloaded.bus.agents.m1.native == nil, "the stale module attaches no binding")
 
+-- 2c. A replacement during the FIRST listing never reaches the helper, and a
+-- new disabled decision made while the helper runs is never overwritten.
+local first_list, _, first_list_calls = fixture({ outcome = "adopted",
+  generation = string.rep("cd", 32) })
+first_list.list = function()
+  first_list.bus.agents.m1 = { kind = "codex", id = "id-fresh" }
+  return { { name = "m1", alive = true, id = "ses_row", instance_id = "instance-1" } }
+end
+local _, first_list_why = adopt_module.codex(first_list, "m1", SOCKET, UUID)
+assert(first_list_why == "session_replaced_during_adopt",
+  "a replacement during the first listing is refused")
+assert(first_list_calls.fields == nil, "no helper call for a replaced agent")
+
+local new_disabled
+new_disabled = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
+  { during = function()
+      new_disabled.bus.agents.m1.native = { mode = "disabled", reason = "new_decision" }
+    end })
+local _, new_disabled_why = adopt_module.codex(new_disabled, "m1", SOCKET, UUID)
+assert(new_disabled_why == "session_replaced_during_adopt",
+  "a new disabled decision wins over an in-flight adoption")
+assert(new_disabled.bus.agents.m1.native.mode == "disabled"
+  and new_disabled.bus.agents.m1.native.reason == "new_decision",
+  "the new decision is not overwritten")
+
 -- 3. Opt-in, identity and availability failures create no binding.
 local off, off_bus = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
   { config_off = true })

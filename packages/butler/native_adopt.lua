@@ -23,12 +23,37 @@ local function free_of_native(agent)
   return type(agent.native) ~= "table" or agent.native.mode ~= "native"
 end
 
--- The helper yields. An install is valid only if the exact agent object and
--- module image are still current and nothing bound it in the meantime; a
--- reload or a concurrent adoption must never be overwritten.
-local function still_current(self, name, agent)
+-- The helper yields. Freeze the agent's native decision (object + immutable
+-- scalars) before the call; an install is valid only if the exact agent
+-- object, module image and the same unchanged decision are still current. A
+-- reload, an agent replacement, a concurrent binding or a NEW disabled
+-- decision must never be overwritten.
+local function decision_snapshot(agent)
+  local native = agent.native
+  if type(native) ~= "table" then return nil end
+  return { ref = native, mode = native.mode, kind = native.kind,
+    reason = native.reason, path = native.path, nonce = native.nonce,
+    row_id = native.row_id, instance = native.instance,
+    generation = native.generation, session_token = native.session_token,
+    awaiting = native.awaiting_publication }
+end
+
+local function decision_unchanged(agent, snapshot)
+  if snapshot == nil then return type(agent.native) ~= "table" end
+  local native = agent.native
+  if native ~= snapshot.ref then return false end
+  return native.mode == snapshot.mode and native.kind == snapshot.kind
+    and native.reason == snapshot.reason and native.path == snapshot.path
+    and native.nonce == snapshot.nonce and native.row_id == snapshot.row_id
+    and native.instance == snapshot.instance
+    and native.generation == snapshot.generation
+    and native.session_token == snapshot.session_token
+    and native.awaiting_publication == snapshot.awaiting
+end
+
+local function still_current(self, name, agent, snapshot)
   if self.bus.agents[name] ~= agent then return false end
-  if not free_of_native(agent) then return false end
+  if not decision_unchanged(agent, snapshot) then return false end
   local installed = remuda.butler and remuda.butler.native_adopt
   return installed == M
 end
@@ -51,6 +76,7 @@ function M.codex(self, name, socket, thread)
   if type(agent) ~= "table" then return nil, "unknown_session" end
   if agent.kind ~= "codex" then return nil, "not_a_codex_session" end
   if not free_of_native(agent) then return nil, "session_already_native" end
+  local decision = decision_snapshot(agent)
   local state = config_state(self, name, "codex")
   if state.enabled ~= true then
     return nil, "codex_not_opted_in: " .. tostring(state.reason or "disabled")
@@ -62,6 +88,10 @@ function M.codex(self, name, socket, thread)
     return nil, "missing_row_identity"
   end
   local identity = { id = row.id, instance = row.instance_id }
+  -- A replacement during the first listing must not even reach the helper.
+  if not still_current(self, name, agent, decision) then
+    return nil, "session_replaced_during_adopt"
+  end
   local binding, nonce, why = self.launch.prepare(name, "codex")
   if not binding then return nil, "binding_failed: " .. tostring(why) end
   local result = self.codex.adopt({ binding = binding, nonce = nonce,
@@ -70,7 +100,7 @@ function M.codex(self, name, socket, thread)
   -- Adoption yields in the helper. Never attach a binding to a replaced row,
   -- a replaced agent object/module or a decision another adoption already made.
   if not same_identity(live_row(self.list, name), identity)
-      or not still_current(self, name, agent) then
+      or not still_current(self, name, agent, decision) then
     return nil, "session_replaced_during_adopt"
   end
   if type(result) ~= "table" then return nil, "uncertain: helper_failed" end
@@ -107,6 +137,7 @@ function M.opencode(self, name, endpoint, conversation, password)
   if type(agent) ~= "table" then return nil, "unknown_session" end
   if agent.kind ~= "opencode" then return nil, "not_an_opencode_session" end
   if not free_of_native(agent) then return nil, "session_already_native" end
+  local decision = decision_snapshot(agent)
   local state = config_state(self, name, "opencode")
   if state.enabled ~= true then
     return nil, "opencode_not_opted_in: " .. tostring(state.reason or "disabled")
@@ -118,6 +149,10 @@ function M.opencode(self, name, endpoint, conversation, password)
     return nil, "missing_row_identity"
   end
   local identity = { id = row.id, instance = row.instance_id }
+  -- A replacement during the first listing must not even reach the helper.
+  if not still_current(self, name, agent, decision) then
+    return nil, "session_replaced_during_adopt"
+  end
   local binding, nonce, why = self.launch.prepare(name, "opencode")
   if not binding then return nil, "binding_failed: " .. tostring(why) end
   local result = self.opencode.adopt({ binding = binding, nonce = nonce,
@@ -127,7 +162,7 @@ function M.opencode(self, name, endpoint, conversation, password)
   -- Adoption yields in the helper. Never attach a binding to a replaced row,
   -- a replaced agent object/module or a decision another adoption already made.
   if not same_identity(live_row(self.list, name), identity)
-      or not still_current(self, name, agent) then
+      or not still_current(self, name, agent, decision) then
     return nil, "session_replaced_during_adopt"
   end
   if type(result) ~= "table" then return nil, "uncertain: helper_failed" end

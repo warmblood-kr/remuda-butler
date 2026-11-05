@@ -8,7 +8,7 @@
 local M = {}
 
 local VERSION = 1
-local DEFAULT_TIMEOUT = 15
+local DEFAULT_TIMEOUT = 25
 local MAX_PATH = 1024
 local MAX_TOKEN = 128
 local MAX_PASSWORD = 1024
@@ -123,6 +123,8 @@ local function runner_of(options)
   return options.runner or (remuda and remuda.process and remuda.process.run)
 end
 
+-- The helper makes two HTTP requests (5s each) plus the local proof; 25s
+-- leaves room on a slow host without ever retrying.
 -- One adopt call. A refusal or uncertain answer leaves the live session
 -- untouched; nothing is retried automatically.
 function M.adopt(fields, options)

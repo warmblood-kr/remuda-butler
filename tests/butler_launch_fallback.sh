@@ -121,6 +121,35 @@ for _ in $(seq 50); do
   sleep 0.1
 done
 [[ $(lua 'return remuda._butler_test_order_kind or ""') == early ]] || fail "lower-order kind was not tried first"
+# A native candidate registers immediately once the core owns the exact live
+# instance: no capture, no ready callback, even when capture would throw. The
+# honest reason is native_transport_pending; the durable task is queued later.
+lua 'remuda._butler_contribute("butler.agent", "nativefast", {
+  order=1, executable="stub-ready", argv=function() return {"stub-ready"} end,
+  ready=function() return false end, login={}, dialogs={},
+  working=function() return false end })
+local real_capture = remuda.capture
+local captures = 0
+remuda.capture = function() captures = captures + 1; error("native must not capture") end
+remuda._butler_choose_async({"nativefast"}, {
+  name="native-check",
+  spec=function() return { name="native-check",
+    native={ mode="native", kind="opencode", binding="/private/binding/manifest.json",
+      nonce=string.rep("a", 32) } } end,
+  env=function() return {} end,
+}, function(name, kind, attempts)
+  remuda._butler_native_fast = { name=name, kind=kind, calls=captures,
+    reason=attempts[1] and attempts[1].reason or "none" }
+  remuda.capture = real_capture
+  if name then remuda.close(name) end
+end)' >/dev/null
+for _ in $(seq 50); do
+  [[ -n $(lua 'return remuda._butler_native_fast and remuda._butler_native_fast.name or ""') ]] && break
+  sleep 0.1
+done
+NATIVE_FAST=$(lua 'local r=remuda._butler_native_fast or {}; return (r.name or "none")..":"..(r.kind or "none")..":"..(r.reason or "none")..":"..tostring(r.calls or -1)')
+[[ "$NATIVE_FAST" == native-check:nativefast:native_transport_pending:0 ]] ||
+  fail "native candidate waited for readiness or captured the screen: $NATIVE_FAST"
 # Codex starts through `remuda _codex_tui`, but its registry entry requires
 # the separate `codex` CLI. Its precheck must reject that missing executable.
 lua 'local attempts=remuda._butler_choose({"codex"}, {

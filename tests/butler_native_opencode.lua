@@ -125,7 +125,7 @@ assert(seen.stdin == literal(module.build(fields)) or seen.stdin:find('"password
 for _, arg in ipairs(seen.argv) do
   assert(arg ~= "s3cret" and not arg:find("s3cret", 1, true), "no password in argv")
 end
-assert(seen.timeout == 15, "the adopt call is bounded")
+assert(seen.timeout == 25, "the adopt call is bounded for two GETs")
 
 -- 6. Timeouts, nonzero exits and helper failures never become a binding.
 local function with_runner(r)
