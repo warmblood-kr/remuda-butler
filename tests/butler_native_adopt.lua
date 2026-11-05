@@ -31,6 +31,11 @@ local function fixture(result, overrides)
       if overrides.during then overrides.during() end
       return result
     end },
+    opencode = { adopt = function(fields, options)
+      calls.fields, calls.options = fields, options
+      if overrides.during then overrides.during() end
+      return overrides.opencode_result or result
+    end },
     json = {}, runner = function() end, remuda = "remuda",
     roster_save = function() saved = saved + 1 end,
     trace = function() end,
@@ -134,4 +139,96 @@ local uncertain_text, uncertain_error = report(nil, "uncertain: timeout")
 assert(uncertain_text == nil and uncertain_error:find("Do not retry automatically", 1, true),
   "uncertain never invites a blind retry")
 
-print("ok - Codex adoption is fenced, opt-in and reported without endpoints")
+-- 6. OpenCode adoption binds the canonical row id and never persists the
+-- endpoint, conversation or password.
+local oc, oc_bus, oc_calls = fixture({ outcome = "adopted", generation = "65f870ac8f9d2" })
+oc_bus.agents.m1.kind = "opencode"
+local oc_result = assert(adopt_module.opencode(oc, "m1", "http://127.0.0.1:4096",
+  "ses_e543a3368ffe1Hhcoeq7zBDS4b", "s3cret"))
+assert(oc_result.generation == "65f870ac8f9d2", "OpenCode returns the generation")
+assert(oc_calls.fields.session == "ses_row"
+  and oc_calls.fields.endpoint == "http://127.0.0.1:4096"
+  and oc_calls.fields.conversation == "ses_e543a3368ffe1Hhcoeq7zBDS4b"
+  and oc_calls.fields.password == "s3cret"
+  and oc_calls.fields.nonce == string.rep("ab", 16),
+  "the request carries the declaration once and the live row id")
+local oc_native = oc_bus.agents.m1.native
+assert(oc_native.mode == "native" and oc_native.kind == "opencode"
+  and oc_native.row_id == "ses_row" and oc_native.session_token == "ses_row"
+  and oc_native.generation == "65f870ac8f9d2" and oc_native.awaiting_publication == false,
+  "the binding keeps the identity and generation")
+for key, value in pairs(oc_native) do
+  assert(key ~= "endpoint" and key ~= "conversation" and key ~= "auth"
+    and key ~= "password", "never persist " .. key)
+  assert(not tostring(value):find("s3cret", 1, true), "no credential in " .. key)
+  assert(not tostring(value):find("127.0.0.1", 1, true), "no endpoint in " .. key)
+end
+
+-- 7. OpenCode refusals: wrong kind, opt-in, a replaced row and unavailable.
+local oc_wrong, oc_wrong_bus = fixture({ outcome = "adopted", generation = "10" })
+oc_wrong_bus.agents.m1.kind = "codex"
+assert(adopt_module.opencode(oc_wrong, "m1", "http://127.0.0.1:4096",
+  "ses_abc", "x") == nil, "only OpenCode sessions adopt")
+local oc_off, oc_off_bus = fixture({ outcome = "adopted", generation = "10" },
+  { config_off = true })
+oc_off_bus.agents.m1.kind = "opencode"
+local _, oc_off_why = adopt_module.opencode(oc_off, "m1", "http://127.0.0.1:4096",
+  "ses_abc", "x")
+assert(oc_off_why and oc_off_why:find("opencode_not_opted_in", 1, true),
+  "OpenCode adoption is opt-in")
+assert(oc_off_bus.agents.m1.native == nil, "unopted OpenCode stays unbound")
+local oc_replaced = fixture({ outcome = "adopted", generation = "10" })
+oc_replaced.bus.agents.m1.kind = "opencode"
+local replaced_calls = 0
+oc_replaced.list = function()
+  replaced_calls = replaced_calls + 1
+  if replaced_calls == 1 then
+    return { { name = "m1", alive = true, id = "ses_row", instance_id = "instance-1" } }
+  end
+  return { { name = "m1", alive = true, id = "ses_row", instance_id = "instance-2" } }
+end
+local _, oc_replaced_why = adopt_module.opencode(oc_replaced, "m1",
+  "http://127.0.0.1:4096", "ses_abc", "x")
+assert(oc_replaced_why == "session_replaced_during_adopt",
+  "a replaced OpenCode row is refused")
+assert(oc_replaced.bus.agents.m1.native == nil, "no half-binding for OpenCode")
+local oc_unavailable = fixture({ outcome = "unavailable", reason = "auth" })
+oc_unavailable.bus.agents.m1.kind = "opencode"
+local _, oc_unavailable_why = adopt_module.opencode(oc_unavailable, "m1",
+  "http://127.0.0.1:4096", "ses_abc", "x")
+assert(oc_unavailable_why == "unavailable: auth", "the typed refusal is reported")
+
+-- 8. OpenCode CLI: endpoint and conversation on argv, password only on stdin.
+local oc_parsed = assert(cli.parse({ "adopt-opencode", "m1", "--endpoint",
+  "http://127.0.0.1:4096", "--conversation", "ses_abc", "--password-stdin" }))
+assert(oc_parsed.session == "m1" and oc_parsed.endpoint == "http://127.0.0.1:4096"
+  and oc_parsed.conversation == "ses_abc", "the documented argv parses")
+assert(cli.parse({ "adopt-opencode", "m1", "--endpoint", "http://127.0.0.1:4096",
+  "--conversation", "ses_abc" }) == nil, "the stdin marker is required")
+assert(cli.parse({ "adopt-opencode", "m1", "--endpoint", "http://127.0.0.1:4096",
+  "--conversation", "ses_abc", "--password-stdin", "--password", "x" }) == nil,
+  "a password flag is never accepted")
+assert(cli.parse({ "adopt-opencode", "m1", "--endpoint", "http://127.0.0.1:4096",
+  "--conversation", "ses_abc", "--password-stdin", "extra" }) == nil,
+  "extra words are refused")
+local function oc_report(result, error_message)
+  return cli.run({ "adopt-opencode", "m1", "--endpoint", "http://127.0.0.1:4096",
+    "--conversation", "ses_abc", "--password-stdin" },
+    { adopt_opencode = function(name, endpoint, conversation, password)
+        assert(password == "s3cret", "the password is passed once")
+        return result, error_message
+      end }, { password = "s3cret\n" })
+end
+local oc_text = oc_report({ generation = "65f870ac8f9d2" })
+assert(oc_text and oc_text:find("OpenCode session m1 is natively bound", 1, true),
+  "OpenCode success is explicit")
+assert(not oc_text:find("s3cret", 1, true), "the report never repeats the password")
+local oc_unavailable_text, oc_unavailable_error = oc_report(nil, "unavailable: auth")
+assert(oc_unavailable_text == nil and oc_unavailable_error:find("No binding was published", 1, true),
+  "OpenCode unavailable is reported without a retry")
+local no_stdin = cli.run({ "adopt-opencode", "m1", "--endpoint",
+  "http://127.0.0.1:4096", "--conversation", "ses_abc", "--password-stdin" },
+  { adopt_opencode = function() error("must not be called") end }, {})
+assert(no_stdin == nil, "a missing password is refused before the helper")
+
+print("ok - Codex and OpenCode adoption are fenced, opt-in and reported without endpoints")
