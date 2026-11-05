@@ -120,6 +120,11 @@ _, why = module.resolve(rows[1], options(listed, { rows = {
 } }))
 assert(why == "identity_unverified", "duplicate names are refused")
 _, why = module.resolve(rows[1], options(listed, { rows = {
+  { name = "lead", instance_id = "shared", alive = true },
+  { name = "worker", instance_id = "shared", alive = true },
+} }))
+assert(why == "identity_unverified", "duplicate opaque instances are refused")
+_, why = module.resolve(rows[1], options(listed, { rows = {
   { name = "lead", instance_id = "instance-1", alive = true },
   { name = "worker", instance_id = "instance-2", alive = "yes" },
 } }))
@@ -145,6 +150,10 @@ _, why = module.resolve(target, options(listed, { runner = function()
   return { code = 0, stdout = string.rep("x", 70000) }
 end }))
 assert(why == "identity_invalid", "oversized output is invalid")
+_, why = module.resolve(target, options(listed, { runner = function()
+  return { code = 0, stdout = codec.encode({ 1, 2 }) }
+end }))
+assert(why == "identity_invalid", "a scalar array is invalid, not a crash")
 
 -- 8. No cached authority: two resolutions both prove again.
 local proof_calls = 0

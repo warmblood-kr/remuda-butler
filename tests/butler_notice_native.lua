@@ -602,6 +602,45 @@ assert(pty_sends == 0, "Claude uncertainty never falls back to PTY")
 assert(remuda._butler_delivery_journal.state_of("lead-id", "n1") == "uncertain",
   "the Claude attempt is durably uncertain")
 
+-- 5w. An old Lua projection omits row.id; the dispatch proves the canonical
+-- id through the grounded lookup and still sends the stored session.
+reset()
+queue()
+rows[1].id = nil
+bus.agents.lead.native.kind = "opencode"
+bus.agents.lead.native.row_id = "core-id-lead"
+bus.agents.lead.native.session_token = "core-id-lead"
+remuda._butler_native_identity = { resolve = function(row, options)
+  assert(type(options.rows) == "table" and type(options.list) == "function",
+    "the proof gets the pre fleet and a post re-list")
+  return "core-id-lead"
+end }
+respond({ outcome = "accepted_queue" })
+assert(N.deliver_notice("lead") == true, "the old projection still dispatches")
+local old_projection = codec.decode(spawns[#spawns].stdin)
+assert(old_projection.session == "core-id-lead",
+  "Request1 session is the resolved canonical id")
+
+-- 5x. A native decision replaced during the lookup yield never authorizes the
+-- stale binding: no helper call and a retryable deferral.
+reset()
+queue()
+rows[1].id = nil
+bus.agents.lead.native.kind = "opencode"
+bus.agents.lead.native.row_id = "core-id-lead"
+bus.agents.lead.native.session_token = "core-id-lead"
+remuda._butler_native_identity = { resolve = function()
+  bus.agents.lead.native = { mode = "native", kind = "opencode",
+    path = "/fresh/manifest.json", nonce = string.rep("b", 32),
+    row_id = "fresh-id", instance = "instance-1" }
+  return "core-id-lead"
+end }
+respond({ outcome = "accepted_queue" })
+assert(N.deliver_notice("lead") == false, "a replaced decision is not dispatched")
+assert(#spawns == 0, "no helper call for the stale decision")
+assert(bus.agents.lead.native.row_id == "fresh-id", "the fresh decision is preserved")
+remuda._butler_native_identity = nil
+
 -- 6a. A native arrival is dispatched in the notify call itself: no quiet or
 -- cap timer, no PTY, and a pending first task or attached pane does not hold
 -- it back.

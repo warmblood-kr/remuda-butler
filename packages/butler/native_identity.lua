@@ -32,17 +32,21 @@ end
 local function same_listing(rows, listed)
   if type(rows) ~= "table" or type(listed) ~= "table" then return false end
   if #rows ~= #listed or #rows == 0 then return false end
-  local seen, names = {}, {}
+  local seen, names, instances = {}, {}, {}
   for _, row in ipairs(rows) do
+    if type(row) ~= "table" then return false end
     if type(row.instance_id) ~= "string" or row.instance_id == "" then return false end
     if type(row.alive) ~= "boolean" then return false end
     if type(row.name) ~= "string" or row.name == "" or names[row.name] then return false end
-    names[row.name] = true
+    if instances[row.instance_id] then return false end
+    names[row.name], instances[row.instance_id] = true, true
     local key = row_key(row)
     if seen[key] ~= nil then return false end
     seen[key] = row.alive
   end
   for _, row in ipairs(listed) do
+    if type(row) ~= "table" then return false end
+    if type(row.name) ~= "string" or type(row.instance_id) ~= "string" then return false end
     if type(row.alive) ~= "boolean" then return false end
     local key = row_key(row)
     if seen[key] == nil or seen[key] ~= row.alive then return false end
@@ -86,6 +90,9 @@ function M.resolve(row, options)
   end
   local decoded, listed = pcall(codec.decode, stdout)
   if not decoded or type(listed) ~= "table" then return nil, "identity_invalid" end
+  for _, entry in ipairs(listed) do
+    if type(entry) ~= "table" then return nil, "identity_invalid" end
+  end
   if not same_listing(rows, listed) then return nil, "identity_unverified" end
   -- The full live fleet must still be the same after the client yield, not
   -- just the target: a replaced/died/new sibling invalidates the proof.

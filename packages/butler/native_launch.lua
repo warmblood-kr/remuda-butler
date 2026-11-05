@@ -212,7 +212,7 @@ end
 -- Join the live row to the launch decision. Missing or mismatched identity
 -- never falls back to PTY: the session stays bound/disabled so a later notice
 -- can alert, and the binding still belongs to this exact instance.
-function M.join(plan, row, instance, resolve)
+function M.join(plan, row, instance, resolve, verify)
   if not plan or plan.mode ~= "native" then return { mode = "pty" } end
   if type(instance) ~= "string" or instance == "" then
     return { mode = "disabled", reason = "missing_instance_identity",
@@ -233,6 +233,12 @@ function M.join(plan, row, instance, resolve)
   if type(row_id) ~= "string" or row_id == "" then
     if type(resolve) == "function" and type(row.name) == "string" and row.name ~= "" then
       row_id = resolve(row)
+      -- The official lookup yields. A replaced agent, a fresh native decision
+      -- or a reloaded launcher must never accept this stale join.
+      if type(verify) == "function" and verify() ~= true then
+        return { mode = "stale", reason = "launch_replaced",
+          path = plan.binding, nonce = plan.nonce }
+      end
     end
   end
   if type(row_id) ~= "string" or row_id == "" then

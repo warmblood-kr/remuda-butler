@@ -37,8 +37,19 @@ decision and pre/post id fences remain authoritative.
 - `native_adopt.codex/opencode`: resolve once with the pre listing, fence the
   fresh `row.id`/instance before and after the helper, and require the stored
   id when the post projection has one.
-- Notice/roster are unchanged: they consume the stored `row_id`/`session_token`
-  and never look up per tick.
+- Notice dispatch: `native_row` compares the stored `row_id` when the
+  projection has one; on an old projection it runs the same fresh proof on
+  every dispatch (pre/post fleet), then fences the exact agent object, module
+  image and live native decision before authorizing. The 50ms liveness watcher
+  uses instance/alive only (`liveness_only`) and never spawns a lookup.
+- Roster is unchanged: it consumes the stored id.
+
+## Launch fence
+
+`join` may yield in the lookup. `finish` captures the agent object, launcher
+image and native decision, passes a verifier, and installs only the local
+`joined` value when all three are still unchanged; otherwise it records
+`mode=stale reason=launch_replaced` and never overwrites a fresh decision.
 
 ## Activation
 

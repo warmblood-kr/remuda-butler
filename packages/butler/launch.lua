@@ -320,12 +320,31 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
           json = remuda.json, remuda = "remuda" })
       end
     end
-    bus.agents[actual].native = remuda._butler_native_launch.join(
-      selected_native, live_row, instance_id, resolve)
-    if bus.agents[actual].native.mode ~= "native" then
-      _butler_session_trace("native_launch_join", actual .. " mode="
-        .. tostring(bus.agents[actual].native.mode) .. " reason="
-        .. tostring(bus.agents[actual].native.reason))
+    -- The resolver may yield in the official lookup. Fence the exact agent,
+    -- launcher image and native decision after it and never assign a stale
+    -- join over a fresh one.
+    local agent = bus.agents[actual]
+    local before_native = agent.native
+    local launcher = remuda._butler_native_launch
+    local stale = false
+    local function verify_join()
+      stale = bus.agents[actual] ~= agent
+        or remuda._butler_native_launch ~= launcher
+        or agent.native ~= before_native
+      return not stale
+    end
+    local joined = launcher.join(selected_native, live_row, instance_id, resolve, verify_join)
+    if stale or bus.agents[actual] ~= agent
+        or remuda._butler_native_launch ~= launcher
+        or agent.native ~= before_native then
+      _butler_session_trace("native_launch_join", actual .. " mode=stale reason=launch_replaced")
+    else
+      agent.native = joined
+      if agent.native.mode ~= "native" then
+        _butler_session_trace("native_launch_join", actual .. " mode="
+          .. tostring(agent.native.mode) .. " reason="
+          .. tostring(agent.native.reason))
+      end
     end
   end
   if parent and bus.agents[parent] then
