@@ -545,6 +545,35 @@ N.complete_notice_recovery("lead", { message_ids = {} })
 assert(bus.notice_native_watcher_checks.lead == nil,
   "a terminal outcome clears the sampling counter")
 
+-- 5u. A stopped generation never lends its sample counter to the next one:
+-- expiry, a binding/agent/module change or a published manifest leaves no
+-- count behind, so the next watcher still samples on its own first tick.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "park before the expiry stop")
+timer_callbacks[#timer_callbacks]()
+assert(bus.notice_native_watcher_checks.lead == 1, "the first tick samples and rearms")
+bus.agents.lead.native.awaiting_publication = false
+timer_callbacks[#timer_callbacks]()
+assert(bus.notice_native_watchers.lead == nil
+  and bus.notice_native_watcher_checks.lead == nil,
+  "an expired generation stops and clears its counter")
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "park the new generation")
+local before = ls_calls
+timer_callbacks[#timer_callbacks]()
+assert(ls_calls == before + 1, "the new generation samples on its first tick")
+remuda.fs = nil
+N.complete_notice_recovery("lead", { message_ids = {} })
+
 -- 5g. The startup window is bounded per protocol; an expired fresh launch is
 -- treated as dead rather than parked forever.
 reset()

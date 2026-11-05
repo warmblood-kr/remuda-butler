@@ -1719,15 +1719,14 @@ arm_native_watcher = function(session, native)
   local function tick()
     if bus.notice_native_watchers[session] ~= entry then return end
     bus.notice_native_watchers[session] = nil
-    if remuda._butler_notice ~= generation then
-      bus.notice_native_watcher_checks[session] = nil
-      return
-    end
+    -- Every tick ends the current generation. Keep the sample counter only
+    -- when the tick re-arms this exact launch, so a later generation starts
+    -- with its own first-tick liveness check.
+    local previous = bus.notice_native_watcher_checks[session]
+    bus.notice_native_watcher_checks[session] = nil
+    if remuda._butler_notice ~= generation then return end
     local agent = bus.agents[session]
-    if agent == nil or agent ~= agent_generation then
-      bus.notice_native_watcher_checks[session] = nil
-      return
-    end
+    if agent == nil or agent ~= agent_generation then return end
     local live = agent.native
     if type(live) ~= "table" or live.mode ~= "native" then return end
     if not same_native_binding(frozen_native_binding(live), frozen) then return end
@@ -1736,20 +1735,16 @@ arm_native_watcher = function(session, native)
     -- tick, then about once a second so a long Claude consent wait does not
     -- enumerate the roster every 50ms. A transient listing failure is not
     -- proof of death; let the helper's own preflight decide.
-    local checks = (bus.notice_native_watcher_checks[session] or 0) + 1
-    bus.notice_native_watcher_checks[session] = checks
+    local checks = (previous or 0) + 1
     if checks == 1 or checks % 20 == 0 then
       local row, row_why = native_row(session, live)
-      if not row and row_why ~= "session_unverified" then
-        bus.notice_native_watcher_checks[session] = nil
-        return
-      end
+      if not row and row_why ~= "session_unverified" then return end
     end
     if not native_manifest_present(live) then
+      bus.notice_native_watcher_checks[session] = checks
       arm_native_watcher(session, live)
       return
     end
-    bus.notice_native_watcher_checks[session] = nil
     native_publication(session)
   end
   local ok, handle = pcall(after, NATIVE_WATCH_S, tick)
