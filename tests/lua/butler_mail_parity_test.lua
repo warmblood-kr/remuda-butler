@@ -265,7 +265,11 @@ T.test("butler_initializes_mail_and_persists_a_sent_message", function()
   T.ok(sent, out)
   local id = out:match("%-%-ID%-%-\n([^\n]+)") or ""
   T.ok(#id == 26 and id:match("^[0123456789ABCDEFGHJKMNPQRSTVWXYZ]+$"), out)
-  T.ok(sent:find("notice deferred", 1, true) or sent:match(" and notified butler$"), sent)
+  -- Every shipped status is accurate: delivered, terminal delivery deferred, or
+  -- durable mail queued for the recipient's next eligible notice delivery.
+  T.ok(sent:match(" and notified butler$") ~= nil
+    or sent:find("terminal delivery deferred", 1, true) ~= nil
+    or sent:find("notice queued for its next eligible delivery", 1, true) ~= nil, sent)
   T.eq(out:match("%-%-COUNTS%-%-\n([^\n]+)"), "1|1|1")
   T.ok(out:match("%-%-OBJECT%-%-\nprivate body"), out)
   T.ok(out:find('"body":{"object_id":"object%-', 1, false), out)

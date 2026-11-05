@@ -129,15 +129,13 @@ local function report(kind, session, result, error_message)
   return nil, label .. " adoption was not applied: " .. error_message
 end
 
--- One attempt, one report. `unavailable`/`uncertain` never trigger an
+-- One attempt, one report for an already-parsed request. The daemon command
+-- uses the shared CLI parser and calls this; `run` keeps the standalone parse
+-- for direct callers and tests. `unavailable`/`uncertain` never trigger an
 -- automatic retry and never fall back to a PTY write.
-function M.run(args, adopt, options)
+function M.run_parsed(parsed, adopt, options)
   options = options or {}
-  local parsed, why = M.parse(args)
-  if not parsed then
-    if why == "help" then return USAGE end
-    return nil, why == "usage" and USAGE or (why .. "\n" .. USAGE)
-  end
+  if not parsed then return nil, USAGE end
   if not adopt then return nil, "native adoption is unavailable on this build" end
   if parsed.verb == "adopt-codex" then
     if type(adopt.adopt_codex) ~= "function" then
@@ -160,6 +158,16 @@ function M.run(args, adopt, options)
     parsed.endpoint, parsed.conversation, password)
   if not ok then return nil, "adoption call failed: " .. safe_reason(result) end
   return report("OpenCode", parsed.session, result, error_message)
+end
+
+function M.run(args, adopt, options)
+  options = options or {}
+  local parsed, why = M.parse(args)
+  if not parsed then
+    if why == "help" then return USAGE end
+    return nil, why == "usage" and USAGE or (why .. "\n" .. USAGE)
+  end
+  return M.run_parsed(parsed, adopt, options)
 end
 
 M.USAGE = USAGE
