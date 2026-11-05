@@ -1706,6 +1706,7 @@ arm_native_watcher = function(session, native)
   local frozen = frozen_native_binding(native)
   local generation = NOTICE_MODULE
   local agent_generation = bus.agents[session]
+  local checks = 0
   local entry = {}
   local function tick()
     if bus.notice_native_watchers[session] ~= entry then return end
@@ -1717,10 +1718,15 @@ arm_native_watcher = function(session, native)
     if type(live) ~= "table" or live.mode ~= "native" then return end
     if not same_native_binding(frozen_native_binding(live), frozen) then return end
     if not missing_manifest_is_startup(live) then return end
-    -- Stop on a confirmed dead/replaced live row. A transient listing failure
-    -- is not proof of death; let the helper's own preflight decide.
-    local row, row_why = native_row(session, live)
-    if not row and row_why ~= "session_unverified" then return end
+    -- Stop on a confirmed dead/replaced live row. Check once on the first
+    -- tick, then about once a second so a long Claude consent wait does not
+    -- enumerate the roster every 50ms. A transient listing failure is not
+    -- proof of death; let the helper's own preflight decide.
+    checks = checks + 1
+    if checks == 1 or checks % 20 == 0 then
+      local row, row_why = native_row(session, live)
+      if not row and row_why ~= "session_unverified" then return end
+    end
     if not native_manifest_present(live) then
       arm_native_watcher(session, live)
       return
