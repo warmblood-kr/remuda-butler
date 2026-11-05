@@ -1443,9 +1443,12 @@ local function native_notice_send(session, native, text, ids, still_current, req
     runner = remuda.process and remuda.process.run, remuda = "remuda",
     kind = native.kind })
   local sent, why = native_outcome(result, native)
-  if not tostring(why):find("native_pending", 1, true) then
-    clear_publication_wait(session, native)
-  end
+  -- Clear the fresh-launch marker only on a proven typed answer (accepted or a
+  -- real dead/not-written refusal). An uncertain runner/spawn failure says
+  -- nothing about publication, and a pending answer keeps waiting.
+  local typed = sent or tostring(why):find("^native_dead:", 1) ~= nil
+    or tostring(why):find("^native_not_written:", 1) ~= nil
+  if typed then clear_publication_wait(session, native) end
   return sent, why
 end
 -- The dialogs module's narrow automatic-wakeup capability is the only path
