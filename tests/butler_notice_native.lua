@@ -559,11 +559,11 @@ respond({ outcome = "definitely_not_written", reason = "binding_missing" })
 assert(N.deliver_notice("lead") == false, "park before the expiry stop")
 timer_callbacks[#timer_callbacks]()
 assert(bus.notice_native_watcher_checks.lead == 1, "the first tick samples and rearms")
-bus.agents.lead.native.awaiting_publication = false
+bus.agents.lead.native.awaiting_since = now - 121
 timer_callbacks[#timer_callbacks]()
 assert(bus.notice_native_watchers.lead == nil
   and bus.notice_native_watcher_checks.lead == nil,
-  "an expired generation stops and clears its counter")
+  "a genuinely expired window stops and clears its counter")
 bus.agents.lead.native.awaiting_publication = true
 bus.agents.lead.native.awaiting_since = now
 respond({ outcome = "definitely_not_written", reason = "binding_missing" })
