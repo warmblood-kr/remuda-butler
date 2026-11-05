@@ -42,7 +42,7 @@ local mail = {
   find_message = function(id) return { id = id, from = { alias = "alice", id = "alice-id" } } end,
 }
 local alerts, spawns, pty_sends, timers = {}, {}, 0, {}
-local random_calls = 0
+local timer_callbacks, random_calls = {}, 0
 local rows = { { name = "lead", alive = true, attached = false, id = "ses_abc",
   instance_id = "instance-1" } }
 remuda = {
@@ -58,8 +58,9 @@ remuda = {
     random_calls = random_calls + 1
     return string.char(random_calls % 256) .. string.rep("\0", n - 1)
   end,
-  _butler_notice_after = function(seconds)
+  _butler_notice_after = function(seconds, fn)
     timers[#timers + 1] = seconds
+    timer_callbacks[#timer_callbacks + 1] = fn
     return { cancel = function() end }
   end,
   _butler_session_trace = _butler_session_trace,
@@ -95,7 +96,8 @@ local function reset()
   end
   unread = { n1 = true, n2 = true }
   alerts, spawns, pty_sends, timers = {}, {}, 0, {}
-  random_calls = 0
+  timer_callbacks, random_calls = {}, 0
+  bus.notice_native_watchers = {}
   on_ls, on_retire = nil, nil
   local files = remuda._butler_notice_test_journal.files
   for key in pairs(files) do files[key] = nil end
@@ -324,13 +326,14 @@ queue()
 bus.agents.lead.native.kind = "codex"
 bus.agents.lead.native.awaiting_publication = true
 bus.agents.lead.native.awaiting_since = now
-remuda.fs = { is_symlink = function() return false end, realpath = function() return nil end }
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
 respond({ outcome = "accepted_queue" })
 now = now + 1
 remuda._butler_deliver_notices()
 assert(#spawns == 0 and bus.notices.lead ~= nil,
   "a missing manifest is metadata-checked without spawning the helper")
-remuda.fs.realpath = function() return "/private/binding/manifest.json" end
+remuda.fs.realpath = function() return "/private/binding/manifest.json", nil end
 remuda._butler_deliver_notices()
 assert(#spawns == 1 and bus.notices.lead == nil,
   "the first tick after publication flushes the queued mail")
@@ -344,7 +347,8 @@ queue()
 bus.agents.lead.native.kind = "codex"
 bus.agents.lead.native.awaiting_publication = true
 bus.agents.lead.native.awaiting_since = now - 121
-remuda.fs = { is_symlink = function() return false end, realpath = function() return nil end }
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
 respond({ outcome = "definitely_not_written", reason = "binding_missing" })
 remuda._butler_deliver_notices()
 assert(#spawns == 1, "an expired window still attempts the helper once")
@@ -362,7 +366,7 @@ bus.agents.lead.native.awaiting_publication = true
 bus.agents.lead.native.awaiting_since = now
 remuda._butler_paths = { file_exists = function() error("must not open the manifest") end }
 remuda.fs = {
-  is_symlink = function() return true end,
+  is_symlink = function() return true, nil end,
   realpath = function() error("the precheck must not resolve a link") end,
 }
 respond({ outcome = "definitely_not_written", reason = "invalid_binding" })
@@ -379,7 +383,8 @@ queue()
 bus.agents.lead.native.kind = "codex"
 bus.agents.lead.native.awaiting_publication = true
 bus.agents.lead.native.awaiting_since = now
-remuda.fs = { realpath = function() error("metadata denied") end }
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "permission_denied" end }
 respond({ outcome = "definitely_not_written", reason = "invalid_binding" })
 now = now + 1
 remuda._butler_deliver_notices()
@@ -392,8 +397,8 @@ bus.agents.lead.native.kind = "codex"
 bus.agents.lead.native.awaiting_publication = true
 bus.agents.lead.native.awaiting_since = now
 remuda.fs = {
-  is_symlink = function() error("link check denied") end,
-  realpath = function() return nil end,
+  is_symlink = function() return nil, "permission_denied" end,
+  realpath = function() return nil, "not_found" end,
 }
 respond({ outcome = "definitely_not_written", reason = "invalid_binding" })
 now = now + 1
@@ -408,12 +413,51 @@ bus.agents.lead.native.kind = "claude"
 bus.agents.lead.native.session_token = "lead"
 bus.agents.lead.native.awaiting_publication = true
 bus.agents.lead.native.awaiting_since = now - 1801
-remuda.fs = { is_symlink = function() return false end, realpath = function() return nil end }
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
 respond({ outcome = "definitely_not_written", reason = "binding_missing" })
 remuda._butler_deliver_notices()
 assert(#spawns == 1 and bus.agents.lead.native.mode == "disabled",
   "the Claude startup window also expires into the dead path")
 assert(bus.notices.lead ~= nil and pty_sends == 0, "Claude mail stays unread, never PTY")
+remuda.fs = nil
+
+-- 5p. The lead-approved 50ms presence watcher: armed only after a typed
+-- binding_missing on a known initializing launch; fires once the private
+-- manifest appears and flushes the queued mail.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "binding_missing parks the attempt")
+assert(timers[#timers] == 0.05 and #timer_callbacks >= 1,
+  "a 50ms presence watcher is armed")
+remuda.fs.realpath = function() return "/private/binding/manifest.json", nil end
+respond({ outcome = "accepted_queue" })
+timer_callbacks[#timer_callbacks]()
+assert(#spawns == 2 and bus.notices.lead == nil,
+  "the watcher flushes the queued mail when the manifest appears")
+assert(bus.notice_native_watchers.lead == nil, "the watcher clears after the flush")
+remuda.fs = nil
+
+-- 5q. A replaced binding is fenced: the old watcher never flushes a new one.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "binding_missing parks the attempt")
+bus.agents.lead.native.nonce = string.rep("b", 32)
+respond({ outcome = "accepted_queue" })
+timer_callbacks[#timer_callbacks]()
+assert(#spawns == 1, "a replaced binding is not flushed by the old watcher")
 remuda.fs = nil
 
 -- 5g. The startup window is bounded per protocol; an expired fresh launch is

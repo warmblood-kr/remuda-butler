@@ -63,6 +63,29 @@ local function capability(self)
   return ok, why
 end
 
+-- The Codex launcher flag is additive. An older `_codex_tui` must keep the
+-- exact old argv/behavior, so only a completed help probe reaches native.
+local function codex_capability(self)
+  local cached = self.codex_capability_cache
+  if cached then return cached.ok, cached.reason end
+  local runner = self.runner
+  if type(runner) ~= "function" then
+    self.codex_capability_cache = { ok = false, reason = "capability_runner_unavailable" }
+    return false, "capability_runner_unavailable"
+  end
+  local ok, result = pcall(runner, { argv = { self.remuda, "_codex_tui", "--help" },
+    timeout = 5 })
+  if not ok or type(result) ~= "table" or result.timed_out then
+    self.codex_capability_cache = { ok = false, reason = "capability_failed" }
+    return false, "capability_failed"
+  end
+  local output = tostring(result.stdout or "") .. "\n" .. tostring(result.stderr or "")
+  local supported = output:find("--binding", 1, true) ~= nil
+  local reason = supported and "capability_ok" or "capability_unsupported"
+  self.codex_capability_cache = { ok = supported, reason = reason }
+  return supported, reason
+end
+
 function M.new(options)
   options = options or {}
   local self = {
@@ -76,6 +99,7 @@ function M.new(options)
   self.read_config = function(path) return self.read(path) end
   self.enabled = function() return enabled(self) end
   self.capability = function() return capability(self) end
+  self.codex_capability = function() return codex_capability(self) end
   self.prepare = function(name, kind) return M.prepare(self, name, kind) end
   self.plan = function(name, kind) return M.plan(self, name, kind) end
   self.env = function(plan) return M.env(plan) end
@@ -157,14 +181,17 @@ end
 -- MCP entry itself, gated only by the explicit development opt-in.
 function M.plan(self, name, kind)
   kind = kind or "opencode"
-  if kind ~= "opencode" and kind ~= "claude" then
-    return { mode = "pty", reason = kind == "codex" and "owner_adopt_only" or "kind_not_native" }
+  if kind ~= "opencode" and kind ~= "claude" and kind ~= "codex" then
+    return { mode = "pty", reason = "kind_not_native" }
   end
   local config = self.enabled()
   local state = kind_state(self, config, kind)
   if state.enabled ~= true then return { mode = "pty", reason = state.reason } end
   if kind == "opencode" then
     local capable, capability_reason = self.capability()
+    if not capable then return { mode = "pty", reason = capability_reason } end
+  elseif kind == "codex" then
+    local capable, capability_reason = self.codex_capability()
     if not capable then return { mode = "pty", reason = capability_reason } end
   end
   local binding, nonce, why = self.prepare(name, kind)
@@ -174,8 +201,9 @@ function M.plan(self, name, kind)
     binding_dir = directory, nonce = nonce, created_at = os.time() }
 end
 
--- OpenCode's wrapper reads only the nonce. The Claude channel gets its own
--- directory and session token in the second MCP entry, not the member env.
+-- OpenCode and Codex launchers read only the nonce. Codex uses the actual
+-- core-assigned REMUDA_SESSION_ID, not an alias. The Claude channel gets its
+-- directory and alias session in its own MCP entry.
 function M.env(plan)
   if not plan or plan.mode ~= "native" or plan.kind == "claude" then return {} end
   return { REMUDA_BUTLER_BINDING_NONCE = plan.nonce }

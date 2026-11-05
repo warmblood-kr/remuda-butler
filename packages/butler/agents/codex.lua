@@ -42,6 +42,12 @@ end
 builders.codex = function(spec)
   local argv = { "remuda", "_codex_tui", "--status", spec.telemetry.status_path }
   if spec.model and spec.model ~= "" then argv[#argv + 1] = "--model"; argv[#argv + 1] = spec.model end
+  -- Additive native flag: the core launcher binds and publishes after its
+  -- owning-request capture. Old/off launches keep the exact previous argv.
+  if type(spec.native) == "table" and spec.native.mode == "native"
+      and spec.native.kind == "codex" and type(spec.native.binding) == "string" then
+    argv[#argv + 1] = "--binding"; argv[#argv + 1] = spec.native.binding
+  end
   local profile = { sandbox = spec.sandbox, writable = spec.writable }
   local wants_profile = profile.sandbox ~= nil or (profile.writable and #profile.writable > 0)
   if not spec.token and not wants_profile then return argv end

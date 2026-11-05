@@ -64,6 +64,8 @@ bus.notice_journal_alerts = bus.notice_journal_alerts or {}
 bus.notice_journal_failure_alerts = bus.notice_journal_failure_alerts or {}
 bus.notice_native_alerts = bus.notice_native_alerts or {}
 bus.notice_native_dispatching = bus.notice_native_dispatching or {}
+bus.notice_native_watchers = bus.notice_native_watchers or {}
+local arm_native_watcher, cancel_native_watcher
 -- Durable-for-this-image uncertainty tombstones: recipient identity id ->
 -- message id. They outlive the report/stuck record and are never cleared by
 -- reads or reminders, so a compaction re-show or a preserved-bus reload cannot
@@ -790,6 +792,7 @@ end
 -- 20s/60s/300s/900s schedule, then one failure alert with the exact action.
 notice_recovery_error = function(session, state, reason)
   state = type(state) == "table" and state or {}
+  cancel_native_watcher(session)
   state.failed = true
   diagnostic("error", "delivery_failed", session)
   _butler_session_trace("notice_recovery_failed", "message_ids="
@@ -881,6 +884,7 @@ end
 -- the same bounded busy cap still opens the hourly stuck record.
 local function defer_notice_send(session, pending, kind, why)
   bus.notice_recoveries[session] = nil
+  if kind ~= "native_pending" then cancel_native_watcher(session) end
   if pending then
     pending.due_at = notice_now() + 1
     pending.busy_since = pending.busy_since or notice_now()
@@ -929,6 +933,11 @@ local function defer_notice_send(session, pending, kind, why)
     end
     trace_notice_defer(session, pending, kind)
   end
+  if kind == "native_pending" then
+    local agent = bus.agents[session]
+    local native = agent and agent.native
+    arm_native_watcher(session, native)
+  end
   return false, kind
 end
 -- The core accepted the write (submitted or unverified). This is transport
@@ -936,6 +945,7 @@ end
 -- the reminder/stuck machinery keeps running for it.
 complete_notice_recovery = function(session, state)
   state = type(state) == "table" and state or {}
+  cancel_native_watcher(session)
   diagnostic("submitted", "transport_accepted", session)
   _butler_session_trace("notice_transport_accepted", "message_ids="
     .. table.concat(state.message_ids or {}, ",") .. " session=" .. session)
@@ -1103,6 +1113,9 @@ local NATIVE_REQUEST_BYTES = 16
 -- manifest on an adopted/reloaded binding is dead, not indefinite startup.
 local NATIVE_STARTUP_WINDOW_S = 120
 local CLAUDE_STARTUP_WINDOW_S = 30 * 60
+-- The lead-approved bounded presence watcher: only after a typed
+-- binding_missing on a known initializing launch, and never as a typing gate.
+local NATIVE_WATCH_S = 0.05
 -- A per-dispatch claim from the existing OS CSPRNG seam. The ID is frozen with
 -- the attempt before the reservation and the first yield, so two notices in the
 -- same second (for example an intentional re-show) never share a claim. It is
@@ -1332,12 +1345,17 @@ end
 local function native_manifest_present(native)
   local fs = remuda.fs
   if type(fs) ~= "table" or type(fs.realpath) ~= "function" then return true end
+  -- Core metadata returns (value, reason) on error, it does not throw. Only
+  -- the exact not_found classification is definite absence; a link, a
+  -- permission/I/O/non-UTF8 reason or an unknown tuple goes to the helper.
   if type(fs.is_symlink) == "function" then
-    local checked, is_link = pcall(fs.is_symlink, native.path)
-    if not checked or is_link == true then return true end
+    local ok, is_link, link_reason = pcall(fs.is_symlink, native.path)
+    if not ok or is_link == true then return true end
+    if is_link == nil and link_reason ~= "not_found" then return true end
   end
-  local ok, resolved = pcall(fs.realpath, native.path)
-  return not ok or resolved ~= nil
+  local ok, resolved, reason = pcall(fs.realpath, native.path)
+  if not ok or resolved ~= nil then return true end
+  return reason ~= "not_found"
 end
 
 local function native_row(session, native)
@@ -1608,6 +1626,7 @@ local function deliver_due_notice(session, now)
   local pending = bus.notices[session]
   if not bus.agents[session] then
     cancel_notice_timers(session)
+    cancel_native_watcher(session)
     bus.notices[session] = nil
   elseif native_immediate(session) then
     -- No quiet window or task gate for a native queue. A proven pre-write
@@ -1662,6 +1681,48 @@ end
 local function native_publication(alias)
   if not native_immediate(alias) then return false end
   return deliver_native_now(alias)
+end
+
+cancel_native_watcher = function(session)
+  local entry = bus.notice_native_watchers[session]
+  bus.notice_native_watchers[session] = nil
+  if entry and entry.handle and type(entry.handle.cancel) == "function" then
+    pcall(entry.handle.cancel, entry.handle)
+  end
+end
+
+-- Arm only for a known initializing launch whose private manifest is
+-- definitely absent. The tick is a presence detector, never a typing gate.
+-- It fences the exact binding and the bounded window, and stops on any
+-- replacement, death, expiry or terminal outcome.
+arm_native_watcher = function(session, native)
+  if type(native) ~= "table" or native.mode ~= "native"
+      or native.awaiting_publication ~= true then return end
+  if not missing_manifest_is_startup(native) then return end
+  if bus.notice_native_watchers[session] then return end
+  if native_manifest_present(native) then return end
+  local after = remuda._butler_notice_after or remuda.after
+  if type(after) ~= "function" then return end
+  local frozen = frozen_native_binding(native)
+  local entry = {}
+  local function tick()
+    if bus.notice_native_watchers[session] ~= entry then return end
+    bus.notice_native_watchers[session] = nil
+    local agent = bus.agents[session]
+    local live = agent and agent.native
+    if type(live) ~= "table" or live.mode ~= "native" then return end
+    if not same_native_binding(frozen_native_binding(live), frozen) then return end
+    if not missing_manifest_is_startup(live) then return end
+    if not native_manifest_present(live) then
+      arm_native_watcher(session, live)
+      return
+    end
+    native_publication(session)
+  end
+  local ok, handle = pcall(after, NATIVE_WATCH_S, tick)
+  if not ok then return end
+  entry.handle = handle
+  bus.notice_native_watchers[session] = entry
 end
 
 local function arm_notice_timer(session, slot, seconds)

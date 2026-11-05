@@ -193,7 +193,8 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       local telemetry = telemetry_by_kind[candidate_kind]
         or setup_telemetry(candidate_kind, { name = name, model = models[candidate_kind], memory_dir = memory_dir })
       telemetry_by_kind[candidate_kind] = telemetry
-      if (candidate_kind == "opencode" or candidate_kind == "claude")
+      if (candidate_kind == "opencode" or candidate_kind == "claude"
+          or candidate_kind == "codex")
           and not native_plans[candidate_kind] and remuda._butler_native_launch then
         local decided, plan = pcall(remuda._butler_native_launch.plan, name, candidate_kind)
         native_plans[candidate_kind] = decided and plan
@@ -223,10 +224,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if candidate_kind == "opencode" then
         values.OPENCODE_CONFIG_CONTENT = remuda._butler_agent_support.opencode_config_content(
           spec and spec.token, spec and spec.model)
-        if spec and spec.native and remuda.butler and remuda.butler.native_launch then
-          local extra = remuda.butler.native_launch.env(spec.native)
-          for key, value in pairs(extra) do values[key] = value end
-        end
+      end
+      if spec and spec.native and remuda.butler and remuda.butler.native_launch then
+        local extra = remuda.butler.native_launch.env(spec.native)
+        for key, value in pairs(extra) do values[key] = value end
       end
       return values
     end,
@@ -303,7 +304,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     instance_id = instance_id, instance_binding = instance_id and 1 or nil }
   local selected_native = native_plans[kind]
   if selected_native and selected_native.mode == "native"
-      and (kind == "opencode" or kind == "claude") then
+      and (kind == "opencode" or kind == "claude" or kind == "codex") then
     local live_row
     for _, row in ipairs(remuda.ls()) do
       if row.name == actual then live_row = row end

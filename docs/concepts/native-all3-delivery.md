@@ -36,8 +36,10 @@ the opaque instance before and after the helper yield, and persists only
 path, nonce, session, kind and generation. `adopted` remains provisional until
 the post-yield row check; `unavailable`/`uncertain` attach no binding.
 
-Codex new launch is `owner_adopt_only`; the core tunnel owns any future launch
-binding. Never kill an adopted server or the shared per-uid daemon dir.
+Codex new launch is gated by `codex.enabled` plus the additive
+`_codex_tui --binding` help capability; old/off argv is unchanged and the
+launcher publishes after its owning-request capture. Explicit owner adoption
+remains. Never kill an adopted server or the shared per-uid daemon dir.
 
 ## Claude channel
 
@@ -85,20 +87,16 @@ wrong parent/owner or malformed manifest is dead and disables: absence and
 corruption are not interchangeable. The first non-`binding_missing` answer
 ends the window. A missing manifest on an adopted or reloaded binding is dead.
 
-The explicit entrypoint is `remuda._butler_notice.native_publication(alias)`;
-launch completion and successful adoption call it to flush queued unreserved
-mail. No core publication callback exists, so a publication after launch and
-outside a Butler-visible step uses a bounded tick (~1s) that checks the
-manifest with core metadata (no open; the helper is authority) before
-spawning: an honest limit, not an event claim.
-
-## Status
-
-`remuda butler sessions` gains a read-only `NATIVE` section; no path, nonce,
-socket or token.
+Launch completion and successful adoption call
+`remuda._butler_notice.native_publication(alias)`. After a typed
+`binding_missing` on a known initializing launch, a <=50ms presence watcher
+(core metadata; only exact `not_found` is absent) flushes queued mail; the
+first attempt is always immediate. No core push event exists, so a later
+publication outside a Butler-visible step is detection latency, not an event
+guarantee.
 
 ## Limits
 
 Codex adoption uses 0.166 helpers; live-row coverage is QA's. Claude helpers
-are not in the pinned binary yet; the builder entry is config-tested. Launch
-smoke is QA's. No merge, install, reload or rollout.
+are not in the pinned binary yet. Launch smoke is QA's. No merge, install,
+reload or rollout.

@@ -4,7 +4,7 @@
 remuda = {}
 local module = dofile("packages/butler/native_launch.lua")
 
-local function fake(config, capability, random_ok)
+local function fake(config, capability, random_ok, codex_help)
   local made = {}
   local calls = { probe = 0 }
   local config_module = {
@@ -31,7 +31,7 @@ local function fake(config, capability, random_ok)
   end }
   local instance = module.new({ paths = paths, config = config_module, fs = fs,
     json = {}, read = function() return nil, "missing" end,
-    runner = function() return { code = 0, stdout = "{}" } end,
+    runner = function() return { code = 0, stdout = codex_help or "{}", stderr = "" } end,
     random = function(n)
       if random_ok == false then error("no entropy") end
       return string.rep("\1", n)
@@ -48,13 +48,27 @@ local no_cap, no_cap_made = fake({ enabled = true, reason = "enabled" }, false)
 assert(no_cap.plan("lead").mode == "pty", "missing capability is PTY")
 assert(#no_cap_made == 0, "no binding is created without a capability")
 
--- 1b. Codex is owner-adoption only; Claude needs its own opt-in and never
--- probes the OpenCode wrapper.
-local codex, codex_made = fake({ enabled = true, reason = "enabled" }, true)
+-- 1b. Codex new launch needs its own opt-in and the additive --binding
+-- capability; Claude needs its own opt-in and never probes the wrapper.
+local codex, codex_made = fake({ enabled = true, reason = "enabled",
+  kinds = { codex = { enabled = true, reason = "enabled" } } }, true)
 local codex_plan = codex.plan("lead", "codex")
-assert(codex_plan.mode == "pty" and codex_plan.reason == "owner_adopt_only",
-  "a Codex new launch stays PTY for owner adoption")
-assert(#codex_made == 0, "a Codex new launch creates no binding")
+assert(codex_plan.mode == "pty" and codex_plan.reason == "capability_unsupported",
+  "an older Codex launcher stays PTY")
+assert(#codex_made == 0, "an incapable Codex launch creates no binding")
+local codex_on, codex_on_made = fake({ enabled = true, reason = "enabled",
+  kinds = { codex = { enabled = true, reason = "enabled" } } }, true, nil,
+  "--binding FILE")
+local codex_native_plan = codex_on.plan("lead", "codex")
+assert(codex_native_plan.mode == "native" and codex_native_plan.kind == "codex"
+  and codex_native_plan.binding:find("/manifest.json", 1, true) ~= nil,
+  "the capable Codex launcher selects its manifest binding")
+assert(codex_on.env(codex_native_plan).REMUDA_BUTLER_BINDING_NONCE
+  == codex_native_plan.nonce, "Codex gets only the nonce")
+local codex_native = module.join(codex_native_plan,
+  { id = "ses_codex", instance_id = "instance-3" }, "instance-3")
+assert(codex_native.mode == "native" and codex_native.session_token == "ses_codex",
+  "Codex uses the actual core row id, not an alias")
 local claude_off, claude_off_made = fake({ enabled = true, reason = "enabled",
   kinds = { claude = { enabled = false, reason = "disabled" } } }, true)
 local claude_off_plan = claude_off.plan("lead", "claude")
@@ -150,6 +164,27 @@ local agent = { native = native }
 module.disable(agent, "server_gone")
 assert(agent.native.mode == "disabled" and agent.native.reason == "server_gone"
   and agent.native.path == plan.binding, "disable keeps the binding but stops delivery")
+
+-- 5b. The native Codex builder adds only --binding; off/old keeps the exact
+-- previous argv.
+remuda._butler_agent_builders, remuda._butler_telemetry_adapters = {}, {}
+remuda._butler_agent_startup = remuda._butler_agent_startup or {}
+dofile("packages/butler/agents/codex.lua")
+local cargv = remuda._butler_agent_builders.codex({ name = "codexlead",
+  telemetry = { status_path = "/tmp/codex-status" }, native = codex_native_plan })
+assert(cargv[1] == "remuda" and cargv[2] == "_codex_tui" and cargv[3] == "--status"
+  and cargv[4] == "/tmp/codex-status", "the exact old Codex prefix is preserved")
+local bound = false
+for index = 1, #cargv do
+  if cargv[index] == "--binding" and cargv[index + 1] == codex_native_plan.binding then
+    bound = true
+  end
+end
+assert(bound and #cargv == 6, "a native Codex launch adds exactly --binding FILE")
+local coff = remuda._butler_agent_builders.codex({ name = "codexlead",
+  telemetry = { status_path = "/tmp/codex-status" } })
+assert(#coff == 4 and not table.concat(coff, " "):find("--binding", 1, true),
+  "an off/old Codex launch keeps the old argv")
 
 -- 6. The wrapper argv for a bound launch; PTY keeps the old command.
 remuda._butler_agent_builders, remuda._butler_agent_startup = {}, {}
