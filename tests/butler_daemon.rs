@@ -4752,10 +4752,10 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           -- Members' fixture Welcome mail is not under test here; keep its
           -- unread notice out of the per-session logs.
           local notify = remuda._butler_notify
-          remuda._butler_notify = function(alias, notice, id)
+          remuda._butler_notify = function(alias, notice, id, ...)
             local m = id and remuda._butler_mail.find_message(id)
             if m and m.subject == "Welcome to Butler" then return true end
-            return notify(alias, notice, id)
+            return notify(alias, notice, id, ...)
           end
           local policy = remuda._butler_notify_policy
           remuda._butler_notify_policy = function(n, now)
@@ -4977,7 +4977,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('t-codex-gui-close was not delivered', 1, true) then found=true end end; return tostring(found)"), "true", "aborted update silently lost its task");
     eval(&path, r#"remuda.capture_styled=function() return {rows={[2]={{text="",dim=false}},[3]={{text="",dim=false}}},cursor={row=3}} end"#);
     eval(&path, r#"remuda._butler_notice_clock = function() return 0 end
-        remuda._butler_notify("t-codex-timeout", "Butler message 01M3MX8NCGV5GVSGN104YP4TFT arrived. Read them: remuda butler inbox")
+        remuda._butler_notify("t-codex-timeout", "Butler message 01M3MX8NCGV5GVSGN104YP4TFT arrived. Read them: remuda butler inbox", "01M3MX8NCGV5GVSGN104YP4TFT", true)
         remuda._butler_notice_clock = function() return 2 end
         remuda._butler_deliver_notices()"#);
     let modal_notice_log = eval(&path, "return table.concat(remuda._t, '\\n')");
