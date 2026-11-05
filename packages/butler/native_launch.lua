@@ -229,10 +229,10 @@ function M.join(plan, row, instance)
   end
   return { mode = "native", kind = plan.kind or "opencode", path = plan.binding,
     nonce = plan.nonce, row_id = row.id, instance = instance,
-    -- Claude's channel writes its manifest before the core row id exists, so
-    -- its non-secret session token is the stable alias. Other protocols use
-    -- the live row id.
-    session_token = plan.kind == "claude" and plan.name or row.id,
+    -- Request1 session is the actual core row id for every protocol,
+    -- including Claude. The alias is a human label only; the child inherits
+    -- the core-assigned REMUDA_SESSION_ID at spawn.
+    session_token = row.id,
     -- A launch we just created may race manifest/MCP publication. Only this
     -- fresh binding may park on `binding_missing`; an adopted/reloaded binding
     -- treats a missing manifest as dead.

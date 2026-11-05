@@ -565,10 +565,12 @@ end
 local function channel_mcp_entry(native)
   if type(native) ~= "table" or native.mode ~= "native"
       or native.kind ~= "claude" or type(native.binding_dir) ~= "string" then return "" end
+  -- No session env here: the MCP child inherits the core-assigned
+  -- REMUDA_SESSION_ID (the actual row id) from the spawn. Pre-filling the
+  -- alias would make two matching aliases hide canonical drift.
   return ',"remuda-channel":{"command":"remuda","args":["_claude_channel"]'
     .. ',"env":{"REMUDA_CLAUDE_BINDING_DIR":' .. json_quote(native.binding_dir)
-    .. ',"REMUDA_BUTLER_BINDING_NONCE":' .. json_quote(native.nonce)
-    .. ',"REMUDA_BUTLER_SESSION":' .. json_quote(native.name) .. '}}'
+    .. ',"REMUDA_BUTLER_BINDING_NONCE":' .. json_quote(native.nonce) .. '}}'
 end
 local function agent_mcp_json(token, native)
   local env = '"REMUDA_SESSION_CAPABILITY":' .. json_quote(token)

@@ -2,11 +2,11 @@
 
 2026-11-05. `feat/all3-native-companion` adds Codex owner adoption and an
 opted-in Claude channel to the OpenCode-only companion. Default off per kind;
-no PTY downgrade for a bound session.
+Request1 session is the live `row.id` for every kind.
 
 ## Fixed helper map
 
-Closed internal kind→verb map; no caller text becomes a command.
+Closed kind→verb map; no caller text becomes a command.
 
 | kind | notice | adopt/channel |
 | --- | --- | --- |
@@ -29,7 +29,7 @@ non-booleans never enable; a missing section is `config_missing_section`.
 
 Owner copies socket and canonical lowercase UUID from a fresh `/status`:
 `remuda butler native adopt-codex ALIAS --socket PATH --thread UUID`.
-Only `unix://` is normalized to an absolute local path; remote schemes,
+Only `unix://` is normalized to an absolute path; remote schemes,
 queries, fragments and control bytes are refused. Butler prepares the 0700
 binding dir/nonce, freezes the six-field adopt request, fences `row.id` and the
 opaque instance before/after the helper yield, and persists only path, nonce,
@@ -47,12 +47,13 @@ Never kill an adopted server or the shared per-uid daemon dir.
 ## Claude channel
 
 Explicit `claude.enabled` adds a second `remuda-channel` MCP entry
-(`args:["_claude_channel"]`, env binding dir, nonce, alias session) to the
-private 0600 config plus
-`--dangerously-load-development-channels server:remuda-channel`. Consent stays
-human; the ordinary entry/argv are unchanged and unopted Claude stays
-PTY/unavailable. The channel publishes `<dir>/channel.json` (`claude-channel-v1`) only after
-`mcp_initialized`; an ACK is never `accepted_queue`, and possible emission is
+(`args:["_claude_channel"]`; env carries only binding dir + nonce, session
+inherited as core `REMUDA_SESSION_ID`) plus
+`--dangerously-load-development-channels server:remuda-channel` to the private
+0600 config. Consent stays human; the ordinary entry/argv are unchanged and
+unopted Claude stays PTY/unavailable. The channel publishes
+`<dir>/channel.json` (`claude-channel-v1`) only after `mcp_initialized`; an ACK
+is never `accepted_queue`, and possible emission is
 `uncertain(channel_emitted_unconfirmed)`.
 
 ## Immediate native timing
@@ -67,19 +68,18 @@ backoff; unknown never retries.
 ## Per-dispatch claim
 
 `request_id` is `msg_` + 16 CSPRNG bytes from `remuda.random_bytes`, generated
-in the attempt snapshot before the first yield and journal reservation, and
-reused unchanged for that one helper call. It is not derived from mail IDs or
-the clock, so same-second legitimate claims differ. Without the entropy seam
+in the attempt snapshot before the first yield/reservation and reused unchanged
+for that one helper call. It is not derived from mail IDs or
+the clock, so same-second claims differ. Without the entropy seam
 the attempt is a pre-write refusal; no fallback hash. Suppression stays keyed
 by recipient + mail IDs.
 
 ## First task and startup publication
 
-A native first task is always written to durable Butler mail; only the
-canonical pointer reaches the helper. No arbitrary task text, composer or
+A native first task is always durable Butler mail; only the canonical pointer
+reaches the helper. No arbitrary task text, composer or
 Return. This includes a sticky disabled binding (failed row identity): the full
-body goes to mail and is never typed. A failed write is reported to the leader,
-never typed instead.
+body goes to mail and is never typed. A failed write is reported to the leader, never typed.
 
 A fresh launch races manifest/MCP publication. Only the core's typed
 `binding_missing` parks, and only a just-launched binding, inside a bounded

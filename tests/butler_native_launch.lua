@@ -143,8 +143,10 @@ assert(native.mode == "native" and native.row_id == "ses_abc"
   and native.session_token == "ses_abc",
   "join uses the live row id and instance")
 local claude_native = module.join(claude_plan, { id = "ses_claude", instance_id = "instance-2" }, "instance-2")
-assert(claude_native.mode == "native" and claude_native.session_token == "lead"
-  and claude_native.row_id == "ses_claude", "Claude binds the stable alias as its session token")
+assert(claude_native.mode == "native" and claude_native.session_token == "ses_claude"
+  and claude_native.row_id == "ses_claude" and claude_plan.name == "lead"
+  and claude_native.session_token ~= claude_plan.name,
+  "Claude also uses the actual row id, never the matching alias")
 local no_id = module.join(plan, { instance_id = "instance-1" }, "instance-1")
 assert(no_id.mode == "disabled" and no_id.reason == "missing_row_identity",
   "missing row id disables, never PTY")
