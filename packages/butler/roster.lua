@@ -32,7 +32,9 @@ function M.rows()
         instance_id = agent.instance_id,
         native = type(agent.native) == "table" and type(agent.native.path) == "string"
           and agent.native.path ~= "" and type(agent.native.nonce) == "string"
-          and { path = agent.native.path, nonce = agent.native.nonce } or nil,
+          and { path = agent.native.path, nonce = agent.native.nonce,
+            kind = agent.native.kind, session = agent.native.row_id,
+            generation = agent.native.generation } or nil,
         status_path = type(agent.telemetry) == "table" and agent.telemetry.status_path or nil }
     end
   end
@@ -109,11 +111,17 @@ function M.adopt(sessions)
         telemetry = row.status_path and { status_path = row.status_path } or nil, adopted = true }
       if type(row.native) == "table" and type(row.native.path) == "string" and row.native.path ~= "" then
         -- Bound native mode is sticky: a missing session row id disables
-        -- delivery for this incarnation; it never falls back to PTY.
-        agent.native = { mode = live_id[name] and "native" or "disabled",
-          reason = live_id[name] and nil or "missing_row_id",
-          path = row.native.path, nonce = row.native.nonce,
-          row_id = live_id[name], instance = row.instance_id }
+        -- delivery for this incarnation; it never falls back to PTY. The
+        -- recorded session is diagnostic only, because a reload may refresh
+        -- the row id for the same opaque instance. A roster binding was
+        -- published before the reload, so it is never treated as a fresh
+        -- launch awaiting publication.
+        local current = live_id[name]
+        agent.native = { mode = current and "native" or "disabled",
+          reason = current and nil or "missing_row_id",
+          kind = row.native.kind, path = row.native.path, nonce = row.native.nonce,
+          row_id = current, instance = row.instance_id,
+          generation = row.native.generation }
       end
       if row.alias == "butler" then
         -- main.lua finishes the root row (telemetry, token, marker) from here.

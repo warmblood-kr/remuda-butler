@@ -124,6 +124,24 @@ function remuda._butler_sessions()
     if summary then profiles[#profiles + 1] = display_name(item.id) .. ": " .. summary end
   end
   if #profiles > 0 then out = out .. "\nSANDBOX\n" .. table.concat(profiles, "\n") end
+  -- Read-only native state for bound/adopted sessions. Never a path, nonce,
+  -- socket or token: those stay in the private binding files.
+  local natives = {}
+  for _, item in ipairs(team_order()) do
+    local agent = bus.agents[item.id]
+    local native = type(agent.native) == "table" and agent.native or nil
+    if native and (native.mode == "native" or native.mode == "disabled") then
+      local detail = native.reason and tostring(native.reason):gsub("%c+", " "):sub(1, 120) or "-"
+      if native.generation then
+        detail = detail .. "\tgeneration=" .. tostring(native.generation):sub(1, 12)
+      end
+      natives[#natives + 1] = display_name(item.id) .. "\t"
+        .. tostring(native.kind or "opencode") .. "\t" .. native.mode .. "\t" .. detail
+    end
+  end
+  if #natives > 0 then
+    out = out .. "\nNATIVE\nALIAS\tKIND\tSTATE\tDETAIL\n" .. table.concat(natives, "\n")
+  end
   local failed_names = {}
   for name in pairs(bus.launch_failures or {}) do failed_names[#failed_names + 1] = name end
   table.sort(failed_names)

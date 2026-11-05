@@ -1,8 +1,11 @@
--- Production glue for a NEW native OpenCode launch (phase 2, default off).
+-- Production glue for a NEW native launch (default off per kind).
 -- It owns only the private binding path/nonce and the per-launch decision; the
 -- core wrapper/helper owns the server, manifest and validation, and Butler
--- never reads the manifest (it contains auth). All external seams are
--- injectable for unit tests.
+-- never reads the manifest (it contains auth). OpenCode selects a wrapper
+-- launch; Claude selects the opted-in channel MCP entry and adopts the
+-- binding that channel publishes in the same private directory. Codex is
+-- owner-adoption only (`native_codex.lua`), never a new native notice launch.
+-- All external seams are injectable for unit tests.
 local M = {}
 
 local NONCE_BYTES = 16
@@ -35,8 +38,16 @@ end
 
 local function enabled(self)
   local path = config_path(self.paths)
-  if not path then return { enabled = false, reason = "config_home_unavailable" } end
+  if not path then
+    return { enabled = false, reason = "config_home_unavailable", kinds = {} }
+  end
   return self.config.load(path, { json = self.json, read = self.read })
+end
+
+local function kind_state(self, config, kind)
+  if type(self.config.kind) == "function" then return self.config.kind(config, kind) end
+  -- Older/fake config modules only know the OpenCode switch.
+  return { enabled = config.enabled, reason = config.reason }
 end
 
 local function capability(self)
@@ -58,6 +69,7 @@ function M.new(options)
     runner = options.runner, remuda = options.remuda or "remuda",
     random = options.random }
   self.config_path = function() return config_path(self.paths) end
+  self.read_config = function(path) return self.read(path) end
   self.enabled = function() return enabled(self) end
   self.capability = function() return capability(self) end
   self.prepare = function(name) return M.prepare(self, name) end
@@ -136,22 +148,37 @@ function M.prepare(self, name)
 end
 
 -- One decision per NEW launch. Only a completely enabled+capable+prepared
--- OpenCode launch is native; anything else is an unbound PTY launch.
+-- launch is native; anything else is an unbound PTY launch. OpenCode also
+-- needs the installed wrapper capability. Claude's capability is the channel
+-- MCP entry itself, gated only by the explicit development opt-in.
 function M.plan(self, name, kind)
-  if kind and kind ~= "opencode" then return { mode = "pty", reason = "kind_not_native" } end
+  kind = kind or "opencode"
+  if kind ~= "opencode" and kind ~= "claude" then
+    return { mode = "pty", reason = kind == "codex" and "owner_adopt_only" or "kind_not_native" }
+  end
   local config = self.enabled()
-  if config.enabled ~= true then return { mode = "pty", reason = config.reason } end
-  local capable, capability_reason = self.capability()
-  if not capable then return { mode = "pty", reason = capability_reason } end
+  local state = kind_state(self, config, kind)
+  if state.enabled ~= true then return { mode = "pty", reason = state.reason } end
+  if kind == "opencode" then
+    local capable, capability_reason = self.capability()
+    if not capable then return { mode = "pty", reason = capability_reason } end
+  end
   local binding, nonce, why = self.prepare(name)
   if not binding then return { mode = "pty", reason = "binding_failed: " .. tostring(why) } end
-  return { mode = "native", binding = binding, nonce = nonce }
+  local directory = binding:match("^(.*)/[^/]+$") or binding
+  return { mode = "native", kind = kind, binding = binding, binding_dir = directory,
+    nonce = nonce, created_at = os.time() }
 end
 
--- The per-launch env carries only the nonce. The core assigns Session.id.
+-- OpenCode's wrapper reads only the nonce. The Claude channel MCP entry also
+-- needs the private directory it must publish in; neither gets a token.
 function M.env(plan)
   if not plan or plan.mode ~= "native" then return {} end
-  return { REMUDA_BUTLER_BINDING_NONCE = plan.nonce }
+  local env = { REMUDA_BUTLER_BINDING_NONCE = plan.nonce }
+  if plan.kind == "claude" and plan.binding_dir then
+    env.REMUDA_BUTLER_BINDING_DIR = plan.binding_dir
+  end
+  return env
 end
 
 -- Join the live row to the launch decision. Missing or mismatched identity
@@ -172,8 +199,12 @@ function M.join(plan, row, instance)
     return { mode = "disabled", reason = "instance_mismatch",
       path = plan.binding, nonce = plan.nonce }
   end
-  return { mode = "native", path = plan.binding, nonce = plan.nonce,
-    row_id = row.id, instance = instance }
+  return { mode = "native", kind = plan.kind or "opencode", path = plan.binding,
+    nonce = plan.nonce, row_id = row.id, instance = instance,
+    -- A launch we just created may race manifest/MCP publication. Only this
+    -- fresh binding may park on `binding_missing`; an adopted/reloaded binding
+    -- treats a missing manifest as dead.
+    awaiting_publication = true, awaiting_since = plan.created_at or os.time() }
 end
 
 function M.disable(agent, reason)

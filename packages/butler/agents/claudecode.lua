@@ -101,8 +101,15 @@ builders.claude = function(spec)
     argv[#argv + 1] = "--autocompact"; argv[#argv + 1] = configured
   end
   if spec.settings_path then argv[#argv + 1] = "--settings"; argv[#argv + 1] = spec.settings_path end
-  argv[#argv + 1] = "--mcp-config"; argv[#argv + 1] = spec.mcp_config_path or support.mcp_config_path(spec.name, spec.token)
+  argv[#argv + 1] = "--mcp-config"; argv[#argv + 1] = spec.mcp_config_path or support.mcp_config_path(spec.name, spec.token, spec.native)
   argv[#argv + 1] = "--strict-mcp-config"
+  -- Explicit development opt-in only. The interactive channel consent stays
+  -- visible to the human and is never answered here.
+  if type(spec.native) == "table" and spec.native.mode == "native"
+      and spec.native.kind == "claude" then
+    argv[#argv + 1] = "--dangerously-load-development-channels"
+    argv[#argv + 1] = "server:remuda-channel"
+  end
   argv[#argv + 1] = "--permission-mode"; argv[#argv + 1] = "auto"
   argv[#argv + 1] = "--append-system-prompt"
   argv[#argv + 1] = spec.system_prompt

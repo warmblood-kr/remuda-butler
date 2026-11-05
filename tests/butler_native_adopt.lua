@@ -1,0 +1,137 @@
+-- Run from the repository root: luajit tests/butler_native_adopt.lua
+-- Owner-declared Codex adoption glue and CLI: identity fence, no partial
+-- binding, no endpoint persistence and honest typed reports. No daemon.
+remuda = {}
+local adopt_module = dofile("packages/butler/native_adopt.lua")
+local cli = dofile("packages/butler/native_cli.lua")
+local UUID = "01234567-89ab-cdef-0123-456789abcdef"
+local SOCKET = "unix:///private/tmp/codex-daemon-501/abcd.sock"
+
+local function fixture(result, overrides)
+  overrides = overrides or {}
+  local bus = { agents = { m1 = { kind = "codex", id = "id-m1" } } }
+  local rows = { { name = "m1", alive = true, id = "ses_row", instance_id = "instance-1" } }
+  local saved, calls = 0, {}
+  local self = {
+    bus = bus,
+    list = function() return overrides.rows or rows end,
+    launch = { prepare = function(name)
+      calls.prepare = name
+      return "/data/remuda/butler/bindings/m1/ab/manifest.json", string.rep("ab", 16)
+    end, config_path = function() return "/cfg/native.json" end },
+    config = {
+      load = function() return {} end,
+      kind = function(_, kind)
+        if overrides.config_off then return { enabled = false, reason = "disabled" } end
+        return { enabled = true, reason = "enabled" }
+      end,
+    },
+    codex = { adopt = function(fields, options)
+      calls.fields, calls.options = fields, options
+      if overrides.during then overrides.during() end
+      return result
+    end },
+    json = {}, runner = function() end, remuda = "remuda",
+    roster_save = function() saved = saved + 1 end,
+    trace = function() end,
+  }
+  return self, bus, calls, function() return saved end
+end
+
+-- 1. Success binds exactly the fenced identity; the endpoint/thread stay on
+-- the request only and never reach the agent or the roster.
+local self, bus, calls, saved = fixture({ outcome = "adopted", generation = string.rep("cd", 32) })
+local result, why = adopt_module.codex(self, "m1", SOCKET, UUID)
+assert(result and result.generation == string.rep("cd", 32), "adoption returns the generation")
+assert(why == nil, "no failure reason")
+assert(calls.fields.binding == "/data/remuda/butler/bindings/m1/ab/manifest.json"
+  and calls.fields.session == "ses_row" and calls.fields.socket == SOCKET
+  and calls.fields.thread == UUID and calls.fields.nonce == string.rep("ab", 16),
+  "the request carries the live row id and the owner declaration once")
+local native = bus.agents.m1.native
+assert(native.mode == "native" and native.kind == "codex"
+  and native.row_id == "ses_row" and native.instance == "instance-1"
+  and native.generation == string.rep("cd", 32) and native.awaiting_publication == false,
+  "the binding keeps identity and the published generation")
+for key, value in pairs(native) do
+  assert(key ~= "socket" and key ~= "thread" and key ~= "auth", "never persist " .. key)
+  assert(tostring(value):find("private/tmp", 1, true) == nil, "no endpoint in " .. key)
+end
+assert(saved() == 1, "the roster is saved once")
+
+-- 2. A session replaced during the adopt yield never keeps the new binding.
+local replaced_bus
+local replaced = fixture({ outcome = "adopted", generation = string.rep("cd", 32) }, {
+  during = function() end })
+replaced_bus = replaced
+replaced_bus.list = (function()
+  local calls = 0
+  return function()
+    calls = calls + 1
+    if calls == 1 then
+      return { { name = "m1", alive = true, id = "ses_row", instance_id = "instance-1" } }
+    end
+    return { { name = "m1", alive = true, id = "ses_row", instance_id = "instance-2" } }
+  end
+end)()
+local self2, bus2 = fixture({ outcome = "adopted", generation = string.rep("cd", 32) })
+self2.list = replaced_bus.list
+local result2, why2 = adopt_module.codex(self2, "m1", SOCKET, UUID)
+assert(result2 == nil and why2 == "session_replaced_during_adopt",
+  "a replaced row is refused after the yield")
+assert(bus2.agents.m1.native == nil, "no half-binding is attached")
+
+-- 3. Opt-in, identity and availability failures create no binding.
+local off, off_bus = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
+  { config_off = true })
+assert(adopt_module.codex(off, "m1", SOCKET, UUID) == nil, "opt-in is required")
+assert(off_bus.agents.m1.native == nil, "unopted session stays unbound")
+local unavailable, unavailable_bus = fixture({ outcome = "unavailable",
+  reason = "thread_not_loaded" })
+local unavailable_result, unavailable_why = adopt_module.codex(unavailable, "m1", SOCKET, UUID)
+assert(unavailable_result == nil and unavailable_why == "unavailable: thread_not_loaded",
+  "the typed unavailable reason is reported")
+assert(unavailable_bus.agents.m1.native == nil, "unavailable publishes no binding")
+local unknown, unknown_bus = fixture({ outcome = "uncertain", reason = "timeout" })
+local unknown_result, unknown_why = adopt_module.codex(unknown, "m1", SOCKET, UUID)
+assert(unknown_result == nil and unknown_why == "uncertain: timeout", "unknown is final")
+assert(unknown_bus.agents.m1.native == nil, "uncertain attaches no binding")
+
+-- 4. A live PTY session of another kind is refused before any helper call.
+local wrong, wrong_bus = fixture({ outcome = "adopted", generation = string.rep("cd", 32) })
+wrong_bus.agents.m1.kind = "opencode"
+local wrong_result, wrong_why = adopt_module.codex(wrong, "m1", SOCKET, UUID)
+assert(wrong_result == nil and wrong_why == "not_a_codex_session", "only Codex sessions adopt")
+assert(wrong_bus.agents.m1.native == nil, "a wrong kind never binds")
+
+-- 5. CLI parsing is exact and the report never repeats the socket or thread.
+local parsed, parse_why = cli.parse({ "adopt-codex", "m1", "--socket", SOCKET,
+  "--thread", UUID })
+assert(parsed and parsed.session == "m1" and parsed.socket == SOCKET
+  and parsed.thread == UUID, "the documented argv parses")
+assert(cli.parse({ "adopt-codex", "m1", "--socket", SOCKET }) == nil, "a missing UUID is refused")
+assert(cli.parse({ "adopt-codex", "m1", "--socket", SOCKET, "--thread", UUID,
+  "extra" }) == nil, "extra words are refused")
+assert(cli.parse({ "adopt-codex", "m1", "--socket", SOCKET, "--socket", SOCKET,
+  "--thread", UUID }) == nil, "a repeated flag is refused")
+assert(cli.parse({ "adopt-codex", "m1", "--endpoint", SOCKET, "--thread", UUID }) == nil,
+  "unknown options are refused")
+
+assert(cli.run({ "--help" }) == cli.USAGE, "help is printed as help")
+assert(cli.run({ "adopt-codex", "--help" }) == cli.USAGE, "verb help is printed as help")
+local function report(value, error_message)
+  return cli.run({ "adopt-codex", "m1", "--socket", SOCKET, "--thread", UUID },
+    { adopt_codex = function() return value, error_message end })
+end
+local text = report({ generation = string.rep("cd", 32) })
+assert(text and text:find("natively bound", 1, true) ~= nil, "success is explicit")
+assert(text:find("private/tmp", 1, true) == nil and text:find(UUID, 1, true) == nil,
+  "the report repeats neither the socket nor the thread")
+local unavailable_text, unavailable_error = report(nil, "unavailable: version_mismatch")
+assert(unavailable_text == nil and unavailable_error:find("No binding was published", 1, true),
+  "unavailable is reported without a retry")
+local uncertain_text, uncertain_error = report(nil, "uncertain: timeout")
+assert(uncertain_text == nil and uncertain_error:find("Do not retry automatically", 1, true),
+  "uncertain never invites a blind retry")
+
+print("ok - Codex adoption is fenced, opt-in and reported without endpoints")

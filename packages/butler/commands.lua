@@ -204,6 +204,26 @@ for offset, verb in ipairs({ "diagnostics", "diagnostics-list" }) do
     return remuda.fail(why, 2)
   end)
 end
+command(5.9, "native", "  remuda butler native adopt-codex ALIAS --socket PATH --thread UUID", function(args, caller)
+  -- Explicit owner action: an outside caller is the operator; an agent may
+  -- ask the root Butler, never its own session.
+  local identity = current_agent(caller)
+  if identity ~= nil then
+    local resolved, alias = pcall(resolve, identity)
+    if not resolved or alias ~= "butler" then
+      return remuda.fail("native adoption is an owner action; ask the root Butler\n"
+        .. "Next: remuda butler native adopt-codex --help", 1)
+    end
+  end
+  local cli = remuda.butler and remuda.butler.native_cli
+  local adopt = remuda._butler_native_adopt
+  if not cli or not adopt then
+    return remuda.fail("native adoption is unavailable on this build", 1)
+  end
+  local text, why = cli.run(args, adopt)
+  if text then return text end
+  return remuda.fail(why, #args == 0 and 2 or 1)
+end)
 local QUOTA_CLI_SPEC = {
   name = "remuda butler",
   verbs = {

@@ -13,6 +13,11 @@ local function fake(config, capability, random_ok)
       return capability, capability and "capability_ok" or "capability_unsupported"
     end,
   }
+  if config.kinds then
+    config_module.kind = function(_, kind)
+      return config.kinds[kind] or { enabled = false, reason = "config_missing_section" }
+    end
+  end
   local paths = { data_home = "/data",
     default_config_home = function() return "/cfg" end,
     valid_child_name = function(name) return name end }
@@ -43,12 +48,29 @@ local no_cap, no_cap_made = fake({ enabled = true, reason = "enabled" }, false)
 assert(no_cap.plan("lead").mode == "pty", "missing capability is PTY")
 assert(#no_cap_made == 0, "no binding is created without a capability")
 
--- 1b. Only OpenCode is eligible, and the kind check creates no directory.
+-- 1b. Codex is owner-adoption only; Claude needs its own opt-in and never
+-- probes the OpenCode wrapper.
 local codex, codex_made = fake({ enabled = true, reason = "enabled" }, true)
 local codex_plan = codex.plan("lead", "codex")
-assert(codex_plan.mode == "pty" and codex_plan.reason == "kind_not_native",
-  "a non-OpenCode launch stays PTY")
-assert(#codex_made == 0, "a non-OpenCode launch creates no binding")
+assert(codex_plan.mode == "pty" and codex_plan.reason == "owner_adopt_only",
+  "a Codex new launch stays PTY for owner adoption")
+assert(#codex_made == 0, "a Codex new launch creates no binding")
+local claude_off, claude_off_made = fake({ enabled = true, reason = "enabled",
+  kinds = { claude = { enabled = false, reason = "disabled" } } }, true)
+local claude_off_plan = claude_off.plan("lead", "claude")
+assert(claude_off_plan.mode == "pty" and claude_off_plan.reason == "disabled",
+  "an unopted Claude launch stays PTY")
+assert(#claude_off_made == 0, "an unopted Claude launch creates no binding")
+local claude, claude_made, claude_calls = fake({ enabled = true, reason = "enabled",
+  kinds = { claude = { enabled = true, reason = "enabled" } } }, true)
+local claude_plan = claude.plan("lead", "claude")
+assert(claude_plan.mode == "native" and claude_plan.kind == "claude",
+  "the explicit Claude opt-in selects the channel binding")
+assert(claude_calls.probe == 0, "Claude never probes the OpenCode wrapper")
+assert(claude.env(claude_plan).REMUDA_BUTLER_BINDING_DIR == claude_plan.binding_dir,
+  "the channel entry gets only the private binding directory")
+assert(claude.env(claude_plan).REMUDA_BUTLER_BINDING_NONCE == claude_plan.nonce,
+  "the channel entry keeps the nonce correlation")
 
 -- 1c. A core without the private-dir seam is PTY, never a crash.
 local no_fs = module.new({

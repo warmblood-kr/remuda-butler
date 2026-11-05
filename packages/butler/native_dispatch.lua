@@ -1,9 +1,18 @@
--- Narrow client for the frozen core helper `remuda _agent_notice`.
--- One immutable request goes in on stdin; one typed JSON outcome comes out.
--- No shell, temp file, flag, endpoint or credential: the binding path and
--- nonce are non-secret correlation data. Pure seams (JSON, runner, clock) are
--- injected so the mapping can be unit-tested without a live server.
+-- Narrow client for the frozen core notice helpers.
+-- One immutable Request1 goes in on stdin; one typed JSON outcome comes out.
+-- Butler selects a fixed per-kind verb from a closed map; no caller text can
+-- become a command. No shell, temp file, flag, endpoint or credential: the
+-- binding path and nonce are non-secret correlation data. Pure seams (JSON,
+-- runner, clock) are injected so the mapping can be unit-tested without a
+-- live server.
 local M = {}
+
+-- The only allowed helper entrypoints. OpenCode keeps its installed verb; the
+-- Codex and Claude verbs are separate, strict protocol helpers. `_agent_notice`
+-- is never used for Codex/Claude.
+local VERBS = { opencode = "_agent_notice", codex = "_codex_notice",
+  claude = "_claude_notice" }
+M.VERBS = VERBS
 
 local VERSION = 1
 local DEFAULT_TIMEOUT = 15
@@ -26,6 +35,34 @@ local UNCERTAIN = {
   transport = true, http_400 = true, http_409 = true, http_5xx = true,
   receipt_mismatch = true, uncertain = true,
 }
+-- Codex: a proven pre-write refusal, split into dead bindings and retryable
+-- local refusals. `binding_missing` is special: the caller decides whether it
+-- is a startup window or a formerly-published binding that disappeared.
+local CODEX_DEAD = {
+  invalid_binding = true, manifest_invalid = true, invalid_manifest = true,
+  socket_missing = true, socket_dead = true, socket_mismatch = true,
+  socket_unverified = true, endpoint_unverified = true, endpoint_gone = true,
+  peer_mismatch = true, peer_unverified = true, version_mismatch = true,
+  thread_mismatch = true,
+  thread_not_loaded = true, not_loaded = true, auth = true,
+  target_missing = true, target_unverified = true, bridge_gone = true,
+  unsupported_platform = true,
+}
+local CODEX_NOT_WRITTEN = { invalid_args = true, invalid_request = true }
+-- Claude: pre-emission refusals only. `channel_emitted_unconfirmed` and any
+-- post-emission unknown stay uncertain; an ACK is never accepted_queue.
+local CLAUDE_DEAD = {
+  invalid_binding = true, stale_binding = true, channel_unavailable = true,
+  channel_gone = true, bridge_gone = true, peer_mismatch = true,
+  socket_mismatch = true, version_mismatch = true, auth = true,
+  target_missing = true, target_unverified = true, manifest_invalid = true,
+  invalid_manifest = true, state_unavailable = true, unsupported_platform = true,
+}
+local CLAUDE_NOT_WRITTEN = {
+  invalid_args = true, invalid_request = true, claim_refused = true,
+  ingress_refused = true, not_initialized = true, queue_full = true,
+}
+local STARTUP_PENDING = "binding_missing"
 local RESPONSE_KEYS = { outcome = true, reason = true }
 
 local function valid_id(value)
@@ -146,15 +183,39 @@ local function accepted_outcome(value)
   return { outcome = "accepted", reason = "" }
 end
 
-local function refused_outcome(reason)
+local function refused_outcome(reason, kind)
   if reason == "" then return { outcome = "uncertain", reason = "invalid_response" } end
+  if kind == "codex" then
+    if reason == STARTUP_PENDING then
+      return { outcome = "not_written", reason = reason, startup_pending = true }
+    end
+    if CODEX_DEAD[reason] then return { outcome = "dead_binding", reason = reason } end
+    if CODEX_NOT_WRITTEN[reason] then return { outcome = "not_written", reason = reason } end
+    return { outcome = "uncertain", reason = "unknown_reason" }
+  end
+  if kind == "claude" then
+    if reason == STARTUP_PENDING then
+      return { outcome = "not_written", reason = reason, startup_pending = true }
+    end
+    if CLAUDE_DEAD[reason] then return { outcome = "dead_binding", reason = reason } end
+    if CLAUDE_NOT_WRITTEN[reason] then return { outcome = "not_written", reason = reason } end
+    return { outcome = "uncertain", reason = "unknown_reason" }
+  end
+  if reason == STARTUP_PENDING then
+    return { outcome = "not_written", reason = reason, startup_pending = true }
+  end
   if DEAD[reason] then return { outcome = "dead_binding", reason = reason } end
   if NOT_WRITTEN[reason] then return { outcome = "not_written", reason = reason } end
   return { outcome = "uncertain", reason = "unknown_reason" }
 end
 
-local function uncertain_outcome(value, name, reason)
+local function uncertain_outcome(value, name, reason, kind)
   if name == "uncertain" then
+    -- Codex/Claude reasons are comment-free tokens from their own strict
+    -- helper; every one of them is final. OpenCode keeps its allowlist.
+    if kind == "codex" or kind == "claude" then
+      return { outcome = "uncertain", reason = reason ~= "" and reason or "uncertain" }
+    end
     if reason ~= "" and not UNCERTAIN[reason] then
       return { outcome = "uncertain", reason = "unknown_reason" }
     end
@@ -168,24 +229,32 @@ end
 
 -- Unknown, missing or wrong-typed fields/reasons are uncertain, never a
 -- retryable "nothing was written".
-local function outcome(value)
+local function outcome(value, kind)
   if not strict_response(value) then
     return { outcome = "uncertain", reason = "invalid_response" }
   end
   local name, reason = value.outcome, value.reason or ""
-  if name == "accepted_queue" then return accepted_outcome(value) end
-  if name == "definitely_not_written" then return refused_outcome(reason) end
-  return uncertain_outcome(value, name, reason)
+  if name == "accepted_queue" then
+    -- The Claude helper never proves queue admission; an ACK there must not be
+    -- promoted into success.
+    if kind == "claude" then return { outcome = "uncertain", reason = "invalid_response" } end
+    return accepted_outcome(value)
+  end
+  if name == "definitely_not_written" then return refused_outcome(reason, kind) end
+  return uncertain_outcome(value, name, reason, kind)
 end
 
 function M.classify(stdout, options)
+  options = options or {}
+  local kind = options.kind or "opencode"
+  if not VERBS[kind] then return { outcome = "dead_binding", reason = "invalid_kind" } end
   local codec, why = codec_of(options)
   if not codec then return { outcome = "uncertain", reason = why } end
   local ok, value = pcall(codec.decode, stdout)
   if not ok or type(value) ~= "table" then
     return { outcome = "uncertain", reason = "invalid_response" }
   end
-  return outcome(value)
+  return outcome(value, kind)
 end
 
 local function runner_of(options)
@@ -221,8 +290,8 @@ local function encode_request(request, options)
   return nil, { outcome = "uncertain", reason = why }
 end
 
-local function run_helper(runner, text, options)
-  local argv = { options.remuda or "remuda", "_agent_notice" }
+local function run_helper(runner, text, options, verb)
+  local argv = { options.remuda or "remuda", verb }
   local ok, result = pcall(runner, { argv = argv, stdin = text,
     timeout = options.timeout or DEFAULT_TIMEOUT })
   if not ok or type(result) ~= "table" then
@@ -236,13 +305,16 @@ end
 -- retried automatically.
 function M.dispatch(request, options)
   options = options or {}
+  local kind = options.kind or "opencode"
+  local verb = VERBS[kind]
+  if not verb then return { outcome = "dead_binding", reason = "invalid_kind" } end
   local runner = runner_of(options)
   if type(runner) ~= "function" then
     return { outcome = "uncertain", reason = "runner_unavailable" }
   end
   local text, encode_outcome = encode_request(request, options)
   if not text then return encode_outcome end
-  local result, run_outcome = run_helper(runner, text, options)
+  local result, run_outcome = run_helper(runner, text, options, verb)
   if not result then return run_outcome end
   return result_outcome(result, options)
 end

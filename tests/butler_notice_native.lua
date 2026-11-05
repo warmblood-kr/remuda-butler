@@ -41,7 +41,8 @@ local mail = {
   unread = function() return 1 end,
   find_message = function(id) return { id = id, from = { alias = "alice", id = "alice-id" } } end,
 }
-local alerts, spawns, pty_sends = {}, {}, 0
+local alerts, spawns, pty_sends, timers = {}, {}, 0, {}
+local random_calls = 0
 local rows = { { name = "lead", alive = true, attached = false, id = "ses_abc",
   instance_id = "instance-1" } }
 remuda = {
@@ -53,6 +54,14 @@ remuda = {
   _butler_chooser = { known_startup_modal = function() return false end },
   _butler_agent_startup = { opencode = { placeholders = {} } },
   _butler_notice_clock = function() return now end,
+  random_bytes = function(n)
+    random_calls = random_calls + 1
+    return string.char(random_calls % 256) .. string.rep("\0", n - 1)
+  end,
+  _butler_notice_after = function(seconds)
+    timers[#timers + 1] = seconds
+    return { cancel = function() end }
+  end,
   _butler_session_trace = _butler_session_trace,
   json = codec,
   ls = function() return rows end,
@@ -76,7 +85,8 @@ local function reset()
       path = "/data/remuda/butler/bindings/lead/" .. string.rep("a", 32) .. "/manifest.json",
       nonce = string.rep("a", 32), row_id = "ses_abc", instance = "instance-1" } } }
   bus.notices, bus.notice_stuck, bus.notice_recovery = {}, {}, nil
-  bus.notice_native_alerts = {}
+  bus.pending_tasks, bus.notice_seen = {}, {}
+  bus.notice_native_alerts, bus.notice_native_dispatching = {}, {}
   rows = { { name = "lead", alive = true, attached = false, id = "ses_abc",
     instance_id = "instance-1" } }
   remuda.ls = function()
@@ -84,7 +94,8 @@ local function reset()
     return rows
   end
   unread = { n1 = true, n2 = true }
-  alerts, spawns, pty_sends = {}, {}, 0
+  alerts, spawns, pty_sends, timers = {}, {}, 0, {}
+  random_calls = 0
   on_ls, on_retire = nil, nil
   local files = remuda._butler_notice_test_journal.files
   for key in pairs(files) do files[key] = nil end
@@ -134,10 +145,24 @@ assert(sent.text == "Butler message n1 arrived. Read it: MCP butler_inbox (or re
 assert(sent.session == "ses_abc" and sent.instance == "instance-1"
   and sent.binding == bus.agents.lead.native.path and sent.nonce == bus.agents.lead.native.nonce,
   "request carries the bound target")
-assert(sent.request_id:match("^msg_n1_%d+$"), "request id is frozen per dispatch")
+assert(sent.request_id:match("^msg_%x+$") and #sent.request_id == 36,
+  "request id is a per-dispatch CSPRNG claim")
 assert(bus.notices.lead == nil, "accepted delivery clears the queue")
 assert(remuda._butler_delivery_journal.state_of("lead-id", "n1") == "accepted_unread",
   "native acceptance is accepted_unread until the canonical read")
+
+-- 1b. Two attempts in the same clock second get distinct claims: the id is
+-- frozen per attempt, never derived from the first mail id or the clock.
+reset()
+queue({ "n1" })
+respond({ outcome = "accepted_queue" })
+assert(N.deliver_notice("lead") == true, "first same-second attempt completes")
+local first_claim = codec.decode(spawns[1].stdin).request_id
+queue({ "n2" })
+respond({ outcome = "accepted_queue" })
+assert(N.deliver_notice("lead") == true, "second same-second attempt completes")
+local second_claim = codec.decode(spawns[2].stdin).request_id
+assert(first_claim ~= second_claim, "same-second attempts never share a claim")
 
 -- 2. Multi-ID: one request, canonical count text.
 reset()
@@ -248,7 +273,84 @@ queue()
 assert(N.deliver_notice("lead") == false, "disabled mode defers")
 assert(#spawns == 0, "disabled mode never invokes the helper")
 
--- 6b. The very first ls in the snapshot must not change the decision under
+-- 5e. A fresh launch may race publication: a proven missing manifest parks
+-- without disable, attempt spend or timers, then flushes as soon as a later
+-- attempt reaches the binding.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "missing manifest parks the attempt")
+assert(bus.agents.lead.native.mode == "native", "startup pending never disables")
+assert(bus.notices.lead ~= nil and bus.notices.lead.due_at == now + 1,
+  "unreserved mail stays queued for the next immediate attempt")
+assert(#timers == 0 and pty_sends == 0, "startup pending uses no timer and no PTY")
+respond({ outcome = "accepted_queue" })
+now = now + 1
+remuda._butler_deliver_notices()
+assert(bus.notices.lead == nil and #spawns == 2, "publication flushes the queued mail")
+assert(bus.agents.lead.native.awaiting_publication == nil,
+  "the first accepted answer ends the startup window")
+
+-- 5f. A published/adopted binding that disappears is dead, not startup. The
+-- same typed reason must not become endless waiting.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = nil
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "a missing adopted manifest refuses")
+assert(bus.agents.lead.native.mode == "disabled", "a vanished published binding disables")
+assert(bus.notices.lead ~= nil and pty_sends == 0, "mail stays unread, never PTY")
+
+-- 5g. The startup window is bounded per protocol; an expired fresh launch is
+-- treated as dead rather than parked forever.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now - 121
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "an expired startup window refuses")
+assert(bus.agents.lead.native.mode == "disabled", "no indefinite startup waiting")
+
+-- 6a. A native arrival is dispatched in the notify call itself: no quiet or
+-- cap timer, no PTY, and a pending first task or attached pane does not hold
+-- it back.
+reset()
+unread.imm1 = true
+rows[1].attached, rows[1].human_idle = true, false
+bus.pending_tasks.lead = { marker = "first-task" }
+respond({ outcome = "accepted_queue" })
+assert(remuda._butler_notify("lead", "Butler message imm1 arrived. Read it: remuda butler inbox",
+  "imm1") == true, "the native notice is dispatched immediately")
+assert(#spawns == 1 and #timers == 0 and pty_sends == 0,
+  "native uses no timer, no PTY and one helper call")
+assert(bus.notices.lead == nil, "an accepted native notice clears the queue")
+assert(bus.pending_tasks.lead ~= nil, "the pending task is not consumed by the notice")
+
+-- 6b. A native re-show is equally immediate even while a task owns the pane.
+reset()
+unread.imm2 = true
+bus.pending_tasks.lead = { marker = "first-task" }
+respond({ outcome = "accepted_queue" })
+assert(remuda._butler_notify("lead", "Butler message imm2 arrived. Read it: remuda butler inbox",
+  "imm2", true) == true, "the native re-show is dispatched immediately")
+assert(#spawns == 1 and #timers == 0 and pty_sends == 0,
+  "a native re-show uses no timer, no PTY and one helper call")
+
+-- 6c. The same notify for an unbound PTY session still coalesces.
+reset()
+bus.agents.lead.native = nil
+unread.pty1 = true
+assert(remuda._butler_notify("lead", "Butler message pty1 arrived. Read it: remuda butler inbox",
+  "pty1") == false, "the PTY notice is queued, not sent")
+assert(#spawns == 0 and #timers == 2 and timers[1] == 10 and timers[2] == 2,
+  "the PTY path keeps its cap and quiet timers")
+
+-- 6d. The very first ls in the snapshot must not change the decision under
 -- already-chosen native text: toggle to disabled => zero helper, zero PTY.
 reset()
 queue()
