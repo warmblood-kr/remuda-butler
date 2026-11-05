@@ -1395,17 +1395,12 @@ local function missing_manifest_is_startup(native)
   return notice_now() - since <= startup_window(native.kind)
 end
 
--- Core may report an absent unpublished manifest as the typed
--- `binding_missing` (Codex/Claude) or as the OpenCode helper's
--- `invalid_binding`. Both are pre-write startup shapes for a launch we just
--- performed; after the bounded window they become dead.
+-- Only the core's typed `binding_missing` may park. A generic
+-- `invalid_binding`/malformed/wrong-owner binding is dead and must disable:
+-- absence and corruption are not interchangeable.
 local function startup_shape(native, result)
-  if result.outcome ~= "dead_binding" and result.outcome ~= "not_written" then
-    return false
-  end
-  if result.startup_pending then return true end
-  return (native.kind == nil or native.kind == "opencode")
-    and result.reason == "invalid_binding"
+  return result.startup_pending == true
+    and (result.outcome == "not_written" or result.outcome == "dead_binding")
 end
 
 local function native_outcome(result, native)
@@ -1626,6 +1621,16 @@ local function deliver_native_now(session)
     if result ~= true or not bus.notices[session] then break end
   end
   return sent
+end
+
+-- Lifecycle owners call this when a binding may have just been published
+-- (launch completion, successful adoption). It performs one fresh helper
+-- attempt, so the helper - not a file read - is the authority. It is an
+-- explicit event entrypoint; the bounded notice tick remains the fallback when
+-- a publication happens outside any Butler-visible lifecycle step.
+local function native_publication(alias)
+  if not native_immediate(alias) then return false end
+  return deliver_native_now(alias)
 end
 
 local function arm_notice_timer(session, slot, seconds)
@@ -2051,6 +2056,7 @@ NOTICE_MODULE.mail_notice_text = mail_notice_text
 NOTICE_MODULE.startup_action_safe = startup_action_safe
 NOTICE_MODULE.notice_recovery_error = notice_recovery_error
 NOTICE_MODULE.deliver_notice = deliver_notice
+NOTICE_MODULE.native_publication = native_publication
 NOTICE_MODULE.remind_unread_notices = remind_unread_notices
 NOTICE_MODULE.complete_notice_recovery = complete_notice_recovery
 remuda._butler_notice = NOTICE_MODULE

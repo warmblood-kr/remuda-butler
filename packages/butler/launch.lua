@@ -341,22 +341,20 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   -- ordinary native notice then carries only the canonical pointer after the
   -- binding publishes. A failed write is reported, never typed instead.
   local native_binding = bus.agents[actual].native
-  if task and task ~= "" and type(native_binding) == "table"
-      and native_binding.mode == "native" then
-    local queued, message = pcall(queue_message, mail_address(parent or "butler"),
-      mail_address(actual), task, "Task")
-    if queued and type(message) == "table" and message.id then
-      _butler_session_trace("first_task_native_mail", actual .. " message=" .. message.id)
-    else
-      local reason = queued and "no message id" or tostring(message)
-      _butler_session_trace("first_task_native_mail_failed", actual .. " "
-        .. reason:gsub("%c+", " "):sub(1, 300))
-      pcall(remuda._butler_send, "butler", parent or "butler",
-        "the initial task for " .. actual .. " could not be saved as durable mail ("
-          .. reason:gsub("%c+", " "):sub(1, 300)
-          .. "). It was not typed into the native session; resend it after checking the mailbox.")
-    end
+  local native_task = remuda.butler and remuda.butler.native_task
+  if task and task ~= "" and native_task and native_task.route(bus.agents[actual]) then
+    native_task.queue({ queue_message = queue_message, mail_address = mail_address,
+      send = remuda._butler_send, trace = _butler_session_trace },
+      actual, parent, task)
     task = ""
+  end
+  -- Launch completion is a real lifecycle point: if the wrapper/channel has
+  -- already published, flush queued unreserved mail now. A still-missing
+  -- manifest stays parked for the next explicit check/tick.
+  if type(native_binding) == "table" and native_binding.mode == "native"
+      and remuda._butler_notice
+      and type(remuda._butler_notice.native_publication) == "function" then
+    pcall(remuda._butler_notice.native_publication, actual)
   end
   -- A host-backed session takes at most 8 KiB per input act (remuda#713's
   -- session host), so a longer task is mailed and a short pointer is typed.

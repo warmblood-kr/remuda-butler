@@ -6,7 +6,7 @@ no PTY downgrade for a bound session.
 
 ## Fixed helper map
 
-One closed, internal kind→verb map — no caller text becomes a command:
+Closed internal kind→verb map; no caller text becomes a command.
 
 | kind | notice | adopt/channel |
 | --- | --- | --- |
@@ -22,9 +22,8 @@ for Codex/Claude; common-entrypoint unification is future work.
 ## Config
 
 `native.json` root `{version:1, opencode:{enabled}, codex:{enabled},
-claude:{enabled}}`; each section independent and default off. Unknown root or
-section keys and non-boolean values never enable. Missing section is
-`config_missing_section`.
+claude:{enabled}}`; each section independent and default off. Unknown keys or
+non-booleans never enable; a missing section is `config_missing_section`.
 
 ## Codex adoption
 
@@ -44,9 +43,9 @@ binding. Never kill an adopted server or the shared per-uid daemon dir.
 
 Explicit `claude.enabled` adds a second `remuda-channel` MCP entry to the
 member's private 0600 config plus
-`--dangerously-load-development-channels server:remuda-channel`. The channel
-consent prompt stays for the human; nothing auto-answers it. The ordinary
-`remuda` entry and argv are unchanged. Unopted Claude stays PTY/unavailable.
+`--dangerously-load-development-channels server:remuda-channel`. Consent stays
+human; nothing auto-answers it. The ordinary `remuda` entry and argv are
+unchanged. Unopted Claude stays PTY/unavailable.
 The channel publishes `claude-channel-v1` only after `mcp_initialized`; an ACK
 is never `accepted_queue`, and possible emission is `uncertain
 (channel_emitted_unconfirmed)`.
@@ -73,25 +72,32 @@ Suppression stays keyed by recipient + mail IDs.
 
 A native first task is always written to durable Butler mail; only the ordinary
 canonical pointer reaches the helper. No arbitrary task text, composer or
-Return. A failed mail write is reported to the leader, never typed instead.
+Return. This includes a sticky disabled native binding (failed row identity):
+the full body still goes to mail and is never typed. A failed write is reported
+to the leader, never typed instead.
 
-A fresh launch may race manifest/MCP publication. `binding_missing` parks only
-a just-launched binding, inside a bounded window (120s OpenCode/Codex, 30min
-for a human-answered Claude channel), with no attempt spend, no timer, no
-disable and no PTY. The first non-`binding_missing` answer ends the window and
-flushes queued unreserved mail. A missing manifest on an adopted or reloaded
-binding is dead: a formerly-published binding never becomes indefinite startup
-waiting. Corrupt/wrong identity stays distinct from genuinely absent.
+A fresh launch may race manifest/MCP publication. Only the core's typed
+`binding_missing` parks, and only a just-launched binding, inside a bounded
+window (120s OpenCode/Codex, 30min for a human-answered Claude channel), with
+no attempt spend, no timer, no disable and no PTY. A generic `invalid_binding`,
+wrong parent/owner or malformed manifest is dead and disables: absence and
+corruption are not interchangeable. The first non-`binding_missing` answer
+ends the window. A missing manifest on an adopted or reloaded binding is dead.
+
+The explicit entrypoint is `remuda._butler_notice.native_publication(alias)`;
+launch completion and successful adoption call it to flush queued unreserved
+mail. No core publication callback exists, so a publication after launch and
+outside a Butler-visible step still uses the bounded notice tick (~1s): an
+honest latency limit, not an event-driven guarantee.
 
 ## Status
 
 `remuda butler sessions` gains a read-only `NATIVE` section (alias, kind,
-state, reason, generation prefix). No path, nonce, socket, thread or token.
+state, reason, generation prefix); no path, nonce, socket, thread or token.
 
 ## Limits
 
-Codex adoption is proven against core 0.166 helpers; no Butler-owned live row
-was used in unit tests. Claude `_claude_notice`/`_claude_channel` are not
-installed in the pinned product binary yet; the builder entry is tested as
-config/argv only. Full owned new/chooser/main-boot startup-race smoke remains
-QA-owned. No merge, install, reload or rollout.
+Codex adoption is proven against core 0.166 helpers; live-row coverage is QA's.
+Claude helpers are not in the pinned binary yet; the builder entry is
+config/argv-tested only. Full owned launch smoke is QA-owned. No merge,
+install, reload or rollout.

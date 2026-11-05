@@ -71,6 +71,12 @@ function M.codex(self, name, socket, thread)
         .. tostring(result.generation):sub(1, 12))
     end
     if self.roster_save then pcall(self.roster_save) end
+    -- Adoption is a publication event: flush mail already waiting for this
+    -- session through the same immediate native path.
+    if remuda._butler_notice
+        and type(remuda._butler_notice.native_publication) == "function" then
+      pcall(remuda._butler_notice.native_publication, name)
+    end
     return { generation = result.generation }
   end
   if result.outcome == "unavailable" then

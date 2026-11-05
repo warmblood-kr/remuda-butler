@@ -567,7 +567,8 @@ local function channel_mcp_entry(native)
       or native.kind ~= "claude" or type(native.binding_dir) ~= "string" then return "" end
   return ',"remuda-channel":{"command":"remuda","args":["-s",'
     .. json_quote(server) .. ',"_claude_channel"],"env":{"REMUDA_BUTLER_BINDING_DIR":'
-    .. json_quote(native.binding_dir) .. '}}'
+    .. json_quote(native.binding_dir) .. ',"REMUDA_BUTLER_BINDING_NONCE":'
+    .. json_quote(native.nonce) .. '}}'
 end
 local function agent_mcp_json(token, native)
   local env = '"REMUDA_SESSION_CAPABILITY":' .. json_quote(token)
@@ -680,6 +681,7 @@ remuda.butler.native_launch.install({ paths = remuda._butler_paths,
   runner = remuda.process and remuda.process.run, fs = remuda.fs,
   random = remuda.random_bytes })
 remuda.exec("butler/native_codex")
+remuda.exec("butler/native_task")
 remuda.exec("butler/native_adopt")
 remuda.exec("butler/native_cli")
 remuda.butler.native_adopt.install({ bus = bus, launch = remuda.butler.native_launch,

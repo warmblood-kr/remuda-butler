@@ -288,8 +288,9 @@ assert(bus.notices.lead ~= nil and bus.notices.lead.due_at == now + 1,
   "unreserved mail stays queued for the next immediate attempt")
 assert(#timers == 0 and pty_sends == 0, "startup pending uses no timer and no PTY")
 respond({ outcome = "accepted_queue" })
-now = now + 1
-remuda._butler_deliver_notices()
+-- The explicit publication entrypoint, with no timer or poll tick fired.
+assert(remuda._butler_notice.native_publication("lead") == true,
+  "the publication hook flushes the queued mail")
 assert(bus.notices.lead == nil and #spawns == 2, "publication flushes the queued mail")
 assert(bus.agents.lead.native.awaiting_publication == nil,
   "the first accepted answer ends the startup window")
@@ -304,6 +305,17 @@ respond({ outcome = "definitely_not_written", reason = "binding_missing" })
 assert(N.deliver_notice("lead") == false, "a missing adopted manifest refuses")
 assert(bus.agents.lead.native.mode == "disabled", "a vanished published binding disables")
 assert(bus.notices.lead ~= nil and pty_sends == 0, "mail stays unread, never PTY")
+
+-- 5h. Only the typed absence parks. A malformed/wrong OpenCode binding is
+-- dead even during the fresh-launch window.
+reset()
+queue()
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+respond({ outcome = "definitely_not_written", reason = "invalid_binding" })
+assert(N.deliver_notice("lead") == false, "a malformed binding refuses")
+assert(bus.agents.lead.native.mode == "disabled",
+  "a generic invalid binding is dead, never parked")
 
 -- 5g. The startup window is bounded per protocol; an expired fresh launch is
 -- treated as dead rather than parked forever.
