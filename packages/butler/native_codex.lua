@@ -145,9 +145,11 @@ function M.adopt(fields, options)
   end
   if result.timed_out then return { outcome = "uncertain", reason = "timeout" } end
   local classified = M.classify(result.stdout, options)
-  -- A typed answer is authoritative even with a nonzero exit; an untyped
-  -- nonzero is unknown and never published as a binding.
-  if result.code ~= 0 and classified.outcome == "uncertain" then
+  -- A typed refusal with a nonzero exit is authoritative; an adopted answer is
+  -- only trusted on a clean exit. Anything else is unknown and never becomes
+  -- a binding.
+  if result.code ~= 0 then
+    if classified.outcome == "unavailable" then return classified end
     return { outcome = "uncertain", reason = "helper_exit_" .. tostring(result.code) }
   end
   return classified

@@ -122,6 +122,11 @@ local typed_refusal = module.adopt(fields, { json = codec,
   runner = runner({ code = 1, stdout = codec.encode({ outcome = "unavailable",
     reason = "thread_not_loaded" }) }) })
 assert(typed_refusal.outcome == "unavailable", "a typed refusal survives a nonzero exit")
+local nonzero_adopted = module.adopt(fields, { json = codec,
+  runner = runner({ code = 3, stdout = codec.encode({ outcome = "adopted",
+    generation = string.rep("cd", 32) }) }) })
+assert(nonzero_adopted.outcome == "uncertain",
+  "an adopted answer on a nonzero exit is never a binding")
 local no_runner = module.adopt(fields, { json = codec, runner = false })
 assert(no_runner.outcome == "uncertain" and no_runner.reason == "runner_unavailable",
   "a missing runner is uncertain")
