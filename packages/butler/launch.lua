@@ -162,7 +162,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   local launch_cwd = cwd or "."
   -- One decision per launch, made before remuda.new so the wrapper argv/env
   -- and the binding path belong to this exact launch only.
-  local native_plan
+  local native_plans = {}
   -- Owner scope: any session THIS Butler launches in a guarded project or worktree directory.
   local trust_checked, trust_ok = pcall(function() return chooser.trust_eligible(launch_cwd, trust_env()) end)
   local trust_eligible = trust_checked and trust_ok == true
@@ -193,12 +193,18 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       local telemetry = telemetry_by_kind[candidate_kind]
         or setup_telemetry(candidate_kind, { name = name, model = models[candidate_kind], memory_dir = memory_dir })
       telemetry_by_kind[candidate_kind] = telemetry
-      if candidate_kind == "opencode" and not native_plan and remuda._butler_native_launch then
+      if (candidate_kind == "opencode" or candidate_kind == "claude"
+          or candidate_kind == "codex")
+          and not native_plans[candidate_kind] and remuda._butler_native_launch then
         local decided, plan = pcall(remuda._butler_native_launch.plan, name, candidate_kind)
-        native_plan = decided and plan or { mode = "pty", reason = "native_plan_failed: " .. tostring(plan) }
-        _butler_session_trace("native_launch_plan", name .. " mode=" .. tostring(native_plan.mode)
-          .. " reason=" .. tostring(native_plan.reason or "ok"))
+        native_plans[candidate_kind] = decided and plan
+          or { mode = "pty", reason = "native_plan_failed: " .. tostring(plan) }
+        local chosen = native_plans[candidate_kind]
+        _butler_session_trace("native_launch_plan", name .. " kind=" .. candidate_kind
+          .. " mode=" .. tostring(chosen.mode)
+          .. " reason=" .. tostring(chosen.reason or "ok"))
       end
+      local native_plan = native_plans[candidate_kind]
       return { name = name, token = token, model = models[candidate_kind], cwd = launch_cwd,
         native = native_plan and native_plan.mode == "native" and native_plan or nil,
         sandbox = profile and profile.sandbox,
@@ -218,10 +224,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if candidate_kind == "opencode" then
         values.OPENCODE_CONFIG_CONTENT = remuda._butler_agent_support.opencode_config_content(
           spec and spec.token, spec and spec.model)
-        if spec and spec.native and remuda.butler and remuda.butler.native_launch then
-          local extra = remuda.butler.native_launch.env(spec.native)
-          for key, value in pairs(extra) do values[key] = value end
-        end
+      end
+      if spec and spec.native and remuda.butler and remuda.butler.native_launch then
+        local extra = remuda.butler.native_launch.env(spec.native)
+        for key, value in pairs(extra) do values[key] = value end
       end
       return values
     end,
@@ -296,12 +302,14 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   if remuda._butler_done then remuda._butler_done[actual] = nil end
   bus.tokens[token] = { id = identity.id, generation = bus.agents[actual].session_start_marker,
     instance_id = instance_id, instance_binding = instance_id and 1 or nil }
-  if native_plan and native_plan.mode == "native" and kind == "opencode" then
+  local selected_native = native_plans[kind]
+  if selected_native and selected_native.mode == "native"
+      and (kind == "opencode" or kind == "claude" or kind == "codex") then
     local live_row
     for _, row in ipairs(remuda.ls()) do
       if row.name == actual then live_row = row end
     end
-    bus.agents[actual].native = remuda._butler_native_launch.join(native_plan, live_row, instance_id)
+    bus.agents[actual].native = remuda._butler_native_launch.join(selected_native, live_row, instance_id)
     if bus.agents[actual].native.mode ~= "native" then
       _butler_session_trace("native_launch_join", actual .. " mode="
         .. tostring(bus.agents[actual].native.mode) .. " reason="
@@ -328,6 +336,26 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         .. guidance_text(guidance_blocks), "Welcome to Butler")
     -- First sight of a new member: nothing to replay or re-show (notice.lua).
     bus.unread_seeded[actual] = "launched"
+  end
+  -- A native session never receives arbitrary task text through the frozen
+  -- helper or the composer. Persist the whole task as durable Butler mail; the
+  -- ordinary native notice then carries only the canonical pointer after the
+  -- binding publishes. A failed write is reported, never typed instead.
+  local native_binding = bus.agents[actual].native
+  local native_task = remuda.butler and remuda.butler.native_task
+  if task and task ~= "" and native_task and native_task.route(bus.agents[actual]) then
+    native_task.queue({ queue_message = queue_message, mail_address = mail_address,
+      send = remuda._butler_send, trace = _butler_session_trace },
+      actual, parent, task)
+    task = ""
+  end
+  -- Launch completion is a real lifecycle point: if the wrapper/channel has
+  -- already published, flush queued unreserved mail now. A still-missing
+  -- manifest stays parked for the next explicit check/tick.
+  if type(native_binding) == "table" and native_binding.mode == "native"
+      and remuda._butler_notice
+      and type(remuda._butler_notice.native_publication) == "function" then
+    pcall(remuda._butler_notice.native_publication, actual)
   end
   -- A host-backed session takes at most 8 KiB per input act (remuda#713's
   -- session host), so a longer task is mailed and a short pointer is typed.

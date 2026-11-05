@@ -32,7 +32,12 @@ function M.rows()
         instance_id = agent.instance_id,
         native = type(agent.native) == "table" and type(agent.native.path) == "string"
           and agent.native.path ~= "" and type(agent.native.nonce) == "string"
-          and { path = agent.native.path, nonce = agent.native.nonce } or nil,
+          and { path = agent.native.path, nonce = agent.native.nonce,
+            kind = agent.native.kind, session = agent.native.row_id,
+            session_token = agent.native.session_token,
+            generation = agent.native.generation,
+            awaiting_publication = agent.native.awaiting_publication,
+            awaiting_since = agent.native.awaiting_since } or nil,
         status_path = type(agent.telemetry) == "table" and agent.telemetry.status_path or nil }
     end
   end
@@ -109,11 +114,20 @@ function M.adopt(sessions)
         telemetry = row.status_path and { status_path = row.status_path } or nil, adopted = true }
       if type(row.native) == "table" and type(row.native.path) == "string" and row.native.path ~= "" then
         -- Bound native mode is sticky: a missing session row id disables
-        -- delivery for this incarnation; it never falls back to PTY.
-        agent.native = { mode = live_id[name] and "native" or "disabled",
-          reason = live_id[name] and nil or "missing_row_id",
-          path = row.native.path, nonce = row.native.nonce,
-          row_id = live_id[name], instance = row.instance_id }
+        -- delivery for this incarnation; it never falls back to PTY. The
+        -- recorded session is diagnostic only, because a reload may refresh
+        -- the row id for the same opaque instance. A reload during a fresh
+        -- launch keeps its bounded publication marker; a published binding has
+        -- no marker and a missing manifest is dead.
+        local current = live_id[name]
+        agent.native = { mode = current and "native" or "disabled",
+          reason = current and nil or "missing_row_id",
+          kind = row.native.kind, path = row.native.path, nonce = row.native.nonce,
+          row_id = current, instance = row.instance_id,
+          session_token = row.native.session_token,
+          generation = row.native.generation,
+          awaiting_publication = row.native.awaiting_publication,
+          awaiting_since = row.native.awaiting_since }
       end
       if row.alias == "butler" then
         -- main.lua finishes the root row (telemetry, token, marker) from here.

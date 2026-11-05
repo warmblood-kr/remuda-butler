@@ -204,6 +204,75 @@ for offset, verb in ipairs({ "diagnostics", "diagnostics-list" }) do
     return remuda.fail(why, 2)
   end)
 end
+local NATIVE_CLI_SPEC = {
+  name = "remuda butler native",
+  verbs = {
+    ["adopt-codex"] = {
+      about = "Adopt an existing Codex TUI by the local socket and thread UUID from its fresh /status. Requires `codex.enabled: true` in native.json. Example: remuda butler native adopt-codex m1 --socket unix:///private/tmp/codex.sock --thread 0123...cdef",
+      options = {
+        { long = "socket", value = "PATH", required = true, help = "Local Codex app-server socket from /status" },
+        { long = "thread", value = "UUID", required = true, help = "Canonical lowercase thread UUID from /status" },
+      },
+      args = { { name = "ALIAS", help = "Live Codex session on this node" } },
+      next = "remuda butler native adopt-codex --help",
+    },
+    ["adopt-opencode"] = {
+      about = "Adopt an explicit already-running OpenCode server. The password is read from stdin (redirect a 0600 file), never argv. Requires `opencode.enabled: true` in native.json. Example: remuda butler native adopt-opencode m1 --endpoint http://127.0.0.1:4096 --conversation ses_... --password-stdin",
+      options = {
+        { long = "endpoint", value = "URL", required = true, help = "Exact http://127.0.0.1:PORT of the running server" },
+        { long = "conversation", value = "SES_ID", required = true, help = "Exact session id to adopt" },
+        { long = "password-stdin", help = "Read the OpenCode password from stdin" },
+      },
+      args = { { name = "ALIAS", help = "Live OpenCode session on this node" } },
+      next = "remuda butler native adopt-opencode --help",
+    },
+  },
+}
+local function native_tail(args)
+  local argv = {}
+  for index = 2, #args do argv[#argv + 1] = args[index] end
+  return argv
+end
+command(5.9, "native", "  remuda butler native adopt-codex ALIAS --socket PATH --thread UUID"
+  .. " | adopt-opencode ALIAS --endpoint URL --conversation SES_ID --password-stdin", function(args, caller)
+  -- Explicit owner action: an outside caller is the operator; an agent may
+  -- ask the root Butler, never its own session.
+  local identity = current_agent(caller)
+  if identity ~= nil then
+    local resolved, alias = pcall(resolve, identity)
+    if not resolved or alias ~= "butler" then
+      return remuda.fail("native adoption is an owner action; ask the root Butler\n"
+        .. "Next: remuda butler native --help", 1)
+    end
+  end
+  local report = cli_parser(NATIVE_CLI_SPEC, native_tail(args))
+  if report.kind == "help" then return report.text end
+  if not report.ok then
+    if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
+    error(report.text, 0)
+  end
+  local values = report.values
+  local parsed
+  if report.verb == "adopt-codex" then
+    parsed = { verb = "adopt-codex", session = values.ALIAS,
+      socket = values.socket, thread = values.thread }
+  else
+    if values["password-stdin"] ~= true then
+      return remuda.fail("adopt-opencode reads the password from stdin; add --password-stdin"
+        .. " and redirect a 0600 file\nNext: remuda butler native adopt-opencode --help", 2)
+    end
+    parsed = { verb = "adopt-opencode", session = values.ALIAS,
+      endpoint = values.endpoint, conversation = values.conversation }
+  end
+  local cli = remuda.butler and remuda.butler.native_cli
+  local adopt = remuda._butler_native_adopt
+  if not cli or not adopt then
+    return remuda.fail("native adoption is unavailable on this build", 1)
+  end
+  local text, why = cli.run_parsed(parsed, adopt, { password = caller and caller.stdin })
+  if text then return text end
+  return remuda.fail(why, 1)
+end)
 local QUOTA_CLI_SPEC = {
   name = "remuda butler",
   verbs = {

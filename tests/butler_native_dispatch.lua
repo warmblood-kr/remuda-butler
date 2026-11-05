@@ -184,4 +184,50 @@ local huge_result = module.dispatch(huge_request, { json = codec,
 assert(huge_result.outcome == "not_written" and huge_result.reason == "request_too_large",
   "an oversized wire request is a proven pre-write refusal")
 
+-- 7. The fixed per-kind command map: unknown kinds never run, and each
+-- protocol keeps its own strict pre-write/uncertain vocabulary.
+assert(module.verb("opencode") == "_agent_notice"
+  and module.verb("codex") == "_codex_notice" and module.verb("claude") == "_claude_notice"
+  and module.verb("ruby") == nil, "the verb map is closed and fixed")
+local function kind_case(kind, payload)
+  local spec
+  local outcome = module.dispatch(request, { json = codec, kind = kind,
+    runner = function(value) spec = value
+      return { code = 0, stdout = codec.encode(payload) } end })
+  return outcome, spec
+end
+local codex_accepted, codex_spec = kind_case("codex", { outcome = "accepted_queue" })
+assert(codex_accepted.outcome == "accepted" and codex_spec.argv[2] == "_codex_notice"
+  and #codex_spec.argv == 2, "Codex uses only _codex_notice")
+local claude_spec
+local claude_accepted = module.dispatch(request, { json = codec, kind = "claude",
+  runner = function(value) claude_spec = value
+    return { code = 0, stdout = codec.encode({ outcome = "accepted_queue" }) } end })
+assert(claude_accepted.outcome == "uncertain" and claude_spec.argv[2] == "_claude_notice",
+  "Claude uses _claude_notice and never invents accepted_queue")
+local startup = kind_case("codex", { outcome = "definitely_not_written",
+  reason = "binding_missing" })
+assert(startup.outcome == "not_written" and startup.startup_pending == true,
+  "an absent unpublished manifest is a startup-pending pre-write")
+for _, reason in ipairs({ "invalid_binding", "socket_dead", "endpoint_unverified",
+  "peer_mismatch", "version_mismatch", "thread_not_loaded" }) do
+  local dead = kind_case("codex", { outcome = "definitely_not_written", reason = reason })
+  assert(dead.outcome == "dead_binding", "Codex dead: " .. reason)
+end
+local unknown_reason = kind_case("codex", { outcome = "definitely_not_written",
+  reason = "made_up" })
+assert(unknown_reason.outcome == "uncertain", "unknown Codex refusals are uncertain")
+local emitted = kind_case("claude", { outcome = "uncertain",
+  reason = "channel_emitted_unconfirmed" })
+assert(emitted.outcome == "uncertain" and emitted.reason == "channel_emitted_unconfirmed",
+  "possible Claude emission is final and uncertain")
+local claude_dead = kind_case("claude", { outcome = "definitely_not_written",
+  reason = "bridge_gone" })
+assert(claude_dead.outcome == "dead_binding", "a gone Claude channel is a dead binding")
+local ran = false
+local bad_kind = module.dispatch(request, { json = codec, kind = "ruby",
+  runner = function() ran = true end })
+assert(bad_kind.outcome == "dead_binding" and bad_kind.reason == "invalid_kind" and not ran,
+  "an unknown kind fails closed before any command")
+
 print("ok - native request is frozen, validated and mapped without guessing")

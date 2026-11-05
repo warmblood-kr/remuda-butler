@@ -120,6 +120,15 @@ return {
     if next(state.active_choosers or {}) then return "a launch chooser is active" end
     if host._butler_launching or host._butler_start_pending then return "Butler is starting" end
     local bus = host._butler_bus or {}
+    -- A reload replaces the Lua image. Do not drop a native publication
+    -- watcher or an in-flight native dispatch mid-delivery; the message is
+    -- already durable mail, so waiting one refresh costs nothing.
+    if next(bus.notice_native_watchers or {}) then
+      return "native publication is waiting"
+    end
+    if next(bus.notice_native_dispatching or {}) then
+      return "native delivery is in flight"
+    end
     if next(bus.pending_tasks or {}) then return "mail delivery is pending" end
     for _, dialog in pairs(bus.dialog_states or {}) do
       if dialog.blocked or dialog.id or dialog.reporting then return "a managed dialog is active" end

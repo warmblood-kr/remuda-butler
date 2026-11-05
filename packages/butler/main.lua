@@ -558,16 +558,31 @@ local function deliver_message(message)
   if not delivered then error(why or "no Butler channel installed (try remuda-butler-inbox)", 0) end
   return notify_mail_delivery(message, delivered)
 end
-local function agent_mcp_json(token)
+-- The opted-in Claude channel is a second, separate MCP server entry in the
+-- same private file. The ordinary coordination entry stays unchanged, and
+-- neither entry carries a capability token: the channel reads only its private
+-- binding directory from the owned child environment.
+local function channel_mcp_entry(native)
+  if type(native) ~= "table" or native.mode ~= "native"
+      or native.kind ~= "claude" or type(native.binding_dir) ~= "string" then return "" end
+  -- No session env here: the MCP child inherits the core-assigned
+  -- REMUDA_SESSION_ID (the actual row id) from the spawn. Pre-filling the
+  -- alias would make two matching aliases hide canonical drift.
+  return ',"remuda-channel":{"command":"remuda","args":["_claude_channel"]'
+    .. ',"env":{"REMUDA_CLAUDE_BINDING_DIR":' .. json_quote(native.binding_dir)
+    .. ',"REMUDA_BUTLER_BINDING_NONCE":' .. json_quote(native.nonce) .. '}}'
+end
+local function agent_mcp_json(token, native)
   local env = '"REMUDA_SESSION_CAPABILITY":' .. json_quote(token)
   if runtime_dir then env = env .. ',"REMUDA_RUNTIME_DIR":' .. json_quote(runtime_dir) end
   return '{"mcpServers":{"remuda":{"command":"remuda","args":["-s",'
-    .. json_quote(server) .. ',"mcp"],"env":{' .. env .. '}}}}'
+    .. json_quote(server) .. ',"mcp"],"env":{' .. env .. '}}'
+    .. channel_mcp_entry(native) .. '}}'
 end
-local function agent_mcp_path(name, token)
+local function agent_mcp_path(name, token, native)
   local path = os.tmpname() .. "." .. name .. ".mcp.json"
   -- The file carries this member's capability: owner-only (0600).
-  remuda.butler.guard.write_private(path, agent_mcp_json(token))
+  remuda.butler.guard.write_private(path, agent_mcp_json(token, native))
   return path
 end
 -- json_quote escapes backslash and quote, which is also right for a TOML
@@ -667,6 +682,19 @@ remuda.butler.native_launch.install({ paths = remuda._butler_paths,
   config = remuda.butler.native_config, json = remuda.json,
   runner = remuda.process and remuda.process.run, fs = remuda.fs,
   random = remuda.random_bytes })
+remuda.exec("butler/native_codex")
+remuda.exec("butler/native_opencode")
+remuda.exec("butler/native_task")
+remuda.exec("butler/native_adopt")
+remuda.exec("butler/native_cli")
+remuda.butler.native_adopt.install({ bus = bus, launch = remuda.butler.native_launch,
+  config = remuda.butler.native_config, codex = remuda.butler.native_codex,
+  opencode = remuda.butler.native_opencode,
+  json = remuda.json, runner = remuda.process and remuda.process.run,
+  roster_save = function()
+    if remuda._butler_roster_save then return remuda._butler_roster_save() end
+  end,
+  trace = function(...) return _butler_session_trace(...) end })
 remuda.exec("butler/launch")
 local launch_agent = remuda._butler_launch_impl.launch_agent
 -- Mail notice policy, recovery and delivery live in notice.lua.

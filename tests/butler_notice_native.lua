@@ -41,7 +41,9 @@ local mail = {
   unread = function() return 1 end,
   find_message = function(id) return { id = id, from = { alias = "alice", id = "alice-id" } } end,
 }
-local alerts, spawns, pty_sends = {}, {}, 0
+local alerts, spawns, pty_sends, timers = {}, {}, 0, {}
+local timer_callbacks, random_calls = {}, 0
+local ls_calls = 0
 local rows = { { name = "lead", alive = true, attached = false, id = "ses_abc",
   instance_id = "instance-1" } }
 remuda = {
@@ -53,6 +55,15 @@ remuda = {
   _butler_chooser = { known_startup_modal = function() return false end },
   _butler_agent_startup = { opencode = { placeholders = {} } },
   _butler_notice_clock = function() return now end,
+  random_bytes = function(n)
+    random_calls = random_calls + 1
+    return string.char(random_calls % 256) .. string.rep("\0", n - 1)
+  end,
+  _butler_notice_after = function(seconds, fn)
+    timers[#timers + 1] = seconds
+    timer_callbacks[#timer_callbacks + 1] = fn
+    return { cancel = function() end }
+  end,
   _butler_session_trace = _butler_session_trace,
   json = codec,
   ls = function() return rows end,
@@ -76,15 +87,21 @@ local function reset()
       path = "/data/remuda/butler/bindings/lead/" .. string.rep("a", 32) .. "/manifest.json",
       nonce = string.rep("a", 32), row_id = "ses_abc", instance = "instance-1" } } }
   bus.notices, bus.notice_stuck, bus.notice_recovery = {}, {}, nil
-  bus.notice_native_alerts = {}
+  bus.pending_tasks, bus.notice_seen = {}, {}
+  bus.notice_native_alerts, bus.notice_native_dispatching = {}, {}
   rows = { { name = "lead", alive = true, attached = false, id = "ses_abc",
     instance_id = "instance-1" } }
   remuda.ls = function()
+    ls_calls = ls_calls + 1
     if on_ls then local hook = on_ls; on_ls = nil; hook() end
     return rows
   end
   unread = { n1 = true, n2 = true }
-  alerts, spawns, pty_sends = {}, {}, 0
+  alerts, spawns, pty_sends, timers = {}, {}, 0, {}
+  timer_callbacks, random_calls = {}, 0
+  bus.notice_native_watchers = {}
+  bus.notice_native_watcher_checks = {}
+  ls_calls = 0
   on_ls, on_retire = nil, nil
   local files = remuda._butler_notice_test_journal.files
   for key in pairs(files) do files[key] = nil end
@@ -134,10 +151,24 @@ assert(sent.text == "Butler message n1 arrived. Read it: MCP butler_inbox (or re
 assert(sent.session == "ses_abc" and sent.instance == "instance-1"
   and sent.binding == bus.agents.lead.native.path and sent.nonce == bus.agents.lead.native.nonce,
   "request carries the bound target")
-assert(sent.request_id:match("^msg_n1_%d+$"), "request id is frozen per dispatch")
+assert(sent.request_id:match("^msg_%x+$") and #sent.request_id == 36,
+  "request id is a per-dispatch CSPRNG claim")
 assert(bus.notices.lead == nil, "accepted delivery clears the queue")
 assert(remuda._butler_delivery_journal.state_of("lead-id", "n1") == "accepted_unread",
   "native acceptance is accepted_unread until the canonical read")
+
+-- 1b. Two attempts in the same clock second get distinct claims: the id is
+-- frozen per attempt, never derived from the first mail id or the clock.
+reset()
+queue({ "n1" })
+respond({ outcome = "accepted_queue" })
+assert(N.deliver_notice("lead") == true, "first same-second attempt completes")
+local first_claim = codec.decode(spawns[1].stdin).request_id
+queue({ "n2" })
+respond({ outcome = "accepted_queue" })
+assert(N.deliver_notice("lead") == true, "second same-second attempt completes")
+local second_claim = codec.decode(spawns[2].stdin).request_id
+assert(first_claim ~= second_claim, "same-second attempts never share a claim")
 
 -- 2. Multi-ID: one request, canonical count text.
 reset()
@@ -248,7 +279,364 @@ queue()
 assert(N.deliver_notice("lead") == false, "disabled mode defers")
 assert(#spawns == 0, "disabled mode never invokes the helper")
 
--- 6b. The very first ls in the snapshot must not change the decision under
+-- 5e. A fresh launch may race publication: a proven missing manifest parks
+-- without disable, attempt spend or timers, then flushes as soon as a later
+-- attempt reaches the binding.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "missing manifest parks the attempt")
+assert(bus.agents.lead.native.mode == "native", "startup pending never disables")
+assert(bus.notices.lead ~= nil and bus.notices.lead.due_at == now + 1,
+  "unreserved mail stays queued for the next immediate attempt")
+assert(#timers == 0 and pty_sends == 0, "startup pending uses no timer and no PTY")
+respond({ outcome = "accepted_queue" })
+-- The explicit publication entrypoint, with no timer or poll tick fired.
+assert(remuda._butler_notice.native_publication("lead") == true,
+  "the publication hook flushes the queued mail")
+assert(bus.notices.lead == nil and #spawns == 2, "publication flushes the queued mail")
+assert(bus.agents.lead.native.awaiting_publication == nil,
+  "the first accepted answer ends the startup window")
+
+-- 5f. A published/adopted binding that disappears is dead, not startup. The
+-- same typed reason must not become endless waiting.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = nil
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "a missing adopted manifest refuses")
+assert(bus.agents.lead.native.mode == "disabled", "a vanished published binding disables")
+assert(bus.notices.lead ~= nil and pty_sends == 0, "mail stays unread, never PTY")
+
+-- 5h. Only the typed absence parks. A malformed/wrong OpenCode binding is
+-- dead even during the fresh-launch window.
+reset()
+queue()
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+respond({ outcome = "definitely_not_written", reason = "invalid_binding" })
+assert(N.deliver_notice("lead") == false, "a malformed binding refuses")
+assert(bus.agents.lead.native.mode == "disabled",
+  "a generic invalid binding is dead, never parked")
+
+-- 5j. A fresh launch with no manifest is detected by a private-path stat, so
+-- no helper is spawned on every tick; the same tick flushes once it exists.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "accepted_queue" })
+now = now + 1
+remuda._butler_deliver_notices()
+assert(#spawns == 0 and bus.notices.lead ~= nil,
+  "a missing manifest is metadata-checked without spawning the helper")
+remuda.fs.realpath = function() return "/private/binding/manifest.json", nil end
+remuda._butler_deliver_notices()
+assert(#spawns == 1 and bus.notices.lead == nil,
+  "the first tick after publication flushes the queued mail")
+remuda.fs = nil
+
+-- 5k. Presence suppression is bounded: after the startup window expires with
+-- the manifest still absent, the helper runs once and the binding disables
+-- through the existing typed path; mail stays unread and no PTY is used.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now - 121
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+remuda._butler_deliver_notices()
+assert(#spawns == 1, "an expired window still attempts the helper once")
+assert(bus.agents.lead.native.mode == "disabled",
+  "an expired missing manifest disables through the existing path")
+assert(bus.notices.lead ~= nil and pty_sends == 0, "mail is preserved, never PTY")
+remuda.fs = nil
+
+-- 5m. A symlink at the manifest path is not definite absence: the helper, not
+-- the metadata precheck, classifies it. No io.open/FIFO path is used.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda._butler_paths = { file_exists = function() error("must not open the manifest") end }
+remuda.fs = {
+  is_symlink = function() return true, nil end,
+  realpath = function() error("the precheck must not resolve a link") end,
+}
+respond({ outcome = "definitely_not_written", reason = "invalid_binding" })
+now = now + 1
+remuda._butler_deliver_notices()
+assert(#spawns == 1 and bus.agents.lead.native.mode == "disabled",
+  "a symlink is handed to the strict helper and classified, not parked")
+assert(pty_sends == 0, "a corrupt manifest never falls back to PTY")
+remuda.fs, remuda._butler_paths = nil, nil
+
+-- 5n. A metadata error is not definite absence either: the helper decides.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "permission_denied" end }
+respond({ outcome = "definitely_not_written", reason = "invalid_binding" })
+now = now + 1
+remuda._butler_deliver_notices()
+assert(#spawns == 1, "a metadata error lets the helper classify the binding")
+
+-- 5o. A link-check error is also helper-decides, not definite absence.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = {
+  is_symlink = function() return nil, "permission_denied" end,
+  realpath = function() return nil, "not_found" end,
+}
+respond({ outcome = "definitely_not_written", reason = "invalid_binding" })
+now = now + 1
+remuda._butler_deliver_notices()
+assert(#spawns == 1, "a link-check error lets the helper classify the binding")
+remuda.fs = nil
+
+-- 5l. The same bounded expiry applies to the longer Claude window.
+reset()
+queue()
+bus.agents.lead.native.kind = "claude"
+bus.agents.lead.native.session_token = "ses_abc"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now - 1801
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+remuda._butler_deliver_notices()
+assert(#spawns == 1 and bus.agents.lead.native.mode == "disabled",
+  "the Claude startup window also expires into the dead path")
+assert(bus.notices.lead ~= nil and pty_sends == 0, "Claude mail stays unread, never PTY")
+remuda.fs = nil
+
+-- 5p. The lead-approved 50ms presence watcher: armed only after a typed
+-- binding_missing on a known initializing launch; fires once the private
+-- manifest appears and flushes the queued mail.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "binding_missing parks the attempt")
+assert(timers[#timers] == 0.05 and #timer_callbacks >= 1,
+  "a 50ms presence watcher is armed")
+remuda.fs.realpath = function() return "/private/binding/manifest.json", nil end
+respond({ outcome = "accepted_queue" })
+timer_callbacks[#timer_callbacks]()
+assert(#spawns == 2 and bus.notices.lead == nil,
+  "the watcher flushes the queued mail when the manifest appears")
+assert(bus.notice_native_watchers.lead == nil, "the watcher clears after the flush")
+remuda.fs = nil
+
+-- 5q. A replaced binding is fenced: the old watcher never flushes a new one.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "binding_missing parks the attempt")
+bus.agents.lead.native.nonce = string.rep("b", 32)
+respond({ outcome = "accepted_queue" })
+timer_callbacks[#timer_callbacks]()
+assert(#spawns == 1, "a replaced binding is not flushed by the old watcher")
+remuda.fs = nil
+
+-- 5r. Agent replacement and module replacement both stop the old watcher.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "park before replacement")
+local stale_agent = bus.agents.lead
+bus.agents.lead = { kind = "codex", id = stale_agent.id, instance_id = stale_agent.instance_id,
+  native = stale_agent.native }
+remuda.fs.realpath = function() return "/private/binding/manifest.json", nil end
+respond({ outcome = "accepted_queue" })
+timer_callbacks[#timer_callbacks]()
+assert(#spawns == 1 and bus.notice_native_watchers.lead == nil,
+  "agent replacement stops the old watcher without a helper")
+
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "park before module replacement")
+local live_module = remuda._butler_notice
+remuda._butler_notice = {}
+remuda.fs.realpath = function() return "/private/binding/manifest.json", nil end
+respond({ outcome = "accepted_queue" })
+timer_callbacks[#timer_callbacks]()
+assert(#spawns == 1 and bus.notice_native_watchers.lead == nil,
+  "module replacement stops the old watcher without a helper")
+remuda._butler_notice = live_module
+remuda.fs = nil
+
+-- 5s. A dead live row stops the watcher before any helper call.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "park before the row dies")
+rows[1].alive = false
+remuda.fs.realpath = function() return "/private/binding/manifest.json", nil end
+respond({ outcome = "accepted_queue" })
+timer_callbacks[#timer_callbacks]()
+assert(#spawns == 1 and bus.notice_native_watchers.lead == nil,
+  "a dead live row stops the watcher without a helper")
+remuda.fs = nil
+
+-- 5t. The row-liveness sample survives rearms: the counter cannot be a
+-- closure local, or every re-armed tick would look like the first one and
+-- enumerate the roster every 50ms. 39 absent ticks must sample twice.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "park before the cadence check")
+local base_ls = ls_calls
+for _ = 1, 39 do
+  timer_callbacks[#timer_callbacks]()
+end
+assert(ls_calls - base_ls == 2,
+  "39 absent ticks sample the row on tick 1 and tick 20 only, got "
+    .. tostring(ls_calls - base_ls))
+assert(bus.notice_native_watchers.lead ~= nil, "the watcher keeps re-arming")
+remuda.fs = nil
+N.complete_notice_recovery("lead", { message_ids = {} })
+assert(bus.notice_native_watcher_checks.lead == nil,
+  "a terminal outcome clears the sampling counter")
+
+-- 5u. A stopped generation never lends its sample counter to the next one:
+-- expiry, a binding/agent/module change or a published manifest leaves no
+-- count behind, so the next watcher still samples on its own first tick.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "park before the expiry stop")
+timer_callbacks[#timer_callbacks]()
+assert(bus.notice_native_watcher_checks.lead == 1, "the first tick samples and rearms")
+bus.agents.lead.native.awaiting_since = now - 121
+timer_callbacks[#timer_callbacks]()
+assert(bus.notice_native_watchers.lead == nil
+  and bus.notice_native_watcher_checks.lead == nil,
+  "a genuinely expired window stops and clears its counter")
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "park the new generation")
+local before = ls_calls
+timer_callbacks[#timer_callbacks]()
+assert(ls_calls == before + 1, "the new generation samples on its first tick")
+remuda.fs = nil
+N.complete_notice_recovery("lead", { message_ids = {} })
+
+-- 5g. The startup window is bounded per protocol; an expired fresh launch is
+-- treated as dead rather than parked forever.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now - 121
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "an expired startup window refuses")
+assert(bus.agents.lead.native.mode == "disabled", "no indefinite startup waiting")
+
+-- 5i. Claude uses its own verb and the same canonical row-id session, and
+-- possible emission is final uncertain: no retry, no disable, no PTY.
+reset()
+queue()
+bus.agents.lead.native.kind = "claude"
+bus.agents.lead.native.session_token = "ses_abc"
+respond({ outcome = "uncertain", reason = "channel_emitted_unconfirmed" })
+assert(N.deliver_notice("lead") == false, "possible Claude emission is uncertain")
+assert(spawns[1].argv[2] == "_claude_notice", "Claude uses only _claude_notice")
+local claude_sent = codec.decode(spawns[1].stdin)
+assert(claude_sent.session == "ses_abc" and claude_sent.session ~= "lead",
+  "Claude request carries the canonical row id, not the alias")
+assert(bus.agents.lead.native.mode == "native", "uncertainty never disables Claude")
+assert(pty_sends == 0, "Claude uncertainty never falls back to PTY")
+assert(remuda._butler_delivery_journal.state_of("lead-id", "n1") == "uncertain",
+  "the Claude attempt is durably uncertain")
+
+-- 6a. A native arrival is dispatched in the notify call itself: no quiet or
+-- cap timer, no PTY, and a pending first task or attached pane does not hold
+-- it back.
+reset()
+unread.imm1 = true
+rows[1].attached, rows[1].human_idle = true, false
+bus.pending_tasks.lead = { marker = "first-task" }
+respond({ outcome = "accepted_queue" })
+assert(remuda._butler_notify("lead", "Butler message imm1 arrived. Read it: remuda butler inbox",
+  "imm1") == true, "the native notice is dispatched immediately")
+assert(#spawns == 1 and #timers == 0 and pty_sends == 0,
+  "native uses no timer, no PTY and one helper call")
+assert(bus.notices.lead == nil, "an accepted native notice clears the queue")
+assert(bus.pending_tasks.lead ~= nil, "the pending task is not consumed by the notice")
+
+-- 6b. A native re-show is equally immediate even while a task owns the pane.
+reset()
+unread.imm2 = true
+bus.pending_tasks.lead = { marker = "first-task" }
+respond({ outcome = "accepted_queue" })
+assert(remuda._butler_notify("lead", "Butler message imm2 arrived. Read it: remuda butler inbox",
+  "imm2", true) == true, "the native re-show is dispatched immediately")
+assert(#spawns == 1 and #timers == 0 and pty_sends == 0,
+  "a native re-show uses no timer, no PTY and one helper call")
+
+-- 6c. The same notify for an unbound PTY session still coalesces.
+reset()
+bus.agents.lead.native = nil
+unread.pty1 = true
+assert(remuda._butler_notify("lead", "Butler message pty1 arrived. Read it: remuda butler inbox",
+  "pty1") == false, "the PTY notice is queued, not sent")
+assert(#spawns == 0 and #timers == 2 and timers[1] == 10 and timers[2] == 2,
+  "the PTY path keeps its cap and quiet timers")
+
+-- 6d. The very first ls in the snapshot must not change the decision under
 -- already-chosen native text: toggle to disabled => zero helper, zero PTY.
 reset()
 queue()

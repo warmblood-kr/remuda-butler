@@ -62,6 +62,7 @@ remuda = {
   _butler_chooser = { known_startup_modal = function() return false end },
   _butler_agent_startup = { opencode = { placeholders = {} } },
   _butler_notice_clock = function() return 2000 end,
+  random_bytes = function(n) return string.rep("\7", n) end,
   _butler_session_trace = function(event, detail) traced[#traced + 1] = { event, detail } end,
   json = codec,
   mkdir = function() return true end,
@@ -83,9 +84,24 @@ bus.agents.lead = { id = "lead-id", alias = "lead", session_name = "lead", kind 
 assert(roster.save() == true and saved_roster, "the roster saves the binding")
 local saved_row = codec.decode(saved_roster).rows[1]
 assert(saved_row.native.path == binding and saved_row.native.nonce == nonce,
-  "only path and nonce persist")
-assert(saved_row.native.row_id == nil and saved_row.native.mode == nil,
-  "the live row id and diagnostic mode are not persisted")
+  "the binding persists")
+assert(saved_row.native.session == "ses_old" and saved_row.native.kind == nil,
+  "the bound session and kind persist without an endpoint")
+assert(saved_row.native.awaiting_publication == nil,
+  "a published binding has no startup marker")
+assert(saved_row.native.socket == nil and saved_row.native.thread == nil
+  and saved_row.native.mode == nil, "no endpoint, thread or diagnostic mode persists")
+
+-- 1b. A reload during a fresh launch keeps the bounded startup marker.
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = 1234
+assert(roster.save() == true, "a fresh-launch binding saves")
+local fresh_row = codec.decode(saved_roster).rows[1]
+assert(fresh_row.native.awaiting_publication == true
+  and fresh_row.native.awaiting_since == 1234, "the startup marker persists")
+bus.agents.lead.native.awaiting_publication = nil
+bus.agents.lead.native.awaiting_since = nil
+assert(roster.save() == true, "the published state saves again")
 
 -- 2. Same-instance adoption keeps that exact fixed binding and the fresh row.
 bus.agents, bus.tokens = {}, {}
