@@ -23,6 +23,16 @@ local function free_of_native(agent)
   return type(agent.native) ~= "table" or agent.native.mode ~= "native"
 end
 
+-- The helper yields. An install is valid only if the exact agent object and
+-- module image are still current and nothing bound it in the meantime; a
+-- reload or a concurrent adoption must never be overwritten.
+local function still_current(self, name, agent)
+  if self.bus.agents[name] ~= agent then return false end
+  if not free_of_native(agent) then return false end
+  local installed = remuda.butler and remuda.butler.native_adopt
+  return installed == M
+end
+
 local function config_state(self, name, kind)
   local path = self.launch.config_path and self.launch.config_path()
   if not path then return { enabled = false, reason = "config_home_unavailable" } end
@@ -57,8 +67,10 @@ function M.codex(self, name, socket, thread)
   local result = self.codex.adopt({ binding = binding, nonce = nonce,
     session = row.id, socket = socket, thread = thread },
     { json = self.json, runner = self.runner, remuda = self.remuda })
-  -- Adoption yields in the helper. Never attach a binding to a replaced row.
-  if not same_identity(live_row(self.list, name), identity) then
+  -- Adoption yields in the helper. Never attach a binding to a replaced row,
+  -- a replaced agent object/module or a decision another adoption already made.
+  if not same_identity(live_row(self.list, name), identity)
+      or not still_current(self, name, agent) then
     return nil, "session_replaced_during_adopt"
   end
   if type(result) ~= "table" then return nil, "uncertain: helper_failed" end
@@ -112,8 +124,10 @@ function M.opencode(self, name, endpoint, conversation, password)
     session = row.id, endpoint = endpoint, conversation = conversation,
     password = password },
     { json = self.json, runner = self.runner, remuda = self.remuda })
-  -- Adoption yields in the helper. Never attach a binding to a replaced row.
-  if not same_identity(live_row(self.list, name), identity) then
+  -- Adoption yields in the helper. Never attach a binding to a replaced row,
+  -- a replaced agent object/module or a decision another adoption already made.
+  if not same_identity(live_row(self.list, name), identity)
+      or not still_current(self, name, agent) then
     return nil, "session_replaced_during_adopt"
   end
   if type(result) ~= "table" then return nil, "uncertain: helper_failed" end

@@ -86,6 +86,41 @@ assert(result2 == nil and why2 == "session_replaced_during_adopt",
   "a replaced row is refused after the yield")
 assert(bus2.agents.m1.native == nil, "no half-binding is attached")
 
+-- 2b. A reload or concurrent adoption during the helper yield is never
+-- overwritten, even when the live row itself is unchanged.
+local replaced_agent
+replaced_agent = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
+  { during = function()
+      local fresh = { kind = "codex", id = "id-fresh" }
+      replaced_agent.bus.agents.m1 = fresh
+    end })
+local _, replaced_agent_why = adopt_module.codex(replaced_agent, "m1", SOCKET, UUID)
+assert(replaced_agent_why == "session_replaced_during_adopt",
+  "a replaced agent object is refused after the yield")
+assert(replaced_agent.bus.agents.m1.native == nil, "the new agent gets no stale binding")
+
+local concurrent
+concurrent = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
+  { during = function()
+      concurrent.bus.agents.m1.native = { mode = "native", kind = "codex",
+        path = "/already/bound", row_id = "ses_row", instance = "instance-1" }
+    end })
+local _, concurrent_why = adopt_module.codex(concurrent, "m1", SOCKET, UUID)
+assert(concurrent_why == "session_replaced_during_adopt",
+  "a concurrent adoption wins")
+assert(concurrent.bus.agents.m1.native.path == "/already/bound",
+  "the newer decision is not overwritten")
+
+local module_live = remuda.butler.native_adopt
+local reloaded
+reloaded = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
+  { during = function() remuda.butler.native_adopt = {} end })
+local _, reloaded_why = adopt_module.codex(reloaded, "m1", SOCKET, UUID)
+remuda.butler.native_adopt = module_live
+assert(reloaded_why == "session_replaced_during_adopt",
+  "a reloaded module never installs through the old image")
+assert(reloaded.bus.agents.m1.native == nil, "the stale module attaches no binding")
+
 -- 3. Opt-in, identity and availability failures create no binding.
 local off, off_bus = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
   { config_off = true })
@@ -197,6 +232,33 @@ oc_unavailable.bus.agents.m1.kind = "opencode"
 local _, oc_unavailable_why = adopt_module.opencode(oc_unavailable, "m1",
   "http://127.0.0.1:4096", "ses_abc", "x")
 assert(oc_unavailable_why == "unavailable: auth", "the typed refusal is reported")
+
+-- 7b. The same post-yield fences apply to OpenCode.
+local oc_replaced_agent = fixture({ outcome = "adopted", generation = "10" })
+oc_replaced_agent.bus.agents.m1.kind = "opencode"
+oc_replaced_agent.opencode.adopt = function()
+  oc_replaced_agent.bus.agents.m1 = { kind = "opencode", id = "id-fresh" }
+  return { outcome = "adopted", generation = "10" }
+end
+local _, oc_replaced_agent_why = adopt_module.opencode(oc_replaced_agent, "m1",
+  "http://127.0.0.1:4096", "ses_abc", "x")
+assert(oc_replaced_agent_why == "session_replaced_during_adopt",
+  "a replaced OpenCode agent object is refused")
+assert(oc_replaced_agent.bus.agents.m1.native == nil, "no stale OpenCode binding")
+
+local oc_concurrent = fixture({ outcome = "adopted", generation = "10" })
+oc_concurrent.bus.agents.m1.kind = "opencode"
+oc_concurrent.opencode.adopt = function()
+  oc_concurrent.bus.agents.m1.native = { mode = "native", kind = "opencode",
+    path = "/already/bound", row_id = "ses_row", instance = "instance-1" }
+  return { outcome = "adopted", generation = "10" }
+end
+local _, oc_concurrent_why = adopt_module.opencode(oc_concurrent, "m1",
+  "http://127.0.0.1:4096", "ses_abc", "x")
+assert(oc_concurrent_why == "session_replaced_during_adopt",
+  "a concurrent OpenCode adoption wins")
+assert(oc_concurrent.bus.agents.m1.native.path == "/already/bound",
+  "the newer OpenCode decision is not overwritten")
 
 -- 8. OpenCode CLI: endpoint and conversation on argv, password only on stdin.
 local oc_parsed = assert(cli.parse({ "adopt-opencode", "m1", "--endpoint",
