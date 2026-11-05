@@ -1717,6 +1717,10 @@ arm_native_watcher = function(session, native)
     if type(live) ~= "table" or live.mode ~= "native" then return end
     if not same_native_binding(frozen_native_binding(live), frozen) then return end
     if not missing_manifest_is_startup(live) then return end
+    -- Stop on a confirmed dead/replaced live row. A transient listing failure
+    -- is not proof of death; let the helper's own preflight decide.
+    local row, row_why = native_row(session, live)
+    if not row and row_why ~= "session_unverified" then return end
     if not native_manifest_present(live) then
       arm_native_watcher(session, live)
       return

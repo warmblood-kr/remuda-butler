@@ -498,6 +498,24 @@ assert(#spawns == 1 and bus.notice_native_watchers.lead == nil,
 remuda._butler_notice = live_module
 remuda.fs = nil
 
+-- 5s. A dead live row stops the watcher before any helper call.
+reset()
+queue()
+bus.agents.lead.native.kind = "codex"
+bus.agents.lead.native.awaiting_publication = true
+bus.agents.lead.native.awaiting_since = now
+remuda.fs = { is_symlink = function() return false, nil end,
+  realpath = function() return nil, "not_found" end }
+respond({ outcome = "definitely_not_written", reason = "binding_missing" })
+assert(N.deliver_notice("lead") == false, "park before the row dies")
+rows[1].alive = false
+remuda.fs.realpath = function() return "/private/binding/manifest.json", nil end
+respond({ outcome = "accepted_queue" })
+timer_callbacks[#timer_callbacks]()
+assert(#spawns == 1 and bus.notice_native_watchers.lead == nil,
+  "a dead live row stops the watcher without a helper")
+remuda.fs = nil
+
 -- 5g. The startup window is bounded per protocol; an expired fresh launch is
 -- treated as dead rather than parked forever.
 reset()
