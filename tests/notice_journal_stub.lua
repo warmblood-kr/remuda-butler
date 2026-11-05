@@ -1,6 +1,10 @@
 -- Shared in-memory delivery journal for standalone notice tests.
 -- The production module is loaded unchanged; only its storage, clock, codec and
 -- hash seams are injected, so tests exercise the real validation and states.
+-- The production module publishes itself on the core global. A standalone run
+-- of this helper has none; the tests that use it inject their own `remuda`
+-- first, so only create the empty table when it is genuinely absent.
+remuda = remuda or {}
 local journal_module = dofile("packages/butler/delivery_journal.lua")
 local files = {}
 
