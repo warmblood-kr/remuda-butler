@@ -1550,6 +1550,15 @@ function reconcile_retry.remaining_ms()
   return math.max(0, reconcile_retry.retry_at_ms - remuda.clock())
 end
 remuda._butler_reconcile_retry = reconcile_retry
+-- An explicit root --agent is a strict singleton, and only for a fresh root.
+-- A live/adopted root keeps its kind; an omitted flag keeps configured order.
+local function root_start_order(fresh, requested)
+  if fresh and type(requested) == "string" and requested ~= "" then
+    return { requested }
+  end
+  return configured_agent_order()
+end
+remuda._butler_root_start_order = root_start_order
 local function launch_butler()
   local requested_name = butler_name or remuda._butler_initial_name
   local stale_session = session_exists(requested_name)
@@ -1581,7 +1590,8 @@ local function launch_butler()
   remuda._butler_launching = true
   remuda._butler_start_pending = true
   if stale_session then pcall(remuda.close, requested_name) end
-  local order = configured_agent_order()
+  local order = root_start_order(existing_butler == nil,
+    launch_options and launch_options.agent)
   local telemetry_by_kind = {}
   local choose_opts = {
     name = requested_name, cwd = butler_session_cwd, argv = remuda._butler_argv,

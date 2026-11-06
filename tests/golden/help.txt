@@ -1,6 +1,12 @@
 remuda butler — coordination for managed agents
 Run `remuda butler <verb> --help` for one command's arguments and options.
 
+Root startup:
+  remuda butler [--agent KIND] [--headless]
+  --agent KIND  fixed agent kind for a fresh root (example: remuda butler --agent codex)
+  --headless    start without entering the Remuda TUI
+  An existing root keeps its kind.
+
 Mail:
   remuda butler send <to> "<message>" | <to> - | <to> --file PATH
   remuda butler send --from <from> <to> <message...> | --from <from> --file PATH <to>

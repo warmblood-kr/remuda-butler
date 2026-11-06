@@ -46,6 +46,7 @@ end
 
 T.test("remuda butler help, --help and -h print the same grouped sections", function()
   start_butler()
+  local selected_before = T.eval('return tostring(remuda._butler_selected_agent)')
   local help = butler("help")
   T.eq(help.code, 0, "help exit")
   T.eq(help.stderr, "", "help stderr")
@@ -55,8 +56,16 @@ T.test("remuda butler help, --help and -h print the same grouped sections", func
     T.eq(other.stdout, help.stdout, flag .. " must print the grouped help")
   end
   local text = help.stdout
-  T.eq(headings(text), "Mail:|Sessions and teams:|Approvals:|Matrix:|Schedule:|Health and accounts:|Native delivery:|Switches and input:|Notes:",
+  T.eq(headings(text), "Root startup:|Mail:|Sessions and teams:|Approvals:|Matrix:|Schedule:|Health and accounts:|Native delivery:|Switches and input:|Notes:",
     "help sections: " .. text)
+  T.expect(text:find("Root startup:\n  remuda butler [--agent KIND] [--headless]\n"
+      .. "  --agent KIND  fixed agent kind for a fresh root"
+      .. " (example: remuda butler --agent codex)\n"
+      .. "  --headless    start without entering the Remuda TUI\n"
+      .. "  An existing root keeps its kind.", 1, true) ~= nil,
+    "root startup help: " .. text)
+  T.eq(T.eval('return tostring(remuda._butler_selected_agent)'), selected_before,
+    "help/-h must not start or replace a root")
   local ok, line = headed_blocks_separated(text)
   T.expect(ok, "section " .. tostring(line) .. " is not preceded by a blank line: " .. text)
   T.expect(text:find("Mail:\n  remuda butler send <to>", 1, true), "mail verbs under Mail: " .. text)
