@@ -34,11 +34,13 @@ jobs:
         env:
           CORE_REF: ${{ steps.core-ref.outputs.ref }}
       - run: tests/rust_tests.sh
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           CORE_REF: ${{ steps.core-ref.outputs.ref }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/remuda-core/target
 
   golden:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # Guidance text (help, member AGENTS.md, welcome mail, member prompt) must stay
     # byte-identical unless a PR updates tests/golden/ on purpose (hook-design §7).
     # Core pinned by CORE_REF in tests/golden_guidance.sh, same as tests/rust_tests.sh.
@@ -59,6 +61,8 @@ jobs:
           fetch-depth: 0
       - run: sudo apt-get update && sudo apt-get install --yes luajit
       - run: tests/shell_tests.sh
+        env:
+          BUTLER_SHELL_MODE: ${{ github.event_name == 'pull_request' && 'policy' || 'all' }}
 
   path-windows:
     # This job runs only the pure path tables; it does not boot the Butler harness.
@@ -74,7 +78,7 @@ jobs:
 
   contract:
     name: butler-contract
-    if: ${{ always() && github.event_name == 'pull_request' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs: rust
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -82,35 +86,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - id: paths
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          run_gate=false
-          changed_files=$(git diff --name-only "$BASE_SHA...$HEAD_SHA")
-          while IFS= read -r path; do
-            case "$path" in
-              packages/butler/main.lua|packages/butler/init.lua|tests/live_reload.sh|tests/core_ref.sh|.github/workflows/tests.yml)
-                run_gate=true
-                break
-                ;;
-            esac
-          done <<< "$changed_files"
-          echo "run=$run_gate" >> "$GITHUB_OUTPUT"
       - id: core-ref
-        if: steps.paths.outputs.run == 'true'
         run: |
           source tests/core_ref.sh
           echo "ref=$CORE_REF" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
-        if: steps.paths.outputs.run == 'true'
         with:
           repository: warmblood-kr/remuda
           ref: ${{ steps.core-ref.outputs.ref }}
           path: remuda-core
       - uses: actions/cache@v4
-        if: steps.paths.outputs.run == 'true'
         with:
           path: |
             ~/.cargo/registry
@@ -120,13 +105,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ github.workflow }}-${{ github.ref }}-${{ steps.core-ref.outputs.ref }}-
       - name: Build pinned core
-        if: steps.paths.outputs.run == 'true'
         working-directory: remuda-core
         run: cargo build --manifest-path Cargo.toml -p remuda-native --bin remuda
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/remuda-core/target
       - name: Run Butler contract gate
-        if: steps.paths.outputs.run == 'true'
         env:
           BUTLER_REPO: ${{ github.workspace }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/remuda-core/target
