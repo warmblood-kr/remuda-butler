@@ -148,6 +148,20 @@ function resultRefused(event) {
 
 const CODE_OK = { ok: true, completed: true, success: true, succeeded: true }
 
+// One code-mode toolCalls entry. A success status alone is not a delivery: the
+// entry must carry a result that is not an error or a refusal, otherwise the
+// call failed and must not suppress the reminder.
+export function callDelivered(call) {
+  if (!call || typeof call !== "object") return false
+  if (!REPORT_TOOL.test(toolKey(call.tool))) return false
+  if (CODE_OK[String(call.status || "").toLowerCase()] !== true) return false
+  const result = call.result
+  if (result === undefined || result === null || typeof result !== "object") return false
+  if (result.isError === true || result.error === true) return false
+  if (result.output && result.output.error === true) return false
+  return !REFUSAL.test(textOf(result))
+}
+
 export function isLeaderReport(event) {
   const tool = String((event && event.tool) || "")
   if (REPORT_TOOL.test(toolKey(tool))) return !resultRefused(event)
@@ -163,8 +177,7 @@ export function isLeaderReport(event) {
     const result = (event && event.result) || {}
     const calls = (result.metadata && result.metadata.toolCalls) || (result.output && result.output.toolCalls)
     if (!Array.isArray(calls)) return false
-    return calls.some((call) => call && REPORT_TOOL.test(toolKey(call.tool))
-      && CODE_OK[String(call.status || "").toLowerCase()] === true)
+    return calls.some(callDelivered)
   }
   return false
 }

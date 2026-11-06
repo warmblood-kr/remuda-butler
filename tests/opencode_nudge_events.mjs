@@ -16,6 +16,7 @@ import {
   forget,
   managedByButler,
   isLeaderReport,
+  callDelivered,
   shellReports,
 } from "./nudge.mjs"
 
@@ -90,6 +91,7 @@ const reportTool = (status = "completed") => ({
   await turn(nudge, "msg_a")
   check("one nudge per finished user turn", sent.length === 1, sent.length)
   check("nudge text does not claim success", sent[0] && /have finished this task/.test(sent[0].text), sent[0])
+  check("nudge text makes no completion claim", sent[0] && !/\b(completed|succeeded|successfully|is done)\b/i.test(sent[0].text), sent[0])
   check("nudge names the reporting verb", sent[0] && /send-to-leader/.test(sent[0].text))
   check("nudge targets the event session", sent[0] && sent[0].sessionID === SID)
   check("nudge is described for the transcript", sent[0] && sent[0].description === "butler completion nudge")
@@ -187,7 +189,7 @@ const reportTool = (status = "completed") => ({
       tool: "execute",
       status: "completed",
       input: { code: "await tools.remuda.butler_send_to_leader({text:'done'})" },
-      result: { metadata: { toolCalls: [{ tool: "remuda.butler_send_to_leader", status: "ok" }] } },
+      result: { metadata: { toolCalls: [{ tool: "remuda.butler_send_to_leader", status: "ok", result: { output: "queued msg_1 for butler" } }] } },
     },
   })
   check("successful code-mode report suppresses", codemode.sent.length === 0, codemode.sent.length)
@@ -198,7 +200,7 @@ const reportTool = (status = "completed") => ({
       tool: "execute",
       status: "completed",
       input: { code: "await tools.remuda.butler_send_to_leader({text:'done'})" },
-      result: { metadata: { toolCalls: [{ tool: "remuda.butler_send_to_leader", status: "error" }] } },
+      result: { metadata: { toolCalls: [{ tool: "remuda.butler_send_to_leader", status: "error", result: { output: "unknown caller" } }] } },
     },
   })
   check("failed code-mode report does not suppress", codeRefused.sent.length === 1, codeRefused.sent.length)
@@ -352,11 +354,27 @@ const reportTool = (status = "completed") => ({
     input: { code: "await tools.remuda.butler_send_to_leader({text:'done'})" },
     result: { metadata: { toolCalls: [{ tool: "remuda.butler_send_to_leader" }] } },
   }) === false)
-  check("code-mode ok call is a report", isLeaderReport({
+  check("code-mode ok call with a delivered result is a report", isLeaderReport({
+    tool: "execute",
+    input: { code: "await tools.remuda.butler_send_to_leader({text:'done'})" },
+    result: { metadata: { toolCalls: [{ tool: "remuda.butler_send_to_leader", status: "ok", result: { output: "queued msg_1" } }] } },
+  }) === true)
+  check("code-mode success status with isError result is not a report", isLeaderReport({
+    tool: "execute",
+    input: { code: "await tools.remuda.butler_send_to_leader({text:'done'})" },
+    result: { metadata: { toolCalls: [{ tool: "remuda.butler_send_to_leader", status: "ok", result: { isError: true } }] } },
+  }) === false)
+  check("code-mode success status with refusal body is not a report", isLeaderReport({
+    tool: "execute",
+    input: { code: "await tools.remuda.butler_send_to_leader({text:'done'})" },
+    result: { metadata: { toolCalls: [{ tool: "remuda.butler_send_to_leader", status: "ok", result: { output: "unknown caller: run from a Butler session" } }] } },
+  }) === false)
+  check("code-mode success status without a result is not a report", isLeaderReport({
     tool: "execute",
     input: { code: "await tools.remuda.butler_send_to_leader({text:'done'})" },
     result: { metadata: { toolCalls: [{ tool: "remuda.butler_send_to_leader", status: "ok" }] } },
-  }) === true)
+  }) === false)
+  check("callDelivered rejects a null call", callDelivered(null) === false)
 }
 
 // 15. Direct unit tests for the hoisted state units.

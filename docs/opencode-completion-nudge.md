@@ -66,7 +66,10 @@ Sent only when all of these hold for the turn that just succeeded:
   purpose: a completed direct MCP tool named `butler_send_to_leader` (or the old
   `butler_report`); a shell segment that invokes `remuda ... butler
   send-to-leader` in command position with exit 0 and no refusal text; or a code
-  mode `toolCalls` entry with that tool name and a known success status. A
+  mode `toolCalls` entry with that tool name, a known success status **and** a
+  per-call result that is not an error or refusal (a success status alone does
+  not prove delivery; the real tool event shape carries the result on the direct
+  MCP event). A
   read-only mention (`cat`, `rg`, echo, a comment in code) never counts. Anything
   ambiguous fails closed: no result, an error flag, refusal text, an unknown code
   mode status, a missing shell exit, or a verb that only appears inside a quoted
