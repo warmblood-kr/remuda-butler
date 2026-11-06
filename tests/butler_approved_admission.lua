@@ -40,19 +40,32 @@ local unknown='Synthetic messy redraw\nfooter has no prompt glyph'
 check(unknown,true)
 assert(remuda._butler_notify_policy('codex')==false,'unsolicited notice policy is unchanged')
 check('Synthetic history\n› Ask Codex to do anything',true)
-check('Synthetic history\n› actual human draft',false,'composer_nonempty')
+-- Owner input no longer judges the composer (#568). A leftover draft is
+-- admitted; only a real modal, workflow ownership, a live human or an
+-- identity change still refuses.
+check('Synthetic history\n› actual human draft',true)
+local function owner_policy(skip)
+  local ok, allowed, why = pcall(remuda._butler_approved_text_policy, 'codex', nil, nil, skip)
+  assert(ok, tostring(why))
+  return allowed, why
+end
+screen='Synthetic history\n› actual human draft'
+local allowed, why = owner_policy(true)
+assert(allowed==true and why=='composer_skipped', tostring(allowed)..':'..tostring(why))
+allowed, why = owner_policy(false)
+assert(allowed==false and why=='composer_nonempty', tostring(allowed)..':'..tostring(why))
 -- Menu geometry alone cannot prove the selected row is a draft. Only the
 -- last/current prompt's own boundary/footer can disambiguate it.
 local menu='Choose a display theme\n\n› 1. Light\n  2. Dark\n\nEnter to choose'
 check(menu,true)
 local numbered='────────────────────\n› 1. Light\n  2. Dark\n────────────────────\n? for shortcuts'
-check(numbered,false,'composer_nonempty')
+check(numbered,true)
 local boxed='╭──────────────────╮\n│ › 1. Light       │\n│   2. Dark        │\n╰──────────────────╯'
 check(boxed,true)
-check(boxed..'\n? for shortcuts',false,'composer_nonempty')
+check(boxed..'\n? for shortcuts',true)
 local unnumbered='╭──────────────────╮\n│ › Light          │\n│   Dark           │\n╰──────────────────╯'
 check(unnumbered,true)
-check(unnumbered..'\n? for shortcuts',false,'composer_nonempty')
+check(unnumbered..'\n? for shortcuts',true)
 local long_menu='Choose theme\n› 1. Light'
 for i=2,10 do long_menu=long_menu..'\n  '..i..'. Other' end
 long_menu=long_menu..'\nEnter to choose'
@@ -61,21 +74,21 @@ local selected_last='Choose theme\n  1. Light\n› 2. Dark\nEnter to choose'
 local selected_middle='Choose theme\n  1. Light\n› 2. Dark\n  3. Blue\nEnter to choose'
 check(selected_last,true)
 check(selected_middle,true)
-check('────────────────────\n  1. Light\n› 2. Dark\n────────────────────',false,'composer_nonempty')
-check(selected_last..'\n? for shortcuts',false,'composer_nonempty')
-check(selected_last..'\n› actual draft',false,'composer_nonempty')
+check('────────────────────\n  1. Light\n› 2. Dark\n────────────────────',true)
+check(selected_last..'\n? for shortcuts',true)
+check(selected_last..'\n› actual draft',true)
 
-check('────────────────────\n'..long_menu:gsub('Choose theme\n','')..'\n────────────────────',false,'composer_nonempty')
-check(long_menu..'\n› actual draft',false,'composer_nonempty')
-check(unnumbered..'\n› actual draft',false,'composer_nonempty')
+check('────────────────────\n'..long_menu:gsub('Choose theme\n','')..'\n────────────────────',true)
+check(long_menu..'\n› actual draft',true)
+check(unnumbered..'\n› actual draft',true)
 -- A numbered prefix alone is still a draft, not generic menu geometry.
-check('› 1. This is one draft item',false,'composer_nonempty')
+check('› 1. This is one draft item',true)
 
-check(menu..'\n────────────────────\n› actual current draft\n────────────────────\n? for shortcuts',false,'composer_nonempty')
-check('Quoted menu:\n'..menu..'\n› actual borderless draft',false,'composer_nonempty')
+check(menu..'\n────────────────────\n› actual current draft\n────────────────────\n? for shortcuts',true)
+check('Quoted menu:\n'..menu..'\n› actual borderless draft',true)
 -- Inherently ambiguous borderless menu-shaped drafts follow unknown=allow.
 check('› 1. First draft item\n  2. Second draft item',true)
-check('› 1. First draft item\n  2. Second draft item\n? for shortcuts',false,'composer_nonempty')
+check('› 1. First draft item\n  2. Second draft item\n? for shortcuts',true)
 
 check('Select Reasoning Level for GPT-6-Luna\n\n› 1. Low\n  2. Medium (default)\n  3. Max\n\nenter default · s session · esc back',false,'known_modal')
 check('Old Select Model and Effort title\n'..unknown,true)
@@ -109,7 +122,7 @@ end})
 bus.agents.codex.session_start_marker='synthetic-start'
 for _, case in ipairs({
   {reason='human_active',change=function() attached=true;human_idle=0 end},
-  {reason='composer_nonempty',change=function() screen='› new draft' end},
+  {reason='known_modal',change=function() screen='Select Reasoning Level for GPT-6-Luna\n\n› 1. Low\n  2. Medium (default)\n  3. Max\n\nenter default · s session · esc back' end},
   {reason='workflow_owned',change=function() bus.pending_tasks.codex=true end},
   {reason='session_changed',change=function() core_instance='replacement' end},
 }) do

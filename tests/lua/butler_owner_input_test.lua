@@ -103,7 +103,7 @@ T.test('audit refusal is prewrite queued; admission or identity changes after in
   local rec=s.request('AB03','exact');local write=remuda.fs.write_atomic
   remuda.fs.write_atomic=function(p,body,opts)
    local ok,why=write(p,body,opts)
-   if p==s.store_path and body:find('dispatch_intent',1,true)then s.mode.screen='› actual human draft'end
+   if p==s.store_path and body:find('dispatch_intent',1,true)then s.mode.attached,s.mode.human_idle=true,0 end
    return ok,why
   end
   s.queue.tick();T.eq(#s.writes,0);T.eq(s.queue.status()[1].status,'uncertain');T.eq(rec.delivery_started,true)
@@ -153,7 +153,7 @@ T.test('owner line preserves separate RET; failed RET never repeats payload or k
   s.mode.after_text=function()s.mode.screen='› exact line'end
   s.queue.tick();T.eq(#s.writes,1);T.eq(#s.keys,1);T.eq(s.queue.status()[1].status,'delivered')
  end)
- for _,change in ipairs({'different','human','attached','clock','missing-idle','missing-clock'})do
+ for _,change in ipairs({'human','attached','clock','missing-idle','missing-clock'})do
   subject('line-proof-'..change,function(s)
    local event=s.event(change,'exact line')
    assert(s.queue.accept_line('codex','exact line',event,'!home:fixture',true))
@@ -260,29 +260,22 @@ end)
 local function resolve_notes(s)
  local out={};for _,n in ipairs(s.notes)do if n:find('input-queue resolve',1,true)then out[#out+1]=n end end;return out
 end
-T.test('later input passes an uncertain head on a verified empty composer; head is never retyped',function()
- subject('pass-uncertain',function(s)
-  s.request('AF01','stuck');s.mode.provider='unverified';s.queue.tick()
-  local id=s.queue.status()[1].id;T.eq(s.queue.status()[1].status,'uncertain');T.eq(table.concat(s.writes,','),'stuck')
-  s.mode.provider=nil;s.mode.screen='› '
-  s.request('AF02','later');s.queue.tick()
-  T.eq(table.concat(s.writes,','),'stuck,later');T.eq(s.queue.status()[1].status,'uncertain');T.eq(s.queue.status()[2].status,'delivered')
-  s.queue.tick();s.queue.tick();T.eq(table.concat(s.writes,','),'stuck,later','no automatic retype')
-  local notes=resolve_notes(s);T.eq(#notes,1,'one notice per uncertain record')
-  T.ok(notes[1]:find('remuda butler input-queue resolve '..id..' not_sent|delivered',1,true))
-  -- Restart/replay: a fresh adapter over the same ledger does not notify again.
-  local again=dofile('packages/butler/owner_input.lua');again.tick();again.tick();T.eq(#resolve_notes(s),1)
-  assert(again.resolve(id,'not_sent',OWNER));again.tick();again.tick()
-  T.eq(table.concat(s.writes,','),'stuck,later','resolving never types the old item');T.eq(again.status()[1].status,'failed')
- end)
-end)
-T.test('uncertain head keeps later input blocked unless the composer is positively empty',function()
+T.test('later input passes an uncertain head with no composer check; head is never retyped',function()
  for index,screen in ipairs({'› leftover partial','synthetic unparseable footer'})do
-  subject('dirty-'..index,function(s)
-   s.request('AG01','stuck');s.mode.provider='unverified';s.queue.tick();s.mode.provider=nil
-   s.mode.screen=screen;s.request('AG02','later');s.queue.tick()
-   T.eq(table.concat(s.writes,','),'stuck','later item not typed');T.eq(s.queue.status()[2].status,'queued')
-   T.ok(tostring(s.queue.status()[2].reason):find('^uncertain_ahead_'),tostring(s.queue.status()[2].reason))
+  subject('pass-uncertain-'..index,function(s)
+   s.request('AF01','stuck');s.mode.provider='unverified';s.queue.tick()
+   local id=s.queue.status()[1].id;T.eq(s.queue.status()[1].status,'uncertain');T.eq(table.concat(s.writes,','),'stuck')
+   s.mode.provider=nil;s.mode.screen=screen
+   s.request('AF02','later');s.queue.tick()
+   T.eq(table.concat(s.writes,','),'stuck,later','later input is not held behind the composer')
+   T.eq(s.queue.status()[1].status,'uncertain');T.eq(s.queue.status()[2].status,'delivered')
+   s.queue.tick();s.queue.tick();T.eq(table.concat(s.writes,','),'stuck,later','no automatic retype')
+   local notes=resolve_notes(s);T.eq(#notes,1,'one notice per uncertain record')
+   T.ok(notes[1]:find('remuda butler input-queue resolve '..id..' not_sent|delivered',1,true))
+   -- Restart/replay: a fresh adapter over the same ledger does not notify again.
+   local again=dofile('packages/butler/owner_input.lua');again.tick();again.tick();T.eq(#resolve_notes(s),1)
+   assert(again.resolve(id,'not_sent',OWNER));again.tick();again.tick()
+   T.eq(table.concat(s.writes,','),'stuck,later','resolving never types the old item');T.eq(again.status()[1].status,'failed')
   end)
  end
 end)
@@ -296,17 +289,11 @@ T.test('contract: type_text unverified after a retry Return leaves the entry unc
   s.request('AH01','first');s.mode.provider='unverified';s.queue.tick()
   local head=s.queue.status()[1]
   T.eq(head.status,'uncertain');T.eq(head.provider_status,'unverified');T.eq(head.reason,nil)
-  -- The composer cannot be confirmed empty here (an unparseable screen), so later input waits.
+  -- No composer check gates later input (#568); the head itself is never retyped.
   s.mode.provider=nil;s.request('AH02','second');s.queue.tick();s.queue.tick()
-  T.eq(table.concat(s.writes,','),'first','head is not retyped and the next entry is not typed')
-  T.eq(s.queue.status()[1].status,'uncertain');T.eq(s.queue.status()[2].status,'queued')
-  T.ok(tostring(s.queue.status()[2].reason):find('^uncertain_ahead_'),tostring(s.queue.status()[2].reason))
-  -- Since #524 a positively empty composer lets later input pass; the head stays uncertain.
-  s.mode.screen='› '
-  local clock=os.time;os.time=function()return clock()+400 end -- skip the deferral backoff
-  s.queue.tick();os.time=clock
-  T.eq(table.concat(s.writes,','),'first,second');T.eq(s.queue.status()[1].status,'uncertain')
-  T.eq(s.queue.status()[2].status,'delivered');T.eq(s.queue.status()[2].provider_status,'submitted')
+  T.eq(table.concat(s.writes,','),'first,second','head is not retyped; the next entry is typed immediately')
+  T.eq(s.queue.status()[1].status,'uncertain');T.eq(s.queue.status()[2].status,'delivered')
+  T.eq(s.queue.status()[2].provider_status,'submitted')
  end)
 end)
 T.test('contract: type_text submitted after a retry Return delivers the entry and the next one',function()

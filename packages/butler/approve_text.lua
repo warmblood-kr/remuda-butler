@@ -300,7 +300,7 @@ function M.type_text(session, exact_bytes, provenance)
   local attached, core_instance = pane_attached(session)
   if attached == nil then return false, "session_not_live" end
   if type(remuda._butler_approved_text_policy) ~= "function" then return false, "input_policy_unavailable" end
-  local checked, safe, reason = pcall(remuda._butler_approved_text_policy, session)
+  local checked, safe, reason = pcall(remuda._butler_approved_text_policy, session, nil, nil, true)
   if not checked then return false, "input_policy_error" end
   if not safe then return false, reason or "input_policy_denied" end
   if type(remuda.type_text) ~= "function" then return false, "type_failed" end
@@ -315,7 +315,7 @@ function M.type_text(session, exact_bytes, provenance)
     if current_attached == nil or current_instance ~= core_instance then return false, "session_changed" end
     attached = current_attached
     if bus.pending_tasks and bus.pending_tasks[session] then return false, "workflow_owned" end
-    checked, safe, reason = pcall(remuda._butler_approved_text_policy, session)
+    checked, safe, reason = pcall(remuda._butler_approved_text_policy, session, nil, nil, true)
     if not checked then return false, "input_policy_error" end
     if not safe then return false, reason or "input_policy_denied" end
   end
