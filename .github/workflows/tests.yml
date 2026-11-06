@@ -65,6 +65,7 @@ jobs:
           BUTLER_SHELL_MODE: ${{ github.event_name == 'pull_request' && 'policy' || 'all' }}
 
   path-windows:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     # This job runs only the pure path tables; it does not boot the Butler harness.
     runs-on: windows-latest
     timeout-minutes: 5

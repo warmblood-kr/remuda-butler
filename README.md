@@ -103,10 +103,10 @@ until the generic external CLI/client contract is implemented in Remuda core.
   Rust integration tests. `tests/rust_tests.sh` builds them inside a pinned
   Remuda core checkout and runs the Butler ones; CI runs it on main pushes.
   The golden guidance and cross-repository contract integration jobs also run
-  on main pushes. The shell job runs standalone Lua tests plus an explicitly
-  classified policy/unit subset on PRs; main pushes run all shell tests. Some
-  security and harness checks use a private daemon and intentionally remain on
-  PRs. The Windows path unit tests and policy checks retain their triggers.
+  on main pushes. CI runs Lua and Windows path unit tests on main pushes; run
+  them locally before a PR. The shell job keeps an explicitly classified policy
+  subset on PRs and runs all shell tests on main pushes. Security and harness
+  checks that use a private daemon intentionally remain on PRs.
 - `scripts/check-butler-path-convention.lua`: path consistency check spanning
   the Butler installer and the Remuda daemon loader.
 - `scripts/check-no-python.sh`: CI guard for Python files and invocations;
