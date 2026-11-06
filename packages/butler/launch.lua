@@ -1096,11 +1096,16 @@ end
 local function protect_leader(alias)
   local agent = bus.agents and bus.agents[alias]
   local instance = agent and agent.instance_id
-  local protected = false
-  if agent and agent.instance_binding == 1 and type(instance) == "string" and instance ~= "" then
-    local ok, value, why = pcall(remuda.session.remote_input, alias, instance, false)
-    protected = ok and value == true
-    if not protected then
+  local setter = remuda.session and remuda.session.remote_input
+  local state = "degraded"
+  if type(setter) ~= "function" then
+    state = "unsupported"
+    _butler_session_trace("leader_protection", tostring(alias) .. ": core has no setter")
+  elseif agent and agent.instance_binding == 1 and type(instance) == "string" and instance ~= "" then
+    local ok, value, why = pcall(setter, alias, instance, false)
+    if ok and value == true then
+      state = "protected"
+    else
       _butler_session_trace("leader_protection",
         tostring(alias) .. ": " .. tostring(ok and (value or why) or value))
     end
@@ -1108,12 +1113,12 @@ local function protect_leader(alias)
     _butler_session_trace("leader_protection", tostring(alias) .. ": missing_instance_binding")
   end
   bus.remote_input_unprotected = bus.remote_input_unprotected or {}
-  if protected then
+  if state == "protected" then
     bus.remote_input_unprotected[alias] = nil
   else
     bus.remote_input_unprotected[alias] = true
   end
-  return protected
+  return state
 end
 
 function remuda._butler_topic_new(name, template, kind, model)
@@ -1124,10 +1129,12 @@ function remuda._butler_topic_delegate(name, task, template, kind, parent, model
     sandbox_lib.refuse_full(sandbox_lib.owner_command("remuda butler topic delegate " .. name .. " --agent codex", profile, cwd) .. " <task...>")
   end
   local requested_parent = parent or "butler"
-  if requested_parent ~= "" then protect_leader(requested_parent) end
   local resolved, leader = pcall(resolve, requested_parent)
   if resolved then
     parent = leader
+    -- Protect the resolved canonical leader, not the pre-resolution alias.
+    -- A degraded result is handed off explicitly and never claims success.
+    if parent and parent ~= "" then protect_leader(parent) end
   else
     local session_live = false
     for _, row in ipairs(remuda.ls()) do
