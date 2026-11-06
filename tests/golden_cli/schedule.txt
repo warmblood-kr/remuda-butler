@@ -10,7 +10,7 @@ state: (no file)
 ### remuda butler "schedule" "--help"
 exit: 0
 stdout:
-Recurring Butler messages. Forms: list; add NAME "M H * * *" TEXT|- [--to SESSION]; rm NAME. Example: remuda butler schedule list
+Butler messages. Forms: list; add NAME "M H * * *" TEXT|- [--to SESSION] [--once]; rm NAME. Example: remuda butler schedule list
 
 Usage: remuda butler schedule
 
@@ -27,7 +27,7 @@ state: (no file)
 ### remuda butler "schedule" "-h"
 exit: 0
 stdout:
-Recurring Butler messages. Forms: list; add NAME "M H * * *" TEXT|- [--to SESSION]; rm NAME. Example: remuda butler schedule list
+Butler messages. Forms: list; add NAME "M H * * *" TEXT|- [--to SESSION] [--once]; rm NAME. Example: remuda butler schedule list
 
 Usage: remuda butler schedule
 
@@ -172,7 +172,7 @@ state: (no file)
 ### remuda butler "schedule" "add" "--help"
 exit: 0
 stdout:
-Add a recurring Butler message. Example: remuda butler schedule add morning '0 9 * * *' 'Check the queue'
+Add a recurring Butler message, or one delivery with --once. Example: remuda butler schedule add morning '0 9 * * *' 'Check the queue'
 
 Usage: remuda butler schedule add [OPTIONS] NAME CRON TEXT
 
@@ -184,6 +184,7 @@ Arguments:
 Options:
   -h, --help          Print help
       --to <SESSION>  Target session (default: your own session for members, butler for the operator)
+      --once          Deliver at the next matching time, then disable
 
 Next: remuda butler schedule list
 
@@ -195,7 +196,7 @@ state: (no file)
 ### remuda butler "schedule" "add" "-h"
 exit: 0
 stdout:
-Add a recurring Butler message. Example: remuda butler schedule add morning '0 9 * * *' 'Check the queue'
+Add a recurring Butler message, or one delivery with --once. Example: remuda butler schedule add morning '0 9 * * *' 'Check the queue'
 
 Usage: remuda butler schedule add [OPTIONS] NAME CRON TEXT
 
@@ -207,6 +208,7 @@ Arguments:
 Options:
   -h, --help          Print help
       --to <SESSION>  Target session (default: your own session for members, butler for the operator)
+      --once          Deliver at the next matching time, then disable
 
 Next: remuda butler schedule list
 
@@ -356,7 +358,7 @@ state: (no file)
 ### remuda butler "schedule" "add" "job" "0 9 * * *" "--help"
 exit: 0
 stdout:
-Add a recurring Butler message. Example: remuda butler schedule add morning '0 9 * * *' 'Check the queue'
+Add a recurring Butler message, or one delivery with --once. Example: remuda butler schedule add morning '0 9 * * *' 'Check the queue'
 
 Usage: remuda butler schedule add [OPTIONS] NAME CRON TEXT
 
@@ -368,6 +370,7 @@ Arguments:
 Options:
   -h, --help          Print help
       --to <SESSION>  Target session (default: your own session for members, butler for the operator)
+      --once          Deliver at the next matching time, then disable
 
 Next: remuda butler schedule list
 
@@ -500,7 +503,7 @@ state: (no file)
 ### [agent] remuda butler "schedule" "--help"
 exit: 0
 stdout:
-Recurring Butler messages. Forms: list; add NAME "M H * * *" TEXT|- [--to SESSION]; rm NAME. Example: remuda butler schedule list
+Butler messages. Forms: list; add NAME "M H * * *" TEXT|- [--to SESSION] [--once]; rm NAME. Example: remuda butler schedule list
 
 Usage: remuda butler schedule
 
