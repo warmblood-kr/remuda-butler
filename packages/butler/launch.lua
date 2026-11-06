@@ -222,8 +222,16 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         REMUDA_BUTLER_MEMORY_DIR = memory_dir or "",
         CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1" }
       if candidate_kind == "opencode" then
+        -- Opt this member's private server into the completion nudge. The
+        -- plugin stays inert in any process without the launch identity below.
+        local plugins
+        if remuda.butler.opencode_nudge then
+          local dir = remuda.butler.opencode_nudge.ensure(data_home)
+          if dir then plugins = { dir } end
+        end
+        values.REMUDA_BUTLER_COMPLETION_NUDGE = "on"
         values.OPENCODE_CONFIG_CONTENT = remuda._butler_agent_support.opencode_config_content(
-          spec and spec.token, spec and spec.model)
+          spec and spec.token, spec and spec.model, plugins)
       end
       if spec and spec.native and remuda.butler and remuda.butler.native_launch then
         local extra = remuda.butler.native_launch.env(spec.native)

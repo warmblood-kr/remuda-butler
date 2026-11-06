@@ -607,13 +607,19 @@ local function agent_mcp_config(token)
   return '{"mcp_servers":{"remuda":{"command":"remuda","args":["-s",'
     .. json_quote(server) .. ',"mcp"],"env":{' .. env .. '}}}}'
 end
-local function opencode_config_content(token, model)
+local function opencode_config_content(token, model, plugins)
   local env = '"REMUDA_SESSION_CAPABILITY":' .. json_quote(token)
   if runtime_dir then env = env .. ',"REMUDA_RUNTIME_DIR":' .. json_quote(runtime_dir) end
   local config = '{"mcp":{"remuda":{"type":"local","command":["remuda","-s",'
     .. json_quote(server) .. ',"mcp"],"environment":{' .. env .. '}}}'
   if type(model) == "string" and model ~= "" then
     config = config .. ',"model":' .. json_quote(model)
+  end
+  -- A member's OpenCode plugin is opted in per launch, never globally.
+  if type(plugins) == "table" and #plugins > 0 then
+    local list = {}
+    for _, path in ipairs(plugins) do list[#list + 1] = json_quote(path) end
+    config = config .. ',"plugins":[' .. table.concat(list, ",") .. "]"
   end
   return config .. '}'
 end
@@ -633,6 +639,7 @@ remuda.exec("butler/telemetry")
 remuda.exec("butler/agents/claudecode")
 remuda.exec("butler/agents/codex")
 remuda.exec("butler/agents/opencode")
+remuda.exec("butler/opencode_nudge")
 remuda.exec("butler/agents/monocle")
 remuda.exec("butler/prompt")
 -- The launch chooser, member guidance and startup modals live in agents_launch.lua.
