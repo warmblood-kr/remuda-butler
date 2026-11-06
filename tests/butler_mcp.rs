@@ -2225,9 +2225,11 @@ fn a_task_deferred_too_long_times_out_and_tells_the_leader() {
 
 /// #44: the fake agent drops the task's first Return. Butler must retry it
 /// while keeping an immediate notice out of the still-populated composer.
+/// An unknown unbound kind keeps the legacy composer path; known kinds route
+/// to durable mail (#579) and never type the task body.
 #[test]
 #[cfg(unix)]
-fn a_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
+fn a_legacy_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
     let dir = scratch("topic-first-prompt-notice");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
@@ -2259,9 +2261,10 @@ fn a_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
             r#"
             remuda.butler.project_home({projects:?})
             remuda._butler_task_retry_delays = {{}}
-            remuda._butler_agent_builders.claude = function() return {{"sh", {script:?}, {submitted:?}}} end
+            remuda._butler_agent_builders.legacy_test = function() return {{"sh", {script:?}, {submitted:?}}} end
+            remuda._butler_agent_startup.legacy_test = remuda._butler_agent_startup.claude
             remuda.session = function() return {{is_busy = false}} end
-            remuda._butler_topic_delegate("topic", "do the delegated task", nil, "claude", "butler")
+            remuda._butler_topic_delegate("topic", "do the delegated task", nil, "legacy_test", "butler")
             remuda._butler_send("operator", "topic", "immediate mail")
             "#,
             projects = dir.join("projects").to_string_lossy(),
@@ -2300,10 +2303,11 @@ fn a_topic_task_is_submitted_before_an_immediate_notice_is_typed() {
 }
 
 /// A dropped first Return leaves the task in the composer. Butler retries it,
-/// waits for acceptance, then delivers the queued notice.
+/// waits for acceptance, then delivers the queued notice. An unknown unbound
+/// kind keeps the legacy composer path (#579 routes known kinds to mail).
 #[test]
 #[cfg(unix)]
-fn a_topic_task_retries_a_dropped_return_before_delivering_a_notice() {
+fn a_legacy_topic_task_retries_a_dropped_return_before_delivering_a_notice() {
     let dir = scratch("topic-dropped-return");
     let path = daemon::socket_path_in(&dir, "s");
     let _daemon = daemon_at(&path);
@@ -2312,7 +2316,8 @@ fn a_topic_task_retries_a_dropped_return_before_delivering_a_notice() {
         &path,
         r#"
         remuda.butler.project_home("/tmp")
-        remuda._butler_agent_builders.claude = function() return {"sh", "-c", "sleep 30"} end
+        remuda._butler_agent_builders.legacy_test = function() return {"sh", "-c", "sleep 30"} end
+        remuda._butler_agent_startup.legacy_test = remuda._butler_agent_startup.claude
         local screen, events, first_poll_empty = "──────\n❯ ", {}, false
         remuda._topic_test_events = events
         remuda._topic_test_pending_at_notice = true
@@ -2354,7 +2359,7 @@ fn a_topic_task_retries_a_dropped_return_before_delivering_a_notice() {
         end
         remuda.session = function() return {is_busy = false} end
         remuda._butler_notify_policy = function() return true end
-        remuda._butler_topic_delegate("fast", "finish immediately", nil, "claude", "butler")
+        remuda._butler_topic_delegate("fast", "finish immediately", nil, "legacy_test", "butler")
         remuda._butler_send("operator", "fast", "immediate mail")
         "#,
     );
