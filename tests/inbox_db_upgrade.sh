@@ -62,6 +62,16 @@ count() {
   "$REMUDA_BIN" -s "$SERVER" -e "return tostring(remuda._butler_inbox_db.count(\"$1\", \"$2\"))"
 }
 
+# The pinned core for older PRs may not have remuda.db (#778). Butler must
+# keep working on the file path; only the shadow-specific checks are skipped.
+if [ "$("$REMUDA_BIN" -s "$SERVER" -e 'return type(remuda.db) == "table"')" != true ]; then
+  "$REMUDA_BIN" -s "$SERVER" -e \
+    'assert(remuda._butler_mail.queue({alias="sender", id="sender-id"}, {alias="member", id="member-id"}, "hello"))' >/dev/null
+  "$REMUDA_BIN" -s "$SERVER" -e 'assert(remuda._butler_mail.inbox("member-id"):find("hello", 1, true))' >/dev/null
+  echo "SKIP inbox db unavailable on this core; file mail path passed"
+  exit 0
+fi
+
 [ "$(count 'a/b' inbox)" = 1 ] || { echo "seed delivery was not imported"; exit 1; }
 [ "$(count 'a/b' read)" = 1 ] || { echo "seed read was not imported"; exit 1; }
 
