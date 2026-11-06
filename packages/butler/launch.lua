@@ -1096,7 +1096,8 @@ end
 local function protect_leader(alias)
   local agent = bus.agents and bus.agents[alias]
   local instance = agent and agent.instance_id
-  local setter = remuda.session and remuda.session.remote_input
+  local session_api = type(remuda.session) == "table" and remuda.session or nil
+  local setter = session_api and session_api.remote_input
   local state = "degraded"
   if type(setter) ~= "function" then
     state = "unsupported"
