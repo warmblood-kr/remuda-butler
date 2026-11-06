@@ -4632,22 +4632,22 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             ["t-claude-launch-unknown"] = {{ "Workspace access changed\n ❯ 1. Continue\n   2. Cancel" }},
             ["t-claude-launch-transient"] = {{ "Continue setup", rule .. "\n❯ \n" .. rule }},
             ["t-codex"] = {{
-              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything",
+              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version",
               "› Ask Codex to do anything",
             }},
             ["t-codex-peer"] = {{
-              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything",
+              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version",
               "› Ask Codex to do anything",
             }},
             ["t-codex-timeout"] = {{
-              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything",
+              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version",
               "› Ask Codex to do anything",
             }},
             ["t-codex-unanswerable"] = {{ "Update available\n› 1. Install update\n  2. Later" }},
             ["t-codex-human"] = {{ "Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip" }},
             ["t-codex-close"] = {{ "Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip" }},
             ["t-codex-skip-label"] = {{ "Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip for now\n  3. Skip until next version" }},
-            ["t-codex-versionless"] = {{ "Update available\n› 1. Update now\n  2. Skip", "› Ask Codex to do anything" }},
+            ["t-codex-versionless"] = {{ "Update available\n› 1. Update now\n  2. Skip" }},
             ["t-codex-human-owner"] = {{ "Update available\n› 1. Update now\n  2. Skip" }},
             ["t-codex-gui-close"] = {{ "Update available · 0.157.1 → 0.158.0\n› 1. Update now\n  2. Skip" }},
             ["t-codex-running"] = {{ "› Ask Codex to do anything" }},
@@ -4713,7 +4713,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             end
             if name == "t-codex-timeout" then
               log[#log + 1] = name .. " launch"
-              screens[name] = {{ "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything" }}
+              screens[name] = {{ "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version" }}
             end
             return actual, instance_id
           end

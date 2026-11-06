@@ -185,17 +185,40 @@ local function current_geometry(screen, geometry)
   return table.concat(current, '\n')
 end
 
--- A live Codex update choice, not a historical title: the update modal must
--- sit in the current bottom block, above any transcript that followed it.
-local function live_update_choice(agent, screen)
+-- The current bottom/current-geometry update menu, never a historical title:
+-- current_geometry drops a numbered block once a composer/prompt line follows
+-- it, so quoted update text above a clear prompt is transcript.
+local function live_update_region(agent, screen)
   local startup = (remuda._butler_agent_startup or {})[agent.kind] or {}
   local chooser = remuda._butler_chooser
   local compaction = remuda._butler_compaction
-  if not (chooser and chooser.startup_modal and compaction) then return false end
-  local tail = compaction.bottom_screen_lines(screen, 8)
-  if type(tail) ~= 'table' or #tail == 0 then return false end
-  local modal = chooser.startup_modal(startup, table.concat(tail, '\n'))
-  return modal ~= nil and modal.update == true
+  if not (chooser and chooser.startup_modal and compaction) then return nil end
+  local current = current_geometry(screen, compaction.unknown_dialog_signature)
+  if not current then return nil end
+  local modal = chooser.startup_modal(startup, current)
+  if modal and modal.update then return current end
+  return nil
+end
+
+-- Strict key authorization: a current update menu with an Update-now choice and
+-- only skip/update labels. Quoted history cannot match because the region is
+-- already current-geometry scoped.
+local function live_update_choice(agent, screen)
+  local current = live_update_region(agent, screen)
+  if not current then return false end
+  local count, has_update = 0, false
+  for line in (current .. '\n'):gmatch('(.-)\n') do
+    local _, label = remuda._butler_compaction.numbered_option(line)
+    if label then
+      label, count = label:lower():gsub('%s+$', ''), count + 1
+      if label == 'update now' then
+        has_update = true
+      elseif label ~= 'skip' and not label:match('^skip ') then
+        return false
+      end
+    end
+  end
+  return count > 0 and has_update
 end
 
 -- The agent file's dialog_states list (agents/claudecode.lua, agents/codex.lua)
@@ -492,6 +515,8 @@ local function check(name, ticking)
   return observe(name, agent, alias, instance, screen, failure, ticking)
 end
 function M.check(name) return check(name, false) end
+function M.live_update_region(agent, screen) return live_update_region(agent, screen) end
+function M.live_update_choice(agent, screen) return live_update_choice(agent, screen) end
 
 function M.tick()
   local listed, sessions = pcall(remuda.ls)
@@ -791,7 +816,7 @@ function M.automatic_notice_send(name, text, message_ids, still_current)
     if not captured or type(screen) ~= 'string' then
       return false, 'capture_unavailable'
     end
-    if live_update_choice(agent, screen) then
+    if live_update_region(agent, screen) then
       return false, 'startup_update_unresolved'
     end
   end

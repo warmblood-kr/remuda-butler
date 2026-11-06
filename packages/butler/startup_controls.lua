@@ -171,12 +171,26 @@ local function expired(state, screen)
   return os.time() - state.modal_since >= budget
 end
 
-local function update_tick(state, screen, modal)
+local function skip_update(state, region, reason)
   local c = chooser()
-  if not (c and c.option_number and c.skip_option_number) then return end
+  local option = c and c.skip_option_number and c.skip_option_number(region)
+  if option and may_act(state) then
+    local pressed, result = pcall(remuda.key, state.name, option)
+    if pressed and result ~= false then
+      state.settle = state.ticks + 3
+      return true
+    end
+    fail(state, "skip key was not accepted")
+    return false
+  end
+  if expired(state, region) then fail(state, reason) end
+  return false
+end
+
+local function update_version(state, region)
+  local c = chooser()
   local update = remuda._butler_bus.codex_update_state
-  local name = state.name
-  local version = c.codex_update_version and c.codex_update_version(screen) or "unknown"
+  local version = c and c.codex_update_version and c.codex_update_version(region) or "unknown"
   if version ~= "unknown" then
     if update.version and update.version ~= version and not update.claimed then
       update.done, update.done_version = false, nil
@@ -185,79 +199,159 @@ local function update_tick(state, screen, modal)
     update.version = version
     state.version = version
   end
-  local function skip(reason)
-    local option = c.skip_option_number(screen)
-    if option and may_act(state) then
-      local pressed, result = pcall(remuda.key, name, option)
-      if pressed and result ~= false then
-        state.settle = state.ticks + 3
-        return true
-      end
-      fail(state, "skip key was not accepted")
-      return false
-    end
-    if expired(state, screen) then fail(state, reason) end
-    return false
-  end
+  return version
+end
 
-  -- Another member owns the update: wait for it, then restart or skip.
-  if update.claimed and update.owner ~= name and update.waiting and update.waiting[name] then
-    if update.done and update.done_version == version then
-      if relaunch(state, version) then return end
-      if expired(state, screen) then fail(state, "update completed while waiting") end
-      return
-    end
-    if wait_deadline(state) then
-      if skip("waiting for Codex update") then return end
-    end
-    if expired(state, screen) then fail(state, "waiting for Codex update") end
+local function waiting_owner_tick(state, region, version)
+  local update = remuda._butler_bus.codex_update_state
+  if update.done and update.done_version == version then
+    if relaunch(state, version) then return true end
+    if expired(state, region) then fail(state, "update completed while waiting") end
+    return true
+  end
+  if wait_deadline(state) then skip_update(state, region, "waiting for Codex update") end
+  if expired(state, region) then fail(state, "waiting for Codex update") end
+  return true
+end
+
+local function join_waiting(state, region, version)
+  local update = remuda._butler_bus.codex_update_state
+  update.waiting = update.waiting or {}
+  update.waiting[state.name] = true
+  if update.done and update.done_version == version then
+    if relaunch(state, version) then return end
+    if expired(state, region) then fail(state, "update completed while waiting") end
     return
   end
+  if wait_deadline(state) then skip_update(state, region, "waiting for Codex update") end
+end
 
-  if not modal then return end
+local function claim_update(state, region, version, strict)
+  local c = chooser()
+  local update = remuda._butler_bus.codex_update_state
+  if update.claimed or not strict then return false end
+  local option = c.option_number(region, function(label)
+    return label:lower():find("update now", 1, true) ~= nil
+  end)
+  if not (option and may_act(state)) then return false end
+  update.claimed, update.owner = true, state.name
+  state.deadline = os.time() + (tonumber(remuda._butler_codex_update_timeout) or 300)
+  update.waiting = update.waiting or {}
+  local record = restart_record(state, version)
+  record.update_pressed = true
+  remuda._butler_bus.codex_update_relaunches[state.name] = record
+  local pressed, result = pcall(remuda.key, state.name, option)
+  if pressed and result ~= false then return true end
+  -- The key may have started the update even though its result was unknown:
+  -- keep the claim/record and never send the opposite choice this tick.
+  state.update_uncertain = true
+  trace("startup_control_uncertain", state.name .. " update key not confirmed")
+  return true
+end
 
+local function update_tick(state, region, strict)
+  local c = chooser()
+  if not (c and c.option_number and c.skip_option_number) then return end
+  local update = remuda._butler_bus.codex_update_state
+  local name = state.name
+  local version = update_version(state, region)
+  if state.update_uncertain then
+    if expired(state, region) then
+      trace("codex_update_timeout", name .. " update key outcome uncertain")
+      fail(state, "the Codex update key outcome was uncertain", true)
+    end
+    return
+  end
+  if update.claimed and update.owner ~= name and update.waiting and update.waiting[name] then
+    if waiting_owner_tick(state, region, version) then return end
+  end
   if update.done and update.restart_waiting and update.restart_waiting[name] then
     if relaunch(state, update.done_version) then return end
-    if expired(state, screen) then fail(state, "update completed while relaunching") end
+    if expired(state, region) then fail(state, "update completed while relaunching") end
     return
   end
-
   if update.claimed and update.owner ~= name then
-    update.waiting = update.waiting or {}
-    update.waiting[name] = true
-    if update.done and update.done_version == version then
+    join_waiting(state, region, version)
+    return
+  end
+  if update.aborted_version == version or (update.done and update.done_version == version) then
+    if strict then
+      skip_update(state, region, "update dialog did not clear")
+    elseif expired(state, region) then
+      fail(state, "update dialog") -- unparseable menu: report, press nothing
+    end
+    return
+  end
+  if claim_update(state, region, version, strict) then return end
+  if strict then
+    skip_update(state, region, "update dialog")
+  elseif expired(state, region) then
+    fail(state, "update dialog") -- unparseable menu: report, press nothing
+  end
+end
+
+local function working_now(screen)
+  local startup = startup_for("codex")
+  if type(startup.working) ~= "function" then return false end
+  local checked, working = pcall(startup.working, screen)
+  return checked and working == true
+end
+
+local function owned_update(state)
+  local update = remuda._butler_bus.codex_update_state
+  local name = state.name
+  return (update.claimed and update.owner == name)
+    or (update.waiting and update.waiting[name])
+    or (update.done and update.restart_waiting and update.restart_waiting[name])
+end
+
+local function no_modal_tick(state, screen)
+  local update = remuda._butler_bus.codex_update_state
+  local name = state.name
+  local restarting = update.done and update.restart_waiting and update.restart_waiting[name]
+  local waiting_peer = update.waiting and update.waiting[name]
+    and not (update.claimed and update.owner == name)
+  if restarting then
+    state.modal_since = state.modal_since or os.time()
+    if relaunch(state, update.done_version) then return end
+    if expired(state, screen) then
+      trace("codex_update_timeout", name .. " update completed while relaunching")
+      fail(state, "the Codex update completed but the pane could not be relaunched", true)
+    end
+    return
+  end
+  if waiting_peer then
+    if wait_deadline(state) then fail(state, "waiting for Codex update") end
+    return
+  end
+  if update.claimed and update.owner == name then
+    if ready(state, screen) then
+      state.modal_since = nil
+      local version = update.version or state.version or "unknown"
+      finish_update(state, version)
       if relaunch(state, version) then return end
-      if expired(state, screen) then fail(state, "update completed while waiting") end
+      update.restart_waiting = update.restart_waiting or {}
+      update.restart_waiting[name] = true
+      state.modal_since = os.time()
+      if expired(state, screen) then
+        trace("codex_update_timeout", name .. " update completed while relaunching")
+        fail(state, "the Codex update completed but the pane could not be relaunched", true)
+      end
       return
     end
-    if wait_deadline(state) and skip("waiting for Codex update") then return end
-    return
-  end
-
-  if update.aborted_version == version or (update.done and update.done_version == version) then
-    if skip("update dialog did not clear") then return end
-    return
-  end
-
-  if not update.claimed then
-    local option = c.option_number(screen, function(label)
-      return label:lower():find("update now", 1, true) ~= nil
-    end)
-    if option and may_act(state) then
-      update.claimed, update.owner = true, name
-      state.deadline = os.time() + (tonumber(remuda._butler_codex_update_timeout) or 300)
-      update.waiting = update.waiting or {}
-      local record = restart_record(state, version)
-      record.update_pressed = true
-      remuda._butler_bus.codex_update_relaunches[name] = record
-      local pressed, result = pcall(remuda.key, name, option)
-      if pressed and result ~= false then return end
-      record.update_pressed = false
-      remuda._butler_bus.codex_update_relaunches[name] = nil
-      update.claimed, update.owner = false, nil
+    if state.deadline ~= 0 and os.time() >= state.deadline then
+      trace("codex_update_timeout", name .. " update did not finish")
+      fail(state, "the Codex update did not finish", true)
     end
+    return
   end
-  if skip("update dialog") then return end
+  if ready(state, screen) then
+    state.modal_since = nil
+    stop(name, "ready")
+    return
+  end
+  state.modal_since = state.modal_since or os.time()
+  if expired(state, screen) then stop(name, "startup unresolved") end
 end
 
 local function tick(state)
@@ -272,90 +366,27 @@ local function tick(state)
   local agent = remuda._butler_bus.agents[state.name]
   if agent then agent.last_screen = screen end
   if state.ticks < state.settle then return end
+  -- No owned update/restart claim plus a working pane: a native-delivered Task
+  -- is already admitted, even if its output quotes update-like text.
+  if working_now(screen) and not owned_update(state) then stop(state.name, "busy"); return end
   local c = chooser()
   local modal = c and c.startup_modal and c.startup_modal(startup_for(state.kind), screen)
   if modal and modal.trust then
-    -- The chooser owns trust; never double-press. Defer while it is up, but
-    -- never linger forever: expiry stops the owner without touching the pane.
     state.modal_since = state.modal_since or os.time()
     if expired(state, screen) then stop(state.name, "trust unresolved") end
     return
   end
-  if not modal then
-    local update = remuda._butler_bus.codex_update_state
-    local restarting = update.done and update.restart_waiting
-      and update.restart_waiting[state.name]
-    local waiting_peer = update.waiting and update.waiting[state.name]
-      and not (update.claimed and update.owner == state.name)
-    local owns = update.claimed and update.owner == state.name
-    if restarting then
-      -- A completed shared update still owes this member a restart. The
-      -- bounded wait ends in a truthful timeout; the pane and record stay for
-      -- the eventual exit, never a blanket claim release.
-      state.modal_since = state.modal_since or os.time()
-      if relaunch(state, update.done_version) then return end
-      if expired(state, screen) then
-        trace("codex_update_timeout", state.name .. " update completed while relaunching")
-        fail(state, "the Codex update completed but the pane could not be relaunched", true)
-      end
-      return
-    end
-    if waiting_peer then
-      if wait_deadline(state) then fail(state, "waiting for Codex update") end
-      return
-    end
-    if owns then
-      if ready(state, screen) then
-        -- The update finished in place: publish the shared completion, then
-        -- restart the owner so the relaunch carries the identity and Task id.
-        state.modal_since = nil
-        local version = update.version or state.version or "unknown"
-        finish_update(state, version)
-        if relaunch(state, version) then return end
-        -- Completion is real but the pane could not restart yet (human
-        -- attached). Keep the completed owner's restart claim for its eventual
-        -- exit and report the bounded timeout instead of stopping as ready.
-        update.restart_waiting = update.restart_waiting or {}
-        update.restart_waiting[state.name] = true
-        state.modal_since = os.time()
-        if expired(state, screen) then
-          trace("codex_update_timeout", state.name .. " update completed while relaunching")
-          fail(state, "the Codex update completed but the pane could not be relaunched", true)
-        end
-        return
-      end
-      -- The pane left the dialog but never became ready: the update itself is
-      -- stuck. Report the bounded timeout and keep the pane open.
-      if state.deadline ~= 0 and os.time() >= state.deadline then
-        trace("codex_update_timeout", state.name .. " update did not finish")
-        fail(state, "the Codex update did not finish", true)
-      end
-      return
-    end
-    if ready(state, screen) then
-      state.modal_since = nil
-      stop(state.name, "ready")
-      return
-    end
-    -- A native-delivered Task can make the pane busy before the first capture:
-    -- there is no update to own, so release without keys, close or failure.
-    local startup = startup_for(state.kind)
-    if type(startup.working) == "function" then
-      local checked, working = pcall(startup.working, screen)
-      if checked and working == true then stop(state.name, "busy"); return end
-    end
-    -- Bound an unidentifiable startup paint/non-update screen: the Task is
-    -- already durable and admitted, so this stays a silent stop.
-    state.modal_since = state.modal_since or os.time()
-    if expired(state, screen) then stop(state.name, "startup unresolved") end
-    return
-  end
+  if not modal then no_modal_tick(state, screen); return end
   if modal.update then
+    local dialogs = remuda.butler and remuda.butler.dialogs
+    local region = dialogs and dialogs.live_update_region and dialogs.live_update_region(agent, screen)
+    local strict = dialogs and dialogs.live_update_choice and dialogs.live_update_choice(agent, screen)
     state.modal_since = state.modal_since or os.time()
-    update_tick(state, screen, modal)
+    if region then update_tick(state, region, strict == true); return end
+    -- Broad marker without a current choice: report and expire, never press.
+    if expired(state, screen) then fail(state, "update dialog") end
     return
   end
-  -- A non-update dialog is not this owner's to answer.
   state.modal_since = state.modal_since or os.time()
   if expired(state, screen) then fail(state, "modal did not clear") end
 end
@@ -401,7 +432,7 @@ end
 -- Stop only the exact record handed out by start(): a name-only stop could
 -- cancel a replacement controller for the same alias.
 function M.stop(name, token)
-  if token ~= nil and active[name] ~= token then return false end
+  if token == nil or active[name] ~= token then return false end
   return stop(name, "stopped")
 end
 function M.active(name, agent) return matches(name, agent) end
@@ -409,7 +440,7 @@ function M.active(name, agent) return matches(name, agent) end
 -- start(). A yielding queue must never write into a replacement controller.
 function M.set_saved(name, id, token)
   local state = active[name]
-  if not state or (token ~= nil and state ~= token) then return false end
+  if not state or token == nil or state ~= token then return false end
   if not fenced(state) then return false end
   -- The queue outcome is now settled either way: a nil id means the durable
   -- save failed and must report the retained brief, not "routing pending".

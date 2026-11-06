@@ -160,7 +160,7 @@ T.test("an active startup control defers only the legacy notice path", function(
     remuda.schedule = function(spec) return { spec = spec } end
     remuda.cancel = function() end
     remuda.capture_styled = nil
-    local update_screen = "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything"
+    local update_screen = "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version"
     local composer_screen = "› Ask Codex to do anything"
     local screen = update_screen
     local m3 = { id = "m3-id", kind = "codex", instance_id = "inst-3",
@@ -230,7 +230,7 @@ T.test("an active startup control defers only the legacy notice path", function(
     -- The realistic busy case: the native Task was accepted, and the pane is
     -- already working before the controller's first tick. It must release the
     -- timer quietly without replaying the Task or typing anything.
-    screen = "esc to interrupt"
+    screen = "Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\nesc to interrupt"
     owned4.handle.spec.run()
     assert(controls.active("m4", m4) == nil, "a busy native pane kept startup ownership")
     assert(#spies.runs == runs + 1, "the busy release replayed the native helper")
@@ -238,7 +238,7 @@ T.test("an active startup control defers only the legacy notice path", function(
     assert(spies.keys == 0 and spies.types == 0, "the busy release pressed keys or typed")
     assert(bus.inboxes["m4-id"][#bus.inboxes["m4-id"]] == task_id,
       "the busy release queued a new Task")
-    assert(controls.take_evidence("m4", m4) == "esc to interrupt",
+    assert(controls.take_evidence("m4", m4) ~= nil,
       "the quiet stop did not preserve its last observed frame")
     assert(controls.take_evidence("m4", m4) == nil,
       "the quiet-stop frame was handed out twice")
@@ -255,13 +255,22 @@ T.test("an active startup control defers only the legacy notice path", function(
       "a released but unresolved update menu received a pointer")
     -- Historical update text above a clear composer is transcript, not a live
     -- choice, and stays admitted.
-    screen = "Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n\n● task finished\n\n● tests passed\n\n╭──────────────╮\n│ ›            │\n╰──────────────╯"
+    screen = "Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n\n● task finished\n\n● tests passed\n\n› Ask Codex to do anything"
     local sent_auto, auto_why = remuda.butler.dialogs.automatic_notice_send("m3",
       "Butler message 01ARZ3NDEKTSV4RRFFQ69G5FAV arrived. Read it: remuda butler inbox",
       { "01ARZ3NDEKTSV4RRFFQ69G5FAV" })
     assert(sent_auto == true,
       "historical update text blocked a clear composer: " .. tostring(auto_why))
     assert(#spies.sends == after_failure + 1, "the admitted notice did not send")
+    local capture_ok = remuda.capture
+    remuda.capture = function() error("capture unavailable") end
+    local sent_cap, cap_why = remuda.butler.dialogs.automatic_notice_send("m3",
+      "Butler message 01ARZ3NDEKTSV4RRFFQ69G5FAW arrived. Read it: remuda butler inbox",
+      { "01ARZ3NDEKTSV4RRFFQ69G5FAW" })
+    remuda.capture = capture_ok
+    assert(sent_cap == false and cap_why == "capture_unavailable",
+      "a codex notice was written without a readable pane: " .. tostring(cap_why))
+    assert(#spies.sends == after_failure + 1, "the capture-failure notice still sent")
     screen = composer_screen
     assert(remuda._butler_notify_policy("m3") == true,
       "the legacy notice policy stayed closed after the control stopped")

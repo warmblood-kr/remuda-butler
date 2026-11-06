@@ -474,7 +474,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     -- Suppress the raw/PTY body path on both durable success and failure. The
     -- agent record and saved mail keep the full brief; this only stops typing.
     saved_task_id = saved_id
-    if controls and type(controls.set_saved) == "function" then
+    if control_state and type(controls.set_saved) == "function" then
       pcall(controls.set_saved, actual, saved_id, control_state)
     end
     task = ""
