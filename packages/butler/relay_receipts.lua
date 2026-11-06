@@ -145,6 +145,14 @@ local function write(reply_id, txn_id, source_mail_id, event_id, status, complet
       completed_at, encoded })
   if not inserted then
     rollback(db)
+    -- A txn id owned by another reply is a conflict to skip, like a reply-id
+    -- conflict, not a reason to abort the whole import.
+    local owner = checked(db.query, db,
+      "SELECT reply_id FROM reply_receipts WHERE txn_id = ?", { txn_id })
+    if owner and owner[1] and owner[1].reply_id ~= reply_id then
+      report("degraded", "txn_conflict", tostring(txn_id))
+      return nil, "conflict"
+    end
     report("degraded", "receipt_write", tostring(insert_err))
     return nil, "insert: " .. tostring(insert_err)
   end

@@ -131,6 +131,34 @@ events = {}
 assert(dirty.record("r5", "butler_r5", { source_mail_id = "m5", completed_at = "now" }) == nil)
 assert(dirty.status().available == false, "a failed rollback disposes the handle")
 
+-- A live record followed by a reload import of the same JSON result is
+-- idempotent, not a txn-provenance conflict.
+local reload_db = fake_db()
+local live = load(function() return reload_db end)
+local live_receipt = { source_mail_id = "m8", event_id = "e8", txn_id = "butler_r8",
+  completed_at = "now" }
+assert(live.record("r8", "butler_r8", live_receipt) == true)
+assert(live.import_all({ r8 = live_receipt }) == true)
+assert(reload_db.rows.r8.txn_id == "butler_r8")
+
+-- A slow injected clock stops the import inside its row budget.
+local slow_db = fake_db()
+local calls = 0
+local slow_clock = function()
+  calls = calls + 1
+  return calls > 1 and 3000 or 0
+end
+remuda.clock = slow_clock
+local slow = load(function() return slow_db end)
+local many = {}
+for index = 1, 20 do
+  many["r" .. index] = { source_mail_id = "m" .. index, event_id = "e", completed_at = "now" }
+end
+assert(slow.import_all(many) == true)
+assert(slow.status().partial == true, "time budget marks partial")
+assert(tostring(slow.status().error):find("time budget", 1, true))
+remuda.clock = nil
+
 -- A malformed receipt is skipped visibly, not guessed.
 events = {}
 assert(importer.import_all({ bad = { event_id = "x" } }) == true)
