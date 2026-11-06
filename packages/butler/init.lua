@@ -517,6 +517,13 @@ reports it.
         run = function(_, args, caller) return host._butler_command_run("close", args, caller) end },
       { id = "doctor", order = 5, verb = "doctor", usage = "  remuda butler doctor",
         run = function(_, args, caller) return host._butler_command_run("doctor", args, caller) end },
+      -- commands.lua registers the verb, but the exported catalog is what the
+      -- host dispatches; an unlisted verb is unreachable from `remuda butler`.
+      -- The forwarded run keeps the root-only caller check inside commands.lua.
+      { id = "native", order = 5.9, verb = "native",
+        usage = "  remuda butler native adopt-codex ALIAS --socket PATH --thread UUID"
+          .. " | adopt-opencode ALIAS --endpoint URL --conversation SES_ID --password-stdin",
+        run = function(_, args, caller) return host._butler_command_run("native", args, caller) end },
       { id = "quota", order = 6, verb = "quota", usage = "  remuda butler quota [--report]",
         run = function(_, args, caller) return host._butler_command_run("quota", args, caller) end },
       { id = "compact", order = 16, verb = "compact", usage = "  remuda butler compact <session> [--dry-run|--force]",
