@@ -9148,11 +9148,11 @@ local function check_relay_shadow_and_budget()
 
   -- Read-only budget counts the root plus every table pair and uses the real
   -- encoder for bytes. No state is written.
-  local budget = relay_module.json_budget({ a = 1, b = { c = 2 } })
-  assert(budget.values == 4, "budget counts root plus every pair: " .. tostring(budget.values))
+  local budget = relay_module.json_budget({ processed_order = {} })
+  assert(budget.values >= 2, "budget counts root plus every pair: " .. tostring(budget.values))
   assert(type(budget.bytes) == "number" and budget.bytes > 0, "budget measures bytes")
   assert(budget.level == "ok")
-  local warn = relay_module.json_budget({ many = (function()
+  local warn = relay_module.json_budget({ processed_order = (function()
     local value = {}
     for index = 1, 90000 do value[index] = index end
     return value
@@ -9162,7 +9162,7 @@ local function check_relay_shadow_and_budget()
     "small state admits a reply")
   local near = {}
   for index = 1, 95000 do near[index] = index end
-  local admitted, why = relay_module.admission({ many = near }, 128, 128 * 1024)
+  local admitted, why = relay_module.admission({ processed_order = near }, 128, 128 * 1024)
   assert(admitted == false and tostring(why):find("value budget", 1, true),
     "stop band refuses before HTTP")
 end

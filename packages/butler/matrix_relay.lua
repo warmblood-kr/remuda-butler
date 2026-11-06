@@ -656,11 +656,30 @@ local function subscribe(state, room_id, thread_id, mail_id)
   return true
 end
 
+-- The exact shape save_state encodes. `state.processed` is an internal map and
+-- `processed_order` must be a tagged array; encoding the raw state would fail
+-- on those two empty tables even though the real save succeeds.
+local function relay_json_view(state)
+  return { since = state.since,
+    processed_event_ids = json.array(state.processed_order or {}),
+    messages_since = state.messages_since, pending_events = state.pending,
+    quarantine = state.quarantine, matrix_mail_routes = state.routes,
+    matrix_own_events = state.own_events,
+    matrix_reply_outbox = state.reply_outbox,
+    matrix_reply_results = state.reply_results,
+    matrix_thread_subscriptions = state.subscriptions, approvals = state.approvals,
+    matrix_unfollowed_threads = state.unfollowed,
+    invite_dedupe = state.invite_dedupe,
+    auto_join_timestamps = state.auto_join_timestamps,
+    typed_line_timestamps = state.typed_line_timestamps }
+end
+
 -- Read-only encoder budget for the whole relay state. The value count mirrors
 -- the core encoder (one per table pair plus the root); bytes come from the real
 -- encoder when it can produce them. No state is written and no body is shown.
 function relay.json_budget(state)
   if type(state) ~= "table" then return nil, "state is not a table" end
+  local view = relay_json_view(state)
   local values = 1
   local seen = {}
   local cyclic = false
@@ -673,8 +692,8 @@ function relay.json_budget(state)
     end
     seen[table_value] = nil
   end
-  walk(state)
-  local encoded_ok, encoded, encode_why = pcall(json.encode, state)
+  walk(view)
+  local encoded_ok, encoded, encode_why = pcall(json.encode, view)
   local bytes = encoded_ok and type(encoded) == "string" and #encoded or nil
   local level = "ok"
   if values >= RELAY_JSON_STOP_VALUES
@@ -1000,6 +1019,7 @@ function relay.new(options)
   local delivery_retry_waiting, delivery_retry_timers = {}, {}
   local context_fetching, context_fetch_handles = {}, {}
   local reply_retry_timers, reply_in_flight = {}, {}
+  local confirmed_unsaved = {}
   local untrusted_receive_times = {}
   local notification_rooms, notification_full_state = {}, true
   local typed_line_refusal_at
@@ -1018,6 +1038,7 @@ function relay.new(options)
   local function persist()
     local ok, err = save_state(state_path, state)
     if not ok then error("cannot save Matrix relay state: " .. tostring(err), 0) end
+    if next(confirmed_unsaved) then confirmed_unsaved = {} end
     return true
   end
 
@@ -1381,6 +1402,18 @@ function relay.new(options)
   function instance._send_reply(reply_id, callback)
     local item = state.reply_outbox[reply_id]
     if not item or reply_in_flight[reply_id] then return end
+    if item.status == "uncertain" then
+      if callback then callback({ error = "reply is uncertain; operator resolution required" }) end
+      return
+    end
+    if item.status == "in_flight" then
+      item.status = "uncertain"
+      item.last_error = "previous dispatch did not record an outcome"
+      diagnostic("error", "reply_uncertain", tostring(reply_id))
+      local ok = pcall(persist)
+      if callback then callback({ error = item.last_error }) end
+      return
+    end
     local admitted, admission_why = relay.admission(state)
     if not admitted then
       item.last_error = "relay JSON headroom exhausted: " .. tostring(admission_why)
@@ -1389,7 +1422,15 @@ function relay.new(options)
       return
     end
     item.attempts = (tonumber(item.attempts) or 0) + 1
-    persist()
+    item.status = "in_flight"
+    local pre_ok, pre_err = pcall(persist)
+    if not pre_ok then
+      item.status = "pending"
+      item.last_error = "could not persist dispatch intent: " .. tostring(pre_err)
+      diagnostic("error", "reply_dispatch_intent", tostring(reply_id))
+      if callback then callback({ error = item.last_error }) end
+      return
+    end
     local send_generation = generation
     local token = { generation = send_generation }
     reply_in_flight[reply_id] = token
@@ -1418,7 +1459,16 @@ function relay.new(options)
             completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
           trim_map(state.reply_results, MAX_REPLY_RESULTS, "completed_at")
           state.reply_outbox[reply_id] = nil
-          persist()
+          local saved, save_err = pcall(persist)
+          if not saved then
+            -- The message is already on Matrix. Never re-enter send for this
+            -- id; a later persist may save the projection, and a restart sees
+            -- the durable in_flight intent and becomes visible uncertain.
+            confirmed_unsaved[reply_id] = { event_id = sent_id, txn_id = item.txn_id,
+              at = os.time() }
+            diagnostic("error", "confirmed_unsaved", tostring(reply_id))
+            item.last_error = "confirmed on Matrix but not saved locally: " .. tostring(save_err)
+          end
           local receipts_module = remuda._butler_relay_receipts
           if receipts_module then
             pcall(receipts_module.record, reply_id, item.txn_id, state.reply_results[reply_id])
@@ -1482,6 +1532,13 @@ function relay.new(options)
       persist()
     end
     local existing = state.reply_outbox[reply_id]
+    if existing and existing.status == "in_flight" then
+      if reply_in_flight[reply_id] then return { cancel = function() end } end
+      return nil, "Matrix reply is uncertain; operator resolution is required"
+    end
+    if existing and existing.status == "uncertain" then
+      return nil, "Matrix reply is uncertain; operator resolution is required"
+    end
     if not existing then
       if type(opts.text) ~= "string" or opts.text == "" then return nil, "reply text must not be empty" end
       if #opts.text > MAX_MAIL_REPLY_BYTES then return nil, "Matrix mail reply exceeds 64 KiB" end
@@ -2858,9 +2915,20 @@ function relay.new(options)
         if active then approval.sweep() end
       end })
     end
+    local boot_changed = false
     for id, item in pairs(state.reply_outbox) do
-      if item.status ~= "failed" then instance._send_reply(id) end
+      if item.status == "in_flight" then
+        -- The durable intent was written before HTTP. We cannot prove whether
+        -- Matrix accepted it, so stop visibly instead of replaying.
+        item.status = "uncertain"
+        item.last_error = "previous dispatch did not record an outcome"
+        boot_changed = true
+        diagnostic("error", "reply_uncertain", tostring(id))
+      elseif item.status ~= "failed" and item.status ~= "uncertain" then
+        instance._send_reply(id)
+      end
     end
+    if boot_changed then pcall(persist) end
     poll()
     return true
   end
