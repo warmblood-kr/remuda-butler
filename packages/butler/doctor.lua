@@ -72,6 +72,32 @@ local function typed_line_switches()
   return config.typed_lines == true, config.shell_lines == true, config.approve_text == true, true, approval_room, approval_next
 end
 
+-- Local relay-state headroom: no Matrix HTTP call, so it still works when the
+-- network or homeserver is down. The relay module owns the encoder-budget
+-- semantics; doctor only reads the state file and asks it.
+local function relay_headroom()
+  local matrix = remuda.butler and remuda.butler.matrix
+  local relay = matrix and matrix.relay
+  local paths = remuda._butler_matrix_config or remuda._butler_matrix_paths or {}
+  if type(relay) ~= "table" or type(relay.json_budget) ~= "function"
+      or type(paths.config_path) ~= "string" or paths.config_path == "" then
+    return nil
+  end
+  local file = io.open(paths.config_path .. ".since", "rb")
+  if not file then return { level = "unknown", reason = "no relay state file" } end
+  local text = file:read("*a")
+  file:close()
+  local json = remuda.json
+  if type(json) ~= "table" or type(json.decode) ~= "function" then
+    return { level = "unknown", reason = "JSON decoder unavailable" }
+  end
+  local ok, state = pcall(json.decode, text)
+  if not ok or type(state) ~= "table" then
+    return { level = "unknown", reason = "relay state did not decode" }
+  end
+  return relay.json_budget(state)
+end
+
 local function probe()
   local results = {}
   for _, agent in ipairs({
@@ -86,6 +112,7 @@ local function probe()
   if policy then results.guard_deny = policy.deny_enabled() end
   results.typed_lines, results.shell_lines, results.approve_text, results.matrix_configured,
     results.approval_room, results.approval_next = typed_line_switches()
+  results.relay_headroom = relay_headroom()
   return results
 end
 
@@ -107,6 +134,18 @@ local function render(probe_results, platform)
     "Approve text: " .. (probe_results.approve_text == true and "on" or "off"),
     "Approval room: " .. tostring(probe_results.approval_room or "all -> HOME (lounge not joined)"),
   }
+  local headroom = probe_results.relay_headroom
+  if type(headroom) == "table" then
+    if tonumber(headroom.values) then
+      local bytes = tonumber(headroom.bytes)
+      lines[#lines + 1] = "Relay state: " .. tostring(headroom.values)
+        .. "/100000 values, " .. (bytes and (tostring(bytes) .. " bytes") or "bytes unknown")
+        .. " (" .. tostring(headroom.level or "unknown") .. ")"
+    else
+      lines[#lines + 1] = "Relay state: unavailable ("
+        .. safe(headroom.reason or headroom.level or "unknown") .. ")"
+    end
+  end
   if probe_results.guard_approvals ~= nil then
     lines[#lines + 1] = "Guard approvals: " .. (probe_results.guard_approvals
       and "on (the owner answers Claude permission prompts of new sessions in Matrix; no answer means Claude's own prompt)"

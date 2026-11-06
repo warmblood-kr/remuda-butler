@@ -107,6 +107,7 @@ function matrix.status(args, callback)
       result.user_id = result.whoami.user_id
       result.device_id = result.whoami.device_id
       local paths = remuda._butler_matrix_config
+      local relay = matrix.relay
       local state_file = paths and paths.config_path and io.open(paths.config_path .. ".since", "rb")
       if state_file then
         local saved = state_file:read("*a")
@@ -115,7 +116,16 @@ function matrix.status(args, callback)
         if type(state) == "table" then
           result.sync_cursor = state.since
           result.fallback_cursor = state.messages_since
+          if relay and type(relay.json_budget) == "function" then
+            result.relay_budget = relay.json_budget(state)
+          end
+        else
+          result.relay_budget = { level = "unknown",
+            reason = "relay state file did not decode" }
         end
+      elseif paths and paths.config_path then
+        result.relay_budget = { level = "unknown",
+          reason = "relay state file is unreadable" }
       end
       result.whoami = nil
       finish({ status = 200, json = result })

@@ -367,8 +367,24 @@ local function render_human(verb, options, result)
     return table.concat(lines, "\n") .. "\n"
   elseif verb == "status" then
     local rooms = data.joined_rooms or {}
-    return table.concat({ "User: " .. tostring(data.user_id or "unknown"),
-      "Joined rooms: " .. tostring(#rooms) }, "\n") .. "\n"
+    local lines = { "User: " .. tostring(data.user_id or "unknown"),
+      "Joined rooms: " .. tostring(#rooms) }
+    local budget = data.relay_budget
+    if type(budget) == "table" and tonumber(budget.values) then
+      local bytes = tonumber(budget.bytes)
+      lines[#lines + 1] = "Relay state: " .. tostring(budget.values)
+        .. "/100000 values, " .. (bytes and (tostring(bytes) .. " bytes") or "bytes unknown")
+        .. " (" .. tostring(budget.level or "unknown") .. ")"
+      if budget.level == "warn" or budget.level == "stop" then
+        lines[#lines + 1] = "Relay headroom: near the JSON limit (warn "
+          .. tostring(budget.warn_values) .. " values, stop "
+          .. tostring(budget.stop_values) .. " values)"
+      end
+    elseif type(budget) == "table" then
+      lines[#lines + 1] = "Relay state: unavailable ("
+        .. terminal_safe(tostring(budget.reason or budget.level or "unknown")) .. ")"
+    end
+    return table.concat(lines, "\n") .. "\n"
   elseif verb == "notifications" then
     return "Notifications for " .. terminal_safe(data.room) .. ": " .. terminal_safe(data.mode)
       .. "\nNext: remuda butler matrix --room " .. shell_quote(terminal_safe(data.room))
