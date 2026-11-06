@@ -192,6 +192,21 @@ local function choose(candidates, opts, done)
       start_next(); return
     end
     if type(instance_id) ~= "string" or instance_id == "" then instance_id = nil end
+    -- An old daemon ignores the launch field and still answers success. Check
+    -- the listing before claiming the new instance is protected.
+    if opts.remote_input_disabled == true and instance_id then
+      local rows = remuda.session and remuda.session.list and remuda.session.list() or remuda.ls()
+      local row
+      for _, candidate in ipairs(rows or {}) do
+        if candidate.name == name then row = candidate break end
+      end
+      if not (row and row.instance_id == instance_id and row.remote_input_disabled == true) then
+        bus.remote_input_unprotected = bus.remote_input_unprotected or {}
+        bus.remote_input_unprotected[name] = true
+        local trace = remuda._butler_session_trace or _G._butler_session_trace
+        if trace then pcall(trace, "leader_protection", name .. ": launch flag not visible") end
+      end
+    end
     attempt.instance_id = instance_id
     state = { id = id, entry = entry, attempt = attempt, name = name,
       instance_id = instance_id,
