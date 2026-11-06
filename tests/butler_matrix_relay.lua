@@ -3946,11 +3946,11 @@ local function test_rx_follow_unfollow_verbs()
       rx_sync(client, NEW, { rx_msg("$f-t2", OWNER, "in thread", rx_thread("$f-root")) })
       assert(not rx_find(delivered, "$f-t2"), "a reply after unfollow is not delivered in a joined room")
       result = capture_matrix_cli({ "matrix", "--room", NEW, "unfollow", "$f-root" })
-      assert(result and result.code == 0 and result.stdout:find("Stopped following thread $f-root", 1, true),
-        "unfollow of an already unfollowed thread is still success, got: " .. tostring(result and result.stdout))
+      assert(result and result.code == 0 and result.stdout:find("Not following thread $f-root", 1, true),
+        "unfollow of an already unfollowed thread reports no change, got: " .. tostring(result and result.stdout))
       result = capture_matrix_cli({ "matrix", "--room", NEW, "unfollow", "$f-never" })
-      assert(result and result.code == 0 and result.stdout:find("Stopped following thread $f-never", 1, true),
-        "unfollow of a thread that was never followed records the marker without an error, got: "
+      assert(result and result.code == 0 and result.stdout:find("Not following thread $f-never", 1, true),
+        "unfollow of a thread that was never followed reports no change, got: "
           .. tostring(result and result.stdout))
       assert((((relay:state().unfollowed or {})[NEW] or {})["$f-never"] ~= nil),
         "a thread that was never followed still gets an explicit unfollow marker")
