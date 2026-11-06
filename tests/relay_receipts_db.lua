@@ -80,6 +80,7 @@ assert(unavailable.record("r0", "t0", { source_mail_id = "m0", completed_at = "n
 local wrong = load(function() return fake_db({ authority = "db-v1" }) end)
 assert(wrong.status().available == false, "only shadow authority is accepted")
 assert(tostring(wrong.status().error):find("shadow", 1, true))
+assert(wrong.authority_state() == "mismatch", "a future authority is explicit")
 
 local db = fake_db()
 local shadow = load(function() return db end)
@@ -113,6 +114,22 @@ assert(import_db.rows.r2.txn_id == "legacy_r2", "legacy import has a stable txn"
 assert(import_db.rows.r3.status == "error", "a failed receipt keeps its status")
 assert(importer.import_all(results) == true, "a second import is safe")
 assert(import_db.meta.import_committed == "2", "committed import count is recorded")
+
+-- A JSON result that already carries its txn id imports without conflict.
+local exact_db = fake_db()
+local exact = load(function() return exact_db end)
+assert(exact.import_all({ r9 = { source_mail_id = "m9", event_id = "e9",
+  txn_id = "butler_r9", completed_at = "now" } }) == true)
+assert(exact_db.rows.r9.txn_id == "butler_r9", "exact live txn is preserved")
+
+-- A failed rollback disposes the handle instead of reusing a dirty transaction.
+local rollback_db = fake_db({ fail = function(sql)
+  return sql:find("INSERT INTO reply_receipts", 1, true) ~= nil or sql == "ROLLBACK"
+end })
+local dirty = load(function() return rollback_db end)
+events = {}
+assert(dirty.record("r5", "butler_r5", { source_mail_id = "m5", completed_at = "now" }) == nil)
+assert(dirty.status().available == false, "a failed rollback disposes the handle")
 
 -- A malformed receipt is skipped visibly, not guessed.
 events = {}

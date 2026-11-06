@@ -12,7 +12,9 @@ local M = {}
 local handle
 local failure
 local stats = { imported = 0, skipped = 0, partial = false, error = nil }
+local authority_state = "unavailable"
 local MAX_IMPORT_ROWS = 5000
+local MAX_IMPORT_MS = 2000
 
 local function report(outcome, reason, correlation)
   local diagnostics = remuda._butler_diagnostics
@@ -49,9 +51,11 @@ local function opened()
       failure = "authority: " .. tostring(query_err)
       pcall(db.close, db)
     elseif not rows[1] or rows[1].value ~= "shadow" then
-      failure = "authority: expected shadow"
+      authority_state = "mismatch"
+      failure = "authority: expected shadow, found " .. tostring(rows[1] and rows[1].value)
       pcall(db.close, db)
     else
+      authority_state = "shadow"
       handle = db
     end
   end
@@ -66,10 +70,16 @@ local function dispose(reason)
   report("error", "disposed", reason)
 end
 
+local function rollback(db)
+  local ok, why = checked(db.exec, db, "ROLLBACK")
+  if not ok then dispose("rollback: " .. tostring(why)) end
+  return ok
+end
+
 local function commit_or_dispose(db)
   local ok, why = checked(db.exec, db, "COMMIT")
   if ok then return true end
-  checked(db.exec, db, "ROLLBACK")
+  rollback(db)
   dispose("commit: " .. tostring(why))
   return nil
 end
@@ -118,12 +128,12 @@ local function write(reply_id, txn_id, source_mail_id, event_id, status, complet
   end
   local row, row_err = existing(db, reply_id)
   if row == nil and row_err ~= nil then
-    checked(db.exec, db, "ROLLBACK")
+    rollback(db)
     report("degraded", "receipt_query", tostring(row_err))
     return nil, "query: " .. tostring(row_err)
   end
   if row then
-    checked(db.exec, db, "ROLLBACK")
+    rollback(db)
     if same(row, receipt) then return true end
     report("degraded", "receipt_conflict", reply_id)
     return nil, "conflict"
@@ -135,7 +145,7 @@ local function write(reply_id, txn_id, source_mail_id, event_id, status, complet
     { reply_id, txn_id, source_mail_id, event_id or "", status or "sent",
       completed_at, encoded })
   if not inserted then
-    checked(db.exec, db, "ROLLBACK")
+    rollback(db)
     report("degraded", "receipt_write", tostring(insert_err))
     return nil, "insert: " .. tostring(insert_err)
   end
@@ -154,16 +164,29 @@ function M.import_all(results)
   for id in pairs(results) do ids[#ids + 1] = id end
   table.sort(ids, function(a, b) return tostring(a) < tostring(b) end)
   stats.imported, stats.skipped, stats.partial = 0, 0, false
+  local clock = config.now or remuda.clock
+  local started = type(clock) == "function" and pcall(clock) and clock() or nil
   for index, id in ipairs(ids) do
     if index > MAX_IMPORT_ROWS then
       stats.partial = true
+      stats.error = "partial: row budget"
       break
+    end
+    if started and type(clock) == "function" then
+      local now = clock()
+      if type(now) == "number" and now - started > MAX_IMPORT_MS then
+        stats.partial = true
+        stats.error = "partial: time budget"
+        break
+      end
     end
     local item = results[id]
     if type(id) == "string" and type(item) == "table"
         and type(item.source_mail_id) == "string" and type(item.completed_at) == "string" then
       local status = item.error and "error" or "sent"
-      local ok, write_err = write(id, "legacy_" .. id, item.source_mail_id,
+      local txn = type(item.txn_id) == "string" and item.txn_id ~= "" and item.txn_id
+        or ("legacy_" .. id)
+      local ok, write_err = write(id, txn, item.source_mail_id,
         item.event_id or "", status, item.completed_at, item)
       if ok then
         stats.imported = stats.imported + 1
@@ -200,6 +223,12 @@ function M.record(reply_id, txn_id, receipt)
   return ok, why
 end
 
+-- The persisted authority marker; `mismatch` must stop relay sends in phase 1.
+function M.authority_state()
+  opened()
+  return authority_state
+end
+
 -- Read one shadow row for diagnostics/tests; phase 1 has no read authority.
 function M.get(reply_id)
   local db, why = opened()
@@ -218,7 +247,7 @@ function M.status()
     skipped = stats.skipped,
     partial = stats.partial,
     error = failure or stats.error,
-    authority = "shadow",
+    authority = authority_state,
   }
 end
 

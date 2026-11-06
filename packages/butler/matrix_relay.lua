@@ -1323,7 +1323,8 @@ function relay.new(options)
           end
           state.reply_results[reply_id] = { source_mail_id = item.source_mail_id,
             reply_mail_id = reply_id, room_id = item.room_id, thread_root = item.thread_root,
-            event_id = sent_id, event_ids = ids, completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
+            event_id = sent_id, event_ids = ids, txn_id = item.txn_id,
+            completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
           trim_map(state.reply_results, MAX_REPLY_RESULTS, "completed_at")
           state.reply_outbox[reply_id] = nil
           persist()
@@ -1339,7 +1340,8 @@ function relay.new(options)
       if item.attempts >= 8 then
         state.reply_results[reply_id] = { source_mail_id = item.source_mail_id,
           reply_mail_id = reply_id, room_id = item.room_id, thread_root = item.thread_root,
-          event_id = "", error = item.last_error, completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
+          event_id = "", error = item.last_error, txn_id = item.txn_id,
+          completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
         state.reply_outbox[reply_id] = nil
         trim_map(state.reply_results, MAX_REPLY_RESULTS, "completed_at")
       else
@@ -2806,6 +2808,13 @@ end
 function relay.start(config)
   if relay.instance then return false end
   if not config or not config.config_path then return false end
+  local receipts = remuda._butler_relay_receipts
+  if receipts and receipts.authority_state() == "mismatch" then
+    -- A future/unknown authority is not the same as a missing database: do
+    -- not keep serving JSON sends as if the shadow disagreed on purpose.
+    diagnostic("error", "receipt_authority_mismatch", nil)
+    return false
+  end
   relay.instance = relay.new({ config_path = config.config_path, matrix = matrix,
     deliver = function(event)
       local body = event.body
