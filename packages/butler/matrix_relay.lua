@@ -1266,12 +1266,16 @@ function relay.new(options)
   function instance:unsubscribe_thread(room_id, thread_id)
     if type(room_id) ~= "string" or type(thread_id) ~= "string" then return false end
     local subscriptions = state.subscriptions[room_id]
+    -- Report whether this call actually stopped a followed thread. An unknown
+    -- thread still gets the persistent marker, but "Stopped following" would
+    -- claim a change that did not happen.
+    local was_followed = type(subscriptions) == "table" and subscriptions[thread_id] ~= nil
     if type(subscriptions) == "table" then subscriptions[thread_id] = nil end
     -- The explicit marker is what mutes unmentioned thread replies, also in
     -- HOME (mode all). It survives restart until an explicit follow clears it.
     mark_unfollowed(state, room_id, thread_id)
     persist()
-    return true
+    return was_followed
   end
 
   local function schedule_reply_retry(reply_id, delay)
