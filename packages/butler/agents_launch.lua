@@ -212,8 +212,10 @@ local function choose(candidates, opts, done)
         pcall(remuda.session.remote_input, name, instance_id, false)
         checked = protected()
       end
-      if not checked then
-        bus.remote_input_unprotected = bus.remote_input_unprotected or {}
+      bus.remote_input_unprotected = bus.remote_input_unprotected or {}
+      if checked then
+        bus.remote_input_unprotected[name] = nil
+      else
         bus.remote_input_unprotected[name] = true
         local trace = remuda._butler_session_trace or _G._butler_session_trace
         if trace then pcall(trace, "leader_protection", name .. ": launch flag not visible") end
