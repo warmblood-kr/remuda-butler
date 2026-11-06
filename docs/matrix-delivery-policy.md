@@ -3,26 +3,35 @@
 `butler/matrix_delivery_policy` publishes `matrix.delivery_policy` before the
 relay module loads. `accept_received` and `accept_pending` compose the same
 notification-mode selector with mention and followed-thread eligibility.
-`followed` and `accept_mode` are the constituent policy functions. The module
-does not change subscriptions, issue requests, write relay state, or deliver mail.
+`followed`, `accept_mode` and `accept_thread` are the constituent policy
+functions. The module does not change subscriptions, issue requests, write relay
+state, or deliver mail. It never reads relay state: the relay passes the
+explicit-unfollow marker for the event's thread as the last argument
+(`unfollowed_root`, a boolean).
 
 The relay uses `accept_received` for ordinary receive eligibility and typed-line
 room eligibility, and `accept_pending` immediately before context/delivery work.
 Receive-time validation, trusted-mention auto-follow, per-room rate limiting,
 context fetches, routes, acknowledgments, dead-letter/retry handling, cursor
-persistence and lifecycle cancellation stay with the relay.
+persistence and lifecycle cancellation stay with the relay. The typed-line gate
+calls `accept_received` without an unfollow marker: an owner's `!` line is an
+action, not inbox delivery.
 
 Modes retain their existing defaults and behavior: HOME defaults to `all`,
 additional rooms to `mentions-followed`, and `none` suppresses all notifications.
 Only `m.thread` roots confer followed-thread eligibility; an `in_reply_to` link
-alone does not. A trusted mention still auto-follows even in `none` mode. Pending
-mail is checked against current mode and follows: removing a recorded
-`mention_follow_root` revokes that pending mention's eligibility, unless its
-thread is independently still followed. Historical pending entries without that
-field keep the original mention rule. Suppressed pending mail is durably marked
-processed; changing policy later does not resurrect it. Policy functions are
-not an authorization boundary: sender validation and command gates remain in
-their existing modules.
+alone does not. A trusted mention still auto-follows even in `none` mode unless
+the thread carries an explicit unfollow marker. An explicitly unfollowed thread
+suppresses unmentioned replies in every mode, including `all`; a mention is
+still delivered (that message only) and the relay skips the re-follow. Pending
+mail is checked against current mode, follows and the current unfollow marker:
+removing a recorded `mention_follow_root` revokes that pending mention's
+eligibility, unless its thread is independently still followed or the thread was
+explicitly unfollowed (the mention itself is delivered, without re-following).
+Historical pending entries without that field keep the original
+mention rule. Suppressed pending mail is durably marked processed; changing
+policy later does not resurrect it. Policy functions are not an authorization
+boundary: sender validation and command gates remain in their existing modules.
 
 ## Reevaluation and restart boundaries
 
@@ -92,3 +101,7 @@ retained instance. They demonstrate that factory/closure identity remains
 unchanged for existing instances while future policy lookups see a new table;
 a separately captured old function remains old. Reevaluation is tested with
 worktree `dofile` under the pinned core, not installed-mod lifecycle activation.
+The table also crosses the explicit-unfollow marker (`unfollowed_root`) with
+every mode. Relay coverage adds HOME `all` unfollow muting, a mention that does
+not re-follow, pending suppression marked processed, marker survival across
+restart, and a turn guard that counts only exchanges between different agents.

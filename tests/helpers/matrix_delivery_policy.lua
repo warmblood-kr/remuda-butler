@@ -14,15 +14,21 @@ return function(t)
       local subscriptions = { ["$followed"] = {} }
       -- Each row specifies receive/pending independently, including legacy state,
       -- unfollowed mention roots, and a still-followed reply after another unfollow.
+      -- The fourth column is the explicit-unfollow marker for the event's thread.
       local rows = {
-        { {}, false, false },
-        { { is_mention = true }, true, true },
-        { { thread_root = "$followed" }, true, true },
-        { { thread_root = "$gone" }, false, false },
-        { { is_mention = true, mention_follow_root = "$gone" }, true, false },
-        { { is_mention = true, mention_follow_root = "$followed" }, true, true },
-        { { is_mention = true, mention_follow_root = "$gone", thread_root = "$followed" }, true, true },
-        { { in_reply_to = "$followed" }, false, false },
+        { {}, false, false, false },
+        { { is_mention = true }, true, true, false },
+        { { thread_root = "$followed" }, true, true, false },
+        { { thread_root = "$gone" }, false, false, false },
+        { { is_mention = true, mention_follow_root = "$gone" }, true, false, false },
+        { { is_mention = true, mention_follow_root = "$followed" }, true, true, false },
+        { { is_mention = true, mention_follow_root = "$gone", thread_root = "$followed" }, true, true, false },
+        { { in_reply_to = "$followed" }, false, false, false },
+        { { thread_root = "$gone" }, false, false, true },
+        { { thread_root = "$followed" }, false, false, true },
+        { { is_mention = true, thread_root = "$gone" }, true, true, true },
+        { { is_room_mention = true, thread_root = "$gone" }, true, true, true },
+        { { is_mention = true, mention_follow_root = "$gone", thread_root = "$gone" }, true, true, true },
       }
       for _, mode in ipairs({ "all", "mentions-followed", "none" }) do
         cfg.room_notifications[t.room] = mode
@@ -30,9 +36,12 @@ return function(t)
           local received, pending = row[2], row[3]
           if mode == "all" then received, pending = true, true end
           if mode == "none" then received, pending = false, false end
-          assert(policy.accept_received(cfg, t.room, subscriptions, row[1]) == received,
+          if row[4] and not (row[1].is_mention or row[1].is_room_mention) then
+            received, pending = false, false
+          end
+          assert(policy.accept_received(cfg, t.room, subscriptions, row[1], row[4]) == received,
             mode .. " receive row " .. index)
-          assert(policy.accept_pending(cfg, t.room, subscriptions, row[1]) == pending,
+          assert(policy.accept_pending(cfg, t.room, subscriptions, row[1], row[4]) == pending,
             mode .. " pending row " .. index)
         end
       end
