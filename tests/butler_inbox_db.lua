@@ -51,8 +51,8 @@ local function fake_db(options)
   return db
 end
 
-local function load(open, root)
-  remuda._butler_inbox_db_config = { root = root, open = open }
+local function load(open, root, now)
+  remuda._butler_inbox_db_config = { root = root, open = open, now = now }
   remuda._butler_diagnostics = { record = report }
   dofile("packages/butler/inbox_db.lua")
   return remuda._butler_inbox_db
@@ -195,6 +195,22 @@ local disposed = load(function() return rollback_db end, root)
 assert(disposed.import_all() == nil, "a failed insert aborts the import")
 assert(disposed.available() == false, "a failed rollback disposes the handle")
 assert(tostring(disposed.status().error):find("degraded", 1, true), "the disposal is observable")
+
+-- A wall-clock budget stops inside one mailbox, not only between mailboxes.
+local extra = assert(io.open(root .. "/inboxes/612f62.jsonl", "a"))
+assert(extra:write('{"message_id":"slow"}\n'))
+assert(extra:close())
+local clock_calls = 0
+local ticking = function()
+  clock_calls = clock_calls + 1
+  return clock_calls > 3 and 3000 or 0
+end
+local slow_db = fake_db()
+local slow = load(function() return slow_db end, root, ticking)
+assert(slow.import_all() == true, "a partial import still returns success")
+assert(slow.status().partial == true, "the time budget marks the import partial")
+assert(slow.status().imported_bytes > 0, "the committed prefix is counted")
+assert(slow.status().error ~= nil, "the partial state is observable")
 
 remuda.remove_dir_all(root)
 print("ok")

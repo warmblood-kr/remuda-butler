@@ -4,3 +4,5 @@ tests/butler_matrix_relay.lua|2
 # Focused storage-failure test: make the shared mail objects directory read-only,
 # then restore it after the launch failure is observed. Test-only, no product path.
 tests/lua/butler_task_mail_policy_test.lua|2
+# Unit test: one disposable directory tree for the import fixture.
+tests/butler_inbox_db.lua|1

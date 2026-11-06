@@ -2,7 +2,10 @@
 --
 -- Files stay authoritative in this phase: every write below happens only after
 -- the matching file commit, and every failure is reported as degraded while
--- mail continues on the file path. There is no read switch yet.
+-- mail continues on the file path. There is no read switch yet. Import is a
+-- cooperative budget: it checks elapsed time between bounded DB calls, so a
+-- single busy SQLite call can still add its native timeout, but a slow import
+-- stops at the next line and reports partial.
 local config = assert(remuda._butler_inbox_db_config)
 
 local M = {}
@@ -16,8 +19,17 @@ local stats = { imported = 0, skipped = 0, partial = false, error = nil }
 local MAX_LOG_BYTES = 8 * 1024 * 1024
 local MAX_BOOT_BYTES = 32 * 1024 * 1024
 local MAX_BOOT_STATEMENTS = 50000
-local MAX_BOOT_SECONDS = 2
+local MAX_BOOT_MS = 2000
 local HEAD_BYTES = 64
+
+local function wall_clock()
+  local clock = config.now or remuda.clock
+  if type(clock) == "function" then
+    local ok, value = pcall(clock)
+    if ok and type(value) == "number" then return value end
+  end
+  return os.time() * 1000
+end
 
 local function report(outcome, reason, correlation)
   local diagnostics = remuda._butler_diagnostics
@@ -51,7 +63,7 @@ local function opened()
     failure = "unavailable: remuda.db.open is missing"
     return nil, failure
   end
-  local ok, db, why = pcall(opener, "inbox", { migrations = true })
+  local ok, db, why = pcall(opener, "inbox", { migrations = true, timeout_ms = 200 })
   if not ok then
     failure = "open: " .. tostring(db)
   elseif db == nil then
@@ -133,8 +145,11 @@ local function missing_file(reason, errno)
 end
 
 local function head_hash(file, size)
-  file:seek("set", 0)
-  local head = file:read(math.min(size, HEAD_BYTES)) or ""
+  local positioned, seek_err = file:seek("set", 0)
+  if not positioned then return nil, "seek: " .. tostring(seek_err) end
+  local head = file:read(math.min(size, HEAD_BYTES))
+  if head == nil and size > 0 then return nil, "read" end
+  head = head or ""
   local hash = 0
   for index = 1, #head do
     hash = (hash * 31 + head:byte(index)) % 4294967296
@@ -164,7 +179,7 @@ end
 local function budget_left(budget)
   return budget.bytes < MAX_BOOT_BYTES
     and budget.statements < MAX_BOOT_STATEMENTS
-    and budget.clock() - budget.started < MAX_BOOT_SECONDS
+    and budget.now() - budget.started < MAX_BOOT_MS
 end
 
 local function read_chunk(file, offset, size, budget)
@@ -182,6 +197,10 @@ end
 local function import_lines(db, chunk, recipient, parse, insert, budget)
   local consumed = 0
   for line in chunk:gmatch("([^\n]*)\n") do
+    if budget.now() - budget.started >= MAX_BOOT_MS then
+      stats.partial = true
+      break
+    end
     consumed = consumed + #line + 1
     local id = parse(line)
     if id then
@@ -191,7 +210,8 @@ local function import_lines(db, chunk, recipient, parse, insert, budget)
       stats.skipped = stats.skipped + 1
     end
     budget.statements = budget.statements + 1
-    if budget.statements >= MAX_BOOT_STATEMENTS then
+    if budget.statements >= MAX_BOOT_STATEMENTS
+      or budget.now() - budget.started >= MAX_BOOT_MS then
       stats.partial = true
       break
     end
@@ -202,7 +222,7 @@ end
 local function import_path(db, path, recipient, kind, parse, insert, budget)
   local file, open_err, open_errno = io.open(path, "rb")
   if not file then
-    if missing_file(open_err, open_errno) then return true end
+    if missing_file(open_err, open_errno) then return true, nil, 0 end
     return nil, "open " .. path .. ": " .. tostring(open_err)
   end
   local size, seek_err = file:seek("end")
@@ -217,7 +237,15 @@ local function import_path(db, path, recipient, kind, parse, insert, budget)
   end
   -- A short log has no stable fingerprint: appending can change its first 64
   -- bytes. Only logs at least HEAD_BYTES long use replacement detection.
-  local head = size >= HEAD_BYTES and head_hash(file, size) or 0
+  local head = 0
+  if size >= HEAD_BYTES then
+    local hashed, head_err = head_hash(file, size)
+    if hashed == nil then
+      file:close()
+      return nil, "head " .. path .. ": " .. tostring(head_err)
+    end
+    head = hashed
+  end
   local changed = stored_head ~= nil and stored_head ~= 0 and head ~= 0 and stored_head ~= head
   if offset > size or changed then
     local cleared, clear_err = clear_kind(db, recipient, kind)
@@ -232,13 +260,13 @@ local function import_path(db, path, recipient, kind, parse, insert, budget)
     file:close()
     if read_err == "budget" then
       stats.partial = true
-      return true
+      return true, nil, 0
     end
     return nil, "read " .. path .. ": " .. tostring(read_err)
   end
   if chunk == "" then
     file:close()
-    return true
+    return true, nil, 0
   end
   local ok, why, consumed = import_lines(db, chunk, recipient, parse, insert, budget)
   if not ok then
@@ -249,29 +277,31 @@ local function import_path(db, path, recipient, kind, parse, insert, budget)
     file:close()
     stats.partial = true
     stats.error = stats.error or ("line exceeds " .. MAX_LOG_BYTES .. " bytes: " .. path)
-    return true
+    return true, nil, 0
   end
   local saved, save_err = save_offset(db, recipient, kind, offset + consumed, head)
   file:close()
   if not saved then return nil, save_err end
   budget.bytes = budget.bytes + consumed
-  stats.imported = stats.imported + consumed
   if offset + consumed < size then stats.partial = true end
-  return true
+  return true, nil, consumed
 end
 
 local function import_recipient(db, root, file, budget)
   local recipient = file:match("^(.+)%.jsonl$")
   if not recipient then return true end
-  return transaction(db, function(active)
-    local ok, why = import_path(active, root .. "/inboxes/" .. file, recipient,
+  local result, transaction_err = transaction(db, function(active)
+    local ok, why, inbox_bytes = import_path(active, root .. "/inboxes/" .. file, recipient,
       "inbox", id_from_json, insert_delivery, budget)
     if not ok then return nil, why end
-    ok, why = import_path(active, root .. "/read/" .. file, recipient,
+    local read_ok, read_err, read_bytes = import_path(active, root .. "/read/" .. file, recipient,
       "read", id_from_read, insert_read, budget)
-    if not ok then return nil, why end
-    return true
+    if not read_ok then return nil, read_err end
+    return { bytes = inbox_bytes + read_bytes }
   end)
+  if not result then return nil, transaction_err end
+  stats.imported = stats.imported + result.bytes
+  return true
 end
 
 -- Import is idempotent and only runs when the DB opens. A file that changed
@@ -293,8 +323,8 @@ function M.import_all()
   local budget = {
     bytes = 0,
     statements = 0,
-    started = os.clock(),
-    clock = os.clock,
+    started = wall_clock(),
+    now = wall_clock,
   }
   local first_error
   for _, file in ipairs(names) do

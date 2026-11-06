@@ -1,3 +1,5 @@
+-- seq is index insertion order, not canonical file delivery order while a
+-- backlog remains. Do not use it for mailbox ordering before cutover.
 CREATE TABLE deliveries (
   recipient TEXT NOT NULL,
   message_id TEXT NOT NULL,
