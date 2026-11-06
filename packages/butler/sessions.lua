@@ -283,8 +283,13 @@ local function osc_activity(session)
   local state = status.state
   local activity = OSC_ACTIVITY[state]
   local limit = OSC_ACTIVITY_MAX_AGE[state]
-  local age = tonumber(session.program_status_age) or 0
-  if not activity or not limit or age < 0 or age > limit then return nil end
+  -- Missing or malformed age is unknown, never fresh. NaN and infinities must
+  -- not slip through the comparisons.
+  if not activity or not limit then return nil end
+  local age = session.program_status_age
+  if type(age) ~= "number" or age ~= age or age == math.huge or age < 0 or age > limit then
+    return nil
+  end
   return activity
 end
 -- `remuda.session_detail` is also called with just {name=...}; find the live
@@ -292,12 +297,18 @@ end
 local function session_with_status(session)
   if type(session) ~= "table" then return nil end
   if type(session.program_status) == "table" then return session end
+  -- Without an instance there is no safe way to distinguish a reused name, so
+  -- do not attach a listed status to a bare name.
+  if type(session.instance_id) ~= "string" or session.instance_id == "" then return session end
   local listed = remuda.session and remuda.session.list
   if type(listed) ~= "function" then return session end
   local ok, rows = pcall(listed)
   if not ok or type(rows) ~= "table" then return session end
   for _, row in ipairs(rows) do
-    if row.name == session.name then return row end
+    if row.name == session.name and row.instance_id == session.instance_id
+      and row.unavailable ~= true then
+      return row
+    end
   end
   return session
 end
