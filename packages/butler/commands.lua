@@ -48,6 +48,7 @@ local USAGE_SECTIONS = {
       .. "  Run `remuda butler matrix --help` for its verbs: read, threads, write, rooms and setup." },
   { id = "schedule", title = "Schedule", verbs = { "schedule" } },
   { id = "health", title = "Health and accounts", verbs = { "doctor", "status", "quota" } },
+  { id = "native", title = "Native delivery", verbs = { "native" } },
   { id = "switches", title = "Switches and input",
     verbs = { "typed-lines", "shell-lines", "status-commands", "guard", "input-queue" } },
 }

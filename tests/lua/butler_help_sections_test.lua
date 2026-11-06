@@ -55,7 +55,7 @@ T.test("remuda butler help, --help and -h print the same grouped sections", func
     T.eq(other.stdout, help.stdout, flag .. " must print the grouped help")
   end
   local text = help.stdout
-  T.eq(headings(text), "Mail:|Sessions and teams:|Approvals:|Matrix:|Schedule:|Health and accounts:|Switches and input:|Notes:",
+  T.eq(headings(text), "Mail:|Sessions and teams:|Approvals:|Matrix:|Schedule:|Health and accounts:|Native delivery:|Switches and input:|Notes:",
     "help sections: " .. text)
   local ok, line = headed_blocks_separated(text)
   T.expect(ok, "section " .. tostring(line) .. " is not preceded by a blank line: " .. text)

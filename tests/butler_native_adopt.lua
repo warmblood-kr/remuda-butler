@@ -7,6 +7,13 @@ local cli = dofile("packages/butler/native_cli.lua")
 local UUID = "01234567-89ab-cdef-0123-456789abcdef"
 local SOCKET = "unix:///private/tmp/codex-daemon-501/abcd.sock"
 
+-- The shipped path installs the facade, which publishes exactly this instance
+-- under both ownership aliases. A bare module-table call is not the
+-- composition and is refused by the identity fence.
+local function installed(self)
+  return adopt_module.install(self)
+end
+
 local function fixture(result, overrides)
   overrides = overrides or {}
   local bus = { agents = { m1 = { kind = "codex", id = "id-m1" } } }
@@ -43,10 +50,18 @@ local function fixture(result, overrides)
   return self, bus, calls, function() return saved end
 end
 
+-- 0. A bare module-table call is not the installed composition: the helper is
+-- never reached while the public table still points at the module itself.
+local bare = fixture({ outcome = "adopted", generation = string.rep("cd", 32) })
+local bare_result, bare_why = adopt_module.codex(bare, "m1", SOCKET, UUID)
+assert(bare_result == nil and bare_why == "session_replaced_during_adopt",
+  "a bare module call is refused")
+assert(bare.bus.agents.m1.native == nil, "a bare module call publishes no binding")
+
 -- 1. Success binds exactly the fenced identity; the endpoint/thread stay on
 -- the request only and never reach the agent or the roster.
 local self, bus, calls, saved = fixture({ outcome = "adopted", generation = string.rep("cd", 32) })
-local result, why = adopt_module.codex(self, "m1", SOCKET, UUID)
+local result, why = installed(self).adopt_codex("m1", SOCKET, UUID)
 assert(result and result.generation == string.rep("cd", 32), "adoption returns the generation")
 assert(why == nil, "no failure reason")
 assert(calls.fields.binding == "/data/remuda/butler/bindings/m1/ab/manifest.json"
@@ -81,7 +96,7 @@ replaced_bus.list = (function()
 end)()
 local self2, bus2 = fixture({ outcome = "adopted", generation = string.rep("cd", 32) })
 self2.list = replaced_bus.list
-local result2, why2 = adopt_module.codex(self2, "m1", SOCKET, UUID)
+local result2, why2 = installed(self2).adopt_codex("m1", SOCKET, UUID)
 assert(result2 == nil and why2 == "session_replaced_during_adopt",
   "a replaced row is refused after the yield")
 assert(bus2.agents.m1.native == nil, "no half-binding is attached")
@@ -94,7 +109,7 @@ replaced_agent = fixture({ outcome = "adopted", generation = string.rep("cd", 32
       local fresh = { kind = "codex", id = "id-fresh" }
       replaced_agent.bus.agents.m1 = fresh
     end })
-local _, replaced_agent_why = adopt_module.codex(replaced_agent, "m1", SOCKET, UUID)
+local _, replaced_agent_why = installed(replaced_agent).adopt_codex("m1", SOCKET, UUID)
 assert(replaced_agent_why == "session_replaced_during_adopt",
   "a replaced agent object is refused after the yield")
 assert(replaced_agent.bus.agents.m1.native == nil, "the new agent gets no stale binding")
@@ -105,21 +120,44 @@ concurrent = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
       concurrent.bus.agents.m1.native = { mode = "native", kind = "codex",
         path = "/already/bound", row_id = "ses_row", instance = "instance-1" }
     end })
-local _, concurrent_why = adopt_module.codex(concurrent, "m1", SOCKET, UUID)
+local _, concurrent_why = installed(concurrent).adopt_codex("m1", SOCKET, UUID)
 assert(concurrent_why == "session_replaced_during_adopt",
   "a concurrent adoption wins")
 assert(concurrent.bus.agents.m1.native.path == "/already/bound",
   "the newer decision is not overwritten")
 
-local module_live = remuda.butler.native_adopt
-local reloaded
-reloaded = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
+local reloaded = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
   { during = function() remuda.butler.native_adopt = {} end })
-local _, reloaded_why = adopt_module.codex(reloaded, "m1", SOCKET, UUID)
+local reloaded_facade = installed(reloaded)
+local module_live = remuda.butler.native_adopt
+local _, reloaded_why = reloaded_facade.adopt_codex("m1", SOCKET, UUID)
 remuda.butler.native_adopt = module_live
 assert(reloaded_why == "session_replaced_during_adopt",
   "a reloaded module never installs through the old image")
 assert(reloaded.bus.agents.m1.native == nil, "the stale module attaches no binding")
+
+-- 2b2. Replacing only the private ownership alias is refused the same way.
+local private_alias = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
+  { during = function() remuda._butler_native_adopt = {} end })
+local private_facade = installed(private_alias)
+local private_live = remuda._butler_native_adopt
+local _, private_alias_why = private_facade.adopt_codex("m1", SOCKET, UUID)
+remuda._butler_native_adopt = private_live
+assert(private_alias_why == "session_replaced_during_adopt",
+  "a replaced private alias is refused")
+assert(private_alias.bus.agents.m1.native == nil, "no binding under a replaced alias")
+
+-- 2b3. A reinstall during the helper publishes a new instance; the old
+-- instance must not install through it.
+local reinstalled = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
+  { during = function()
+      installed(fixture({ outcome = "adopted", generation = "10" }))
+    end })
+local reinstalled_facade = installed(reinstalled)
+local _, reinstalled_why = reinstalled_facade.adopt_codex("m1", SOCKET, UUID)
+assert(reinstalled_why == "session_replaced_during_adopt",
+  "a reinstall during the helper is refused")
+assert(reinstalled.bus.agents.m1.native == nil, "the old instance attaches no binding")
 
 -- 2c. A replacement during the FIRST listing never reaches the helper, and a
 -- new disabled decision made while the helper runs is never overwritten.
@@ -129,7 +167,7 @@ first_list.list = function()
   first_list.bus.agents.m1 = { kind = "codex", id = "id-fresh" }
   return { { name = "m1", alive = true, id = "ses_row", instance_id = "instance-1" } }
 end
-local _, first_list_why = adopt_module.codex(first_list, "m1", SOCKET, UUID)
+local _, first_list_why = installed(first_list).adopt_codex("m1", SOCKET, UUID)
 assert(first_list_why == "session_replaced_during_adopt",
   "a replacement during the first listing is refused")
 assert(first_list_calls.fields == nil, "no helper call for a replaced agent")
@@ -139,7 +177,7 @@ new_disabled = fixture({ outcome = "adopted", generation = string.rep("cd", 32) 
   { during = function()
       new_disabled.bus.agents.m1.native = { mode = "disabled", reason = "new_decision" }
     end })
-local _, new_disabled_why = adopt_module.codex(new_disabled, "m1", SOCKET, UUID)
+local _, new_disabled_why = installed(new_disabled).adopt_codex("m1", SOCKET, UUID)
 assert(new_disabled_why == "session_replaced_during_adopt",
   "a new disabled decision wins over an in-flight adoption")
 assert(new_disabled.bus.agents.m1.native.mode == "disabled"
@@ -149,23 +187,23 @@ assert(new_disabled.bus.agents.m1.native.mode == "disabled"
 -- 3. Opt-in, identity and availability failures create no binding.
 local off, off_bus = fixture({ outcome = "adopted", generation = string.rep("cd", 32) },
   { config_off = true })
-assert(adopt_module.codex(off, "m1", SOCKET, UUID) == nil, "opt-in is required")
+assert(installed(off).adopt_codex("m1", SOCKET, UUID) == nil, "opt-in is required")
 assert(off_bus.agents.m1.native == nil, "unopted session stays unbound")
 local unavailable, unavailable_bus = fixture({ outcome = "unavailable",
   reason = "thread_not_loaded" })
-local unavailable_result, unavailable_why = adopt_module.codex(unavailable, "m1", SOCKET, UUID)
+local unavailable_result, unavailable_why = installed(unavailable).adopt_codex("m1", SOCKET, UUID)
 assert(unavailable_result == nil and unavailable_why == "unavailable: thread_not_loaded",
   "the typed unavailable reason is reported")
 assert(unavailable_bus.agents.m1.native == nil, "unavailable publishes no binding")
 local unknown, unknown_bus = fixture({ outcome = "uncertain", reason = "timeout" })
-local unknown_result, unknown_why = adopt_module.codex(unknown, "m1", SOCKET, UUID)
+local unknown_result, unknown_why = installed(unknown).adopt_codex("m1", SOCKET, UUID)
 assert(unknown_result == nil and unknown_why == "uncertain: timeout", "unknown is final")
 assert(unknown_bus.agents.m1.native == nil, "uncertain attaches no binding")
 
 -- 4. A live PTY session of another kind is refused before any helper call.
 local wrong, wrong_bus = fixture({ outcome = "adopted", generation = string.rep("cd", 32) })
 wrong_bus.agents.m1.kind = "opencode"
-local wrong_result, wrong_why = adopt_module.codex(wrong, "m1", SOCKET, UUID)
+local wrong_result, wrong_why = installed(wrong).adopt_codex("m1", SOCKET, UUID)
 assert(wrong_result == nil and wrong_why == "not_a_codex_session", "only Codex sessions adopt")
 assert(wrong_bus.agents.m1.native == nil, "a wrong kind never binds")
 
@@ -203,7 +241,7 @@ assert(uncertain_text == nil and uncertain_error:find("Do not retry automaticall
 -- endpoint, conversation or password.
 local oc, oc_bus, oc_calls = fixture({ outcome = "adopted", generation = "65f870ac8f9d2" })
 oc_bus.agents.m1.kind = "opencode"
-local oc_result = assert(adopt_module.opencode(oc, "m1", "http://127.0.0.1:4096",
+local oc_result = assert(installed(oc).adopt_opencode("m1", "http://127.0.0.1:4096",
   "ses_e543a3368ffe1Hhcoeq7zBDS4b", "s3cret"))
 assert(oc_result.generation == "65f870ac8f9d2", "OpenCode returns the generation")
 assert(oc_calls.fields.session == "ses_row"
@@ -227,12 +265,12 @@ end
 -- 7. OpenCode refusals: wrong kind, opt-in, a replaced row and unavailable.
 local oc_wrong, oc_wrong_bus = fixture({ outcome = "adopted", generation = "10" })
 oc_wrong_bus.agents.m1.kind = "codex"
-assert(adopt_module.opencode(oc_wrong, "m1", "http://127.0.0.1:4096",
+assert(installed(oc_wrong).adopt_opencode("m1", "http://127.0.0.1:4096",
   "ses_abc", "x") == nil, "only OpenCode sessions adopt")
 local oc_off, oc_off_bus = fixture({ outcome = "adopted", generation = "10" },
   { config_off = true })
 oc_off_bus.agents.m1.kind = "opencode"
-local _, oc_off_why = adopt_module.opencode(oc_off, "m1", "http://127.0.0.1:4096",
+local _, oc_off_why = installed(oc_off).adopt_opencode("m1", "http://127.0.0.1:4096",
   "ses_abc", "x")
 assert(oc_off_why and oc_off_why:find("opencode_not_opted_in", 1, true),
   "OpenCode adoption is opt-in")
@@ -247,14 +285,14 @@ oc_replaced.list = function()
   end
   return { { name = "m1", alive = true, id = "ses_row", instance_id = "instance-2" } }
 end
-local _, oc_replaced_why = adopt_module.opencode(oc_replaced, "m1",
+local _, oc_replaced_why = installed(oc_replaced).adopt_opencode("m1",
   "http://127.0.0.1:4096", "ses_abc", "x")
 assert(oc_replaced_why == "session_replaced_during_adopt",
   "a replaced OpenCode row is refused")
 assert(oc_replaced.bus.agents.m1.native == nil, "no half-binding for OpenCode")
 local oc_unavailable = fixture({ outcome = "unavailable", reason = "auth" })
 oc_unavailable.bus.agents.m1.kind = "opencode"
-local _, oc_unavailable_why = adopt_module.opencode(oc_unavailable, "m1",
+local _, oc_unavailable_why = installed(oc_unavailable).adopt_opencode("m1",
   "http://127.0.0.1:4096", "ses_abc", "x")
 assert(oc_unavailable_why == "unavailable: auth", "the typed refusal is reported")
 
@@ -265,7 +303,7 @@ oc_replaced_agent.opencode.adopt = function()
   oc_replaced_agent.bus.agents.m1 = { kind = "opencode", id = "id-fresh" }
   return { outcome = "adopted", generation = "10" }
 end
-local _, oc_replaced_agent_why = adopt_module.opencode(oc_replaced_agent, "m1",
+local _, oc_replaced_agent_why = installed(oc_replaced_agent).adopt_opencode("m1",
   "http://127.0.0.1:4096", "ses_abc", "x")
 assert(oc_replaced_agent_why == "session_replaced_during_adopt",
   "a replaced OpenCode agent object is refused")
@@ -278,7 +316,7 @@ oc_concurrent.opencode.adopt = function()
     path = "/already/bound", row_id = "ses_row", instance = "instance-1" }
   return { outcome = "adopted", generation = "10" }
 end
-local _, oc_concurrent_why = adopt_module.opencode(oc_concurrent, "m1",
+local _, oc_concurrent_why = installed(oc_concurrent).adopt_opencode("m1",
   "http://127.0.0.1:4096", "ses_abc", "x")
 assert(oc_concurrent_why == "session_replaced_during_adopt",
   "a concurrent OpenCode adoption wins")
@@ -296,7 +334,7 @@ oc_nil.identity = { resolve = function(row, options)
     "adoption proves the pre fleet and re-lists after")
   return "core-id-m1"
 end }
-local oc_nil_result = assert(adopt_module.opencode(oc_nil, "m1",
+local oc_nil_result = assert(installed(oc_nil).adopt_opencode("m1",
   "http://127.0.0.1:4096", "ses_abc", "x"))
 assert(oc_nil_result.generation == "10", "the nil-id adoption succeeds")
 assert(oc_nil_calls.fields.session == "core-id-m1",
@@ -319,7 +357,7 @@ oc_nil_replaced.list = function()
   return { { name = "m1", alive = true, instance_id = "instance-2" } }
 end
 oc_nil_replaced.identity = { resolve = function() return "core-id-m1" end }
-local _, oc_nil_replaced_why = adopt_module.opencode(oc_nil_replaced, "m1",
+local _, oc_nil_replaced_why = installed(oc_nil_replaced).adopt_opencode("m1",
   "http://127.0.0.1:4096", "ses_abc", "x")
 assert(oc_nil_replaced_why == "session_replaced_during_adopt",
   "a nil-id replacement is refused after the helper")
@@ -357,5 +395,31 @@ local no_stdin = cli.run({ "adopt-opencode", "m1", "--endpoint",
   "http://127.0.0.1:4096", "--conversation", "ses_abc", "--password-stdin" },
   { adopt_opencode = function() error("must not be called") end }, {})
 assert(no_stdin == nil, "a missing password is refused before the helper")
+
+-- 9. The exported CLI catalog publishes `native` and forwards the exact argv
+-- and caller to the owner-checked command runner. A verb that commands.lua
+-- registers but the catalog omits is unreachable from `remuda butler`.
+remuda.schedule = function() return {} end
+remuda.cancel = function() end
+remuda.exec = function() end
+remuda.cli = remuda.cli or { parse = function() return {} end }
+setmetatable(_G, { __index = { remuda = remuda } })
+local lifecycle = dofile("packages/butler/init.lua")
+local native_entry
+for _, row in ipairs(lifecycle.contributes["butler.command"]) do
+  if row.verb == "native" then native_entry = row end
+end
+assert(native_entry, "the exported catalog lists native")
+assert(native_entry.order > 5 and native_entry.order < 6, "native sits between doctor and quota")
+local forwarded
+remuda._butler_command_run = function(verb, args, caller)
+  forwarded = { verb = verb, args = args, caller = caller }
+  return "ran"
+end
+local caller = {}
+local args = { "native", "adopt-codex", "m1", "--socket", SOCKET, "--thread", UUID }
+assert(native_entry.run({}, args, caller) == "ran", "the exported entry runs through the command runner")
+assert(forwarded.verb == "native" and forwarded.args == args and forwarded.caller == caller,
+  "the exported entry forwards argv and caller unchanged")
 
 print("ok - Codex and OpenCode adoption are fenced, opt-in and reported without endpoints")

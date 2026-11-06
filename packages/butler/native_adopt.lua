@@ -68,11 +68,16 @@ local function decision_unchanged(agent, snapshot)
     and native.awaiting_publication == snapshot.awaiting
 end
 
+-- `install` publishes the running instance under both ownership aliases
+-- (`remuda.butler.native_adopt` and `remuda._butler_native_adopt`); the module
+-- table itself is never the installed facade. A reload republishes the module
+-- and a reinstall publishes a new instance, so either leaves an old instance
+-- failing this fence instead of attaching a binding to a replaced image.
 local function still_current(self, name, agent, snapshot)
   if self.bus.agents[name] ~= agent then return false end
   if not decision_unchanged(agent, snapshot) then return false end
   local installed = remuda.butler and remuda.butler.native_adopt
-  return installed == M
+  return installed == self and remuda._butler_native_adopt == self
 end
 
 local function config_state(self, name, kind)

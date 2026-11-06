@@ -43,6 +43,9 @@ Health and accounts:
   remuda butler quota [--report]
   remuda butler status  (0=up, 75=launching, 1=failed)
 
+Native delivery:
+  remuda butler native adopt-codex ALIAS --socket PATH --thread UUID | adopt-opencode ALIAS --endpoint URL --conversation SES_ID --password-stdin
+
 Switches and input:
   remuda butler typed-lines on|off
   remuda butler shell-lines on|off
