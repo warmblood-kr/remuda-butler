@@ -9130,7 +9130,10 @@ local function check_relay_shadow_and_budget()
   local encoded = remuda.json.encode({ a = 1, b = { c = 2 } })
   assert(receipts._canonical_encoded(encoded)
     == receipts._canonical_result({ a = 1, b = { c = 2 } }), "real JSON decode")
-  assert(receipts._canonical_result(remuda.json.array({})) == "[]")
+  assert(receipts._canonical_result(remuda.json.array({})) == nil,
+    "a root array is not a receipt")
+  assert(receipts._canonical_result({ event_ids = remuda.json.array({}) }) ~= nil,
+    "a nested empty array is valid")
   assert(receipts._canonical_result(remuda.json.object({})) == "{}")
   assert(receipts._canonical_result(remuda.json.null) == "null")
   local ab = receipts._canonical_result({ event_ids = remuda.json.array({ "a", "b" }) })
