@@ -38,6 +38,12 @@ select CLI identity. Caller attribution is advisory, not an isolation boundary.
 -- listed under "Other commands". A section's `summary` replaces its verbs' full
 -- usage with a pointer to the verb's own help (matrix has its own grouped list).
 local USAGE_SECTIONS = {
+  { id = "root", title = "Root startup", always = true,
+    summary = "  remuda butler [--agent KIND] [--headless]\n"
+      .. "  --agent KIND  fixed agent kind for a fresh root"
+      .. " (example: remuda butler --agent codex)\n"
+      .. "  --headless    start without entering the Remuda TUI\n"
+      .. "  An existing root keeps its kind." },
   { id = "mail", title = "Mail", verbs = { "send", "send-to-leader", "inbox", "reply", "forward" } },
   { id = "sessions", title = "Sessions and teams",
     verbs = { "sessions", "agents", "launch", "topic", "close", "compact" } },
@@ -57,7 +63,7 @@ local function butler_usage()
   for _, section in ipairs(USAGE_SECTIONS) do
     by_id[section.id] = { section = section, lines = {} }
     order[#order + 1] = by_id[section.id]
-    for _, verb in ipairs(section.verbs) do section_of[verb] = section.id end
+    for _, verb in ipairs(section.verbs or {}) do section_of[verb] = section.id end
   end
   local other = { section = { title = "Other commands" }, lines = {} }
   for _, item in ipairs(contributions("butler.command")) do
@@ -84,7 +90,7 @@ local function butler_usage()
   order[#order + 1] = other
   local blocks = {}
   for _, bucket in ipairs(order) do
-    if bucket.used then
+    if bucket.used or bucket.section.always then
       local body = bucket.section.summary or table.concat(bucket.lines, "\n")
       blocks[#blocks + 1] = bucket.section.title .. ":\n" .. body
     end

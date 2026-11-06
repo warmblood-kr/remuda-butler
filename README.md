@@ -144,8 +144,9 @@ opt-in refresh or `--reload` leave the running Lua image unchanged. Reload requi
 lifecycle-managed Butler module; `remuda exec butler` does not re-run an active
 module.
 
-`remuda butler --agent claude|codex` selects the root Butler agent without an
-environment variable. Add `--headless` when only the service should start.
+`remuda butler --agent claude|codex` selects the root Butler agent for a fresh
+root without an environment variable; an existing root keeps its kind. Add
+`--headless` to start without entering the Remuda TUI.
 
 ## Testing
 
