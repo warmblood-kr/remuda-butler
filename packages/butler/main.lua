@@ -449,8 +449,13 @@ remuda._butler_caller_principal_config = { bus = bus }
 remuda.exec("butler/caller_principal")
 caller_principal = assert(remuda._butler_caller_principal)
 -- Loaded before identity_record so agents.jsonl shares mail.lua's append.
-remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_quote }
+-- The SQLite index is a shadow: mail files remain authoritative.
+remuda._butler_inbox_db_config = { root = mail_root, open = remuda.db and remuda.db.open }
+remuda.exec("butler/inbox_db")
+remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_quote,
+  inbox_db = remuda._butler_inbox_db }
 remuda.exec("butler/mail")
+if remuda._butler_inbox_db then pcall(remuda._butler_inbox_db.import_all) end
 -- ULIDs, identity records and caller identity live in identity.lua.
 remuda._butler_identity_config = { bus = bus, current_agent = current_agent, data_home = data_home,
   json_quote = json_quote }
