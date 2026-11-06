@@ -132,6 +132,39 @@ presses nothing and alerts once.
 
 ## Closing sessions
 
+`remuda butler sessions` shows an `ACTIVITY` column beside each managed
+session. `working` comes from the agent's visible working signal; `idle` means
+the adapter recognised its empty prompt; `needs you` means a known prompt or
+startup dialog is waiting for a person. `other` means Butler could not match a
+reliable state. These labels come from adapter status, not whether the child
+process is alive.
+
+When the terminal parser sees an OSC 7501 Program Status report, Butler
+prefers it for a fresh session (`working`, `idle`, `blocked` as `needs you`,
+`done` as `idle`, `error` as `other`). A stale report falls back to the hook
+or screen probe; the report itself is retained, and `clear` or a new session
+instance removes it. The labels are display hints: `blocked` does not grant or
+deny permission, and neither activity nor an OSC `app` name controls close,
+routing or approval.
+
+Claude Code status uses its configured `UserPromptSubmit`, `Stop`, and
+`Notification` hooks. A recent submit marks `working`; a stop or idle
+notification marks `idle`; permission and elicitation notifications mark
+`needs you`. Butler falls back to the captured prompt screen when hook data is
+missing or stale. Codex status uses its recognized TUI screen: `esc to
+interrupt` marks `working`, the exact ready composer marks `idle`, and known
+update or trust dialogs mark `needs you`. Unknown or failed captures show
+`other`. The roster caches status briefly, so it is a point-in-time reading.
+
+Treat `idle` as a useful close candidate, not a guarantee that closing is safe:
+the terminal may change immediately after the listing. `remuda butler close`
+performs its own unread-mail and idle checks; `--force` skips those checks.
+`other` should be inspected before closing.
+
+In the client session pane, Butler supplies a typed list decoration with agent
+kind, activity, and description, and selects the compact row layout. Activity
+is adapter status only; it does not claim that input is ready or safe to send.
+
 `remuda butler close NAME [--force]` closes a session when the caller is its
 leader. A person at a terminal counts as the root `butler`. The root may also
 close a leader-less row (no leader, or a leader that is gone and not

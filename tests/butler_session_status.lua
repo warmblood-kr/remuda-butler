@@ -117,6 +117,11 @@ sessions_config.registered_agent_kind = lookup
 entries.claude.working = function(_, screen) return screen:find("esc to interrupt", 1, true) ~= nil end
 local detail = remuda.session_detail({ name = "s1" })
 assert(detail:find("^working · claude · m"), "the status leads the detail line: " .. detail)
+local decoration = remuda.session_list_decorate({ name = "s1" })
+assert(decoration.activity == "working", "the session-list activity remains adapter status")
+assert(decoration.agent_kind == "claude", "the session-list exposes the registered agent kind")
+assert(decoration.description == "m", "the decorator keeps the detail description")
+assert(decoration.layout == "compact", "Butler explicitly overrides the core stacked layout")
 
 local detail_agent = { kind = "codex" }
 bus.agents.detail = detail_agent
@@ -187,4 +192,77 @@ check(hooked("idle", 3599, "some other screen"), "idle", "idle hook is trusted f
 check(hooked(nil, nil, claude_idle), "idle", "no hook file falls back to the screen")
 check(hooked("working", -50, claude_idle), "idle", "a hook from the future is ignored")
 check(hooked("bogus", 5, claude_idle), "idle", "unknown hook word is ignored")
+
+-- OSC 7501 is preferred when present and fresh; a stale report falls back to
+-- the existing probe rather than inventing a state.
+local function osc_status(state, age, screen)
+  seq = seq + 1
+  local name = "o" .. seq
+  bus.agents[name] = { kind = "codex", id = name, instance_binding = 1, instance_id = "i" .. seq }
+  screens[name] = screen or "some other screen"
+  captures = 0
+  local row = { name = name, instance_id = "i" .. seq, program_status = { state = state, app = "codex" }, program_status_age = age }
+  return remuda.session_detail(row):match("^(.-) · "), captures
+end
+check((osc_status("working", 5)), "working", "fresh OSC working")
+check((osc_status("idle", 5)), "idle", "fresh OSC idle")
+check((osc_status("blocked", 5, claude_idle)), "needs you", "OSC blocked is needs input")
+check((osc_status("done", 5)), "idle", "done reads as idle in ACTIVITY")
+check((osc_status("error", 5)), "other", "error stays visible as other")
+local stale, stale_captures = osc_status("working", 601, "x\nesc to interrupt")
+check(stale, "working", "stale OSC falls back to the working screen")
+check(stale_captures, 1, "stale OSC probes the screen")
+local missing, missing_captures = osc_status(nil, nil, "Ask Codex to do anything\n")
+check(missing, "idle", "absent OSC falls back to the probe")
+check(missing_captures, 1, "absent OSC captures the screen")
+
+-- The decorator and roster use the same detail, so their ACTIVITY cannot disagree.
+local row = { name = "decor", instance_id = "decor-1", program_status = { state = "blocked", app = "codex" }, program_status_age = 1 }
+bus.agents.decor = { kind = "codex", id = "decor", instance_binding = 1, instance_id = "decor-1" }
+screens.decor = "some other screen"
+local decoration = remuda.session_list_decorate(row)
+check(decoration.activity, "needs you", "decorator uses the same OSC projection")
+check(decoration.layout, "compact", "decorator keeps compact layout")
+
+-- Missing/malformed age is unknown, not fresh; boundaries are inclusive.
+check((osc_status("working", nil, "some other screen")), "other", "missing age falls back")
+check((osc_status("working", "5", "some other screen")), "other", "string age falls back")
+check((osc_status("working", 0 / 0, "some other screen")), "other", "NaN age falls back")
+check((osc_status("working", math.huge, "some other screen")), "other", "infinite age falls back")
+check((osc_status("working", -1, "some other screen")), "other", "negative age falls back")
+check((osc_status("working", 600, "x\nesc to interrupt")), "working", "working age boundary")
+check((osc_status("working", 601, "x\nesc to interrupt")), "working", "stale working uses the working probe")
+check((osc_status("blocked", 3600, claude_idle)), "needs you", "blocked age boundary")
+check((osc_status("blocked", 3601, claude_idle)), "other", "stale blocked falls back")
+check((osc_status("future-state", 1, "some other screen")), "other", "unknown state falls back")
+
+-- A listed row with a different instance must never lend its OSC status.
+local real_session = remuda.session
+remuda.session = { list = function()
+  return { { name = "reused", instance_id = "new", program_status = { state = "working" }, program_status_age = 1 } }
+end }
+bus.agents.reused = { kind = "codex", id = "reused-old", instance_binding = 1, instance_id = "old" }
+screens.reused = "some other screen"
+check(remuda.session_detail({ name = "reused", instance_id = "old" }):match("^(.-) · "), "other",
+  "a reused name does not inherit another instance's OSC status")
+
+-- The same bound instance still accepts its own live row.
+remuda.session = { list = function()
+  return { { name = "same", instance_id = "same-1", program_status = { state = "working" }, program_status_age = 1 } }
+end }
+bus.agents.same = { kind = "codex", id = "same-old", instance_binding = 1, instance_id = "same-1" }
+screens.same = "some other screen"
+check(remuda.session_detail({ name = "same" }):match("^(.-) · "), "working",
+  "the bound instance keeps its own OSC status")
+
+-- An unavailable live row never lends status, even with a matching instance.
+remuda.session = { list = function()
+  return { { name = "gone", instance_id = "gone-1", unavailable = true,
+    program_status = { state = "working" }, program_status_age = 1 } }
+end }
+bus.agents.gone = { kind = "codex", id = "gone-old", instance_binding = 1, instance_id = "gone-1" }
+screens.gone = "some other screen"
+check(remuda.session_detail({ name = "gone" }):match("^(.-) · "), "other",
+  "an unavailable row does not lend OSC status")
+remuda.session = real_session
 print("ok")
