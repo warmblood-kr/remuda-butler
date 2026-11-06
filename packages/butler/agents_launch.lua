@@ -185,7 +185,8 @@ local function choose(candidates, opts, done)
       end
       if type(argv) == "table" and argv[1] == executable then argv[1] = found end
     end
-    local ok, name, instance_id = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
+    local ok, name, instance_id = pcall(remuda.new, opts.name, argv, opts.cwd,
+      opts.env(id, spec), { remote_input_disabled = opts.remote_input_disabled == true })
     if not ok then
       attempt.reason, attempt.detail = "spawn_error", one_line(name)
       start_next(); return

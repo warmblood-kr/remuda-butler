@@ -1611,6 +1611,9 @@ local function launch_butler()
   local telemetry_by_kind = {}
   local choose_opts = {
     name = requested_name, cwd = butler_session_cwd, argv = remuda._butler_argv,
+    -- Root registration is protected atomically; the sender gate stays off
+    -- until this is deployed and the owner verifies every target pane.
+    remote_input_disabled = true,
     skip_probe = remuda._butler_argv ~= nil,
     spec = function(candidate_kind)
       pcall(ensure_root_permissions, candidate_kind)

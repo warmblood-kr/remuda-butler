@@ -186,6 +186,9 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   telemetry_by_kind[kind] = agent_telemetry
   local choose_opts = {
     name = name, cwd = launch_cwd, auto_trust = auto_trust,
+    -- Members stay eligible; a leader is protected at the launch assignment
+    -- that names it, not because it happens to have children.
+    remote_input_disabled = false,
     trust_path_gate = topic_trust_path, trust_eligible = trust_eligible, trust_real_cwd = trust_real_cwd,
     spec = function(candidate_kind)
       if remuda._butler_ensure_coordination then
@@ -1087,6 +1090,32 @@ function remuda._butler_launch(kind, name, model, parent, profile)
   end
   return launch_agent(kind, name, nil, model, resolve(parent or "butler"), nil, nil, nil, profile)
 end
+-- A trusted launch assignment names a leader; protect that exact bound
+-- instance before the child exists. Failure is degraded and never re-enabled
+-- automatically. Child count or display/OSC is never used as a role signal.
+local function protect_leader(alias)
+  local agent = bus.agents and bus.agents[alias]
+  local instance = agent and agent.instance_id
+  local protected = false
+  if agent and agent.instance_binding == 1 and type(instance) == "string" and instance ~= "" then
+    local ok, value, why = pcall(remuda.session.remote_input, alias, instance, false)
+    protected = ok and value == true
+    if not protected then
+      _butler_session_trace("leader_protection",
+        tostring(alias) .. ": " .. tostring(ok and (value or why) or value))
+    end
+  else
+    _butler_session_trace("leader_protection", tostring(alias) .. ": missing_instance_binding")
+  end
+  bus.remote_input_unprotected = bus.remote_input_unprotected or {}
+  if protected then
+    bus.remote_input_unprotected[alias] = nil
+  else
+    bus.remote_input_unprotected[alias] = true
+  end
+  return protected
+end
+
 function remuda._butler_topic_new(name, template, kind, model)
   return make_topic(name, template, kind, "butler", nil, model)
 end
@@ -1095,6 +1124,7 @@ function remuda._butler_topic_delegate(name, task, template, kind, parent, model
     sandbox_lib.refuse_full(sandbox_lib.owner_command("remuda butler topic delegate " .. name .. " --agent codex", profile, cwd) .. " <task...>")
   end
   local requested_parent = parent or "butler"
+  if requested_parent ~= "" then protect_leader(requested_parent) end
   local resolved, leader = pcall(resolve, requested_parent)
   if resolved then
     parent = leader
