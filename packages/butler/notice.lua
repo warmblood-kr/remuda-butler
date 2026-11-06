@@ -419,7 +419,7 @@ local function current_composer_evidence(kind, screen)
   return bounded, (boxed and closed_box) or (selected_option and options >= 2)
 end
 
-function remuda._butler_approved_text_policy(session, now, owned_composer)
+function remuda._butler_approved_text_policy(session, now, owned_composer, skip_composer)
   local agent = bus.agents[session]
   if not agent then
     for _, candidate in pairs(bus.agents) do
@@ -463,14 +463,23 @@ function remuda._butler_approved_text_policy(session, now, owned_composer)
     return false, "known_modal"
   end
   local captured, screen = pcall(remuda.capture, session)
+  if captured and type(screen) == "string" then
+    -- A startup picker is a real modal, not a composer-content judgment: it
+    -- would swallow the owner's text, so it still blocks every route.
+    local startup = remuda._butler_agent_startup[kind] or {}
+    if startup.picker and startup.picker(screen) then return false, "known_modal" end
+  end
+  -- Owner input never judges whether the composer is empty (#568): a leftover
+  -- draft or a misread placeholder must not stall approval or typed lines.
+  -- The capture above stays best-effort evidence for the modal check only; a
+  -- failed read must not turn into a composer gate of its own.
+  if skip_composer then return true, "composer_skipped" end
   if not captured or type(screen) ~= "string" then
     -- OpenCode fails closed when its composer cannot be read; owner-approved
     -- text may still proceed on other kinds' renderer-unknown path.
     if kind == "opencode" then return false, "renderer_unknown" end
     return true, "renderer_unknown"
   end
-  local startup = remuda._butler_agent_startup[kind] or {}
-  if startup.picker and startup.picker(screen) then return false, "known_modal" end
   local parsed, decision, text = pcall(remuda._butler_composer_decision, kind, session, screen)
   if parsed and decision == "NON-EMPTY" then
     -- Only the internal post-write Return stage supplies this proof. Keep all
