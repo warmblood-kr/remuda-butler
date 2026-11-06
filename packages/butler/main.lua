@@ -507,7 +507,11 @@ local function notify_mail_delivery(message, delivered, recipient_alias, what)
       _butler_session_trace("notice_delivery_error", recipient.alias .. " " .. tostring(notified))
     end
   end
-  if message.from.host ~= "matrix" then
+  -- Only a positively typed Matrix sender skips the cache: a missing or
+  -- malformed origin must not throw after the durable queue, and its already
+  -- computed result must still be reusable by the caller's notice step.
+  local from = message.from
+  if not (type(from) == "table" and from.host == "matrix") then
     delivery_notice_results[delivery_notice_key(delivered.id, recipient_ok and recipient.alias or recipient_ref)] = result
   end
   return delivered
