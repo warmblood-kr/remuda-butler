@@ -62,6 +62,11 @@ local RELAY_JSON_WARN_VALUES = 90000
 local RELAY_JSON_STOP_VALUES = 95000
 local RELAY_JSON_WARN_BYTES = 7 * 1024 * 1024
 local RELAY_JSON_STOP_BYTES = 7600 * 1024
+-- Admission reserves. A reply may add up to 64 KiB of text plus receipt,
+-- route, subscription and pending bookkeeping; the emergency margin keeps a
+-- confirmed outcome saveable even when new work is refused.
+local REPLY_ADMISSION = { reserve_values = 128, reserve_bytes = 128 * 1024,
+  emergency_values = 256, emergency_bytes = 256 * 1024 }
 local MAX_MAIL_REPLY_BYTES = 64 * 1024
 local MAX_THREAD_CONTEXT_BYTES = 8 * 1024
 local MAX_THREAD_CONTEXT_MESSAGES = 20
@@ -700,6 +705,28 @@ function relay.json_budget(state)
     stop_bytes = RELAY_JSON_STOP_BYTES,
     encode_error = encode_error,
   }
+end
+
+-- Admission is deliberately conservative and refusal-only: it never trims or
+-- changes authority. It runs before durable queue/route work and before HTTP,
+-- so a near-limit node stops accepting new replies instead of discovering the
+-- limit inside save_state after a message was already sent.
+function relay.admission(state, reserve_values, reserve_bytes)
+  local budget, why = relay.json_budget(state)
+  if not budget then return false, why or "state is not measurable" end
+  if budget.encode_error or budget.level == "unknown" then
+    return false, "state is not encodable"
+  end
+  reserve_values = tonumber(reserve_values) or REPLY_ADMISSION.reserve_values
+  reserve_bytes = tonumber(reserve_bytes) or REPLY_ADMISSION.reserve_bytes
+  if budget.values + reserve_values + REPLY_ADMISSION.emergency_values > RELAY_JSON_STOP_VALUES then
+    return false, "value budget"
+  end
+  if budget.bytes
+      and budget.bytes + reserve_bytes + REPLY_ADMISSION.emergency_bytes > RELAY_JSON_STOP_BYTES then
+    return false, "byte budget"
+  end
+  return true, nil, budget
 end
 
 local function empty_state()
@@ -1354,6 +1381,13 @@ function relay.new(options)
   function instance._send_reply(reply_id, callback)
     local item = state.reply_outbox[reply_id]
     if not item or reply_in_flight[reply_id] then return end
+    local admitted, admission_why = relay.admission(state)
+    if not admitted then
+      item.last_error = "relay JSON headroom exhausted: " .. tostring(admission_why)
+      diagnostic("degraded", "reply_headroom", tostring(reply_id))
+      if callback then callback({ error = item.last_error }) end
+      return
+    end
     item.attempts = (tonumber(item.attempts) or 0) + 1
     persist()
     local send_generation = generation
@@ -1429,6 +1463,11 @@ function relay.new(options)
     if state.reply_results[reply_id] then
       if callback then callback(state.reply_results[reply_id]) end
       return { cancel = function() end }
+    end
+    local admitted, admission_why = relay.admission(state)
+    if not admitted then
+      return nil, "Matrix reply not queued: relay JSON headroom exhausted ("
+        .. tostring(admission_why) .. "); no message was sent"
     end
     if not state.routes[source_id] then
       if type(route.room_id) ~= "string" or type(route.event_id) ~= "string" then

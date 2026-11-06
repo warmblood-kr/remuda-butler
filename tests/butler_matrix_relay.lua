@@ -9158,6 +9158,13 @@ local function check_relay_shadow_and_budget()
     return value
   end)() })
   assert(warn.values >= 90001 and warn.level == "warn", "warn band")
+  assert(relay_module.admission({ a = 1 }, 128, 128 * 1024) == true,
+    "small state admits a reply")
+  local near = {}
+  for index = 1, 95000 do near[index] = index end
+  local admitted, why = relay_module.admission({ many = near }, 128, 128 * 1024)
+  assert(admitted == false and tostring(why):find("value budget", 1, true),
+    "stop band refuses before HTTP")
 end
 check_relay_shadow_and_budget()
 
