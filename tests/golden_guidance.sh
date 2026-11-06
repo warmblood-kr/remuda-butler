@@ -203,6 +203,11 @@ for f in agents-root.md agents-topic.md agents-launch.md welcome.txt; do
   require_text "$f" '## Delegation: STICC' "the STICC section"
   require_text "$f" '**Calibrate:** ask the member to confirm' "the STICC calibrate step"
   require_text "$f" 'tell them to propagate it' "STICC propagation"
+  require_text "$f" '### 5W1H as a planning aid' "the optional 5W1H section"
+  require_text "$f" 'not a required message format' "5W1H optionality"
+  require_text "$f" '### ETA and self-reminder' "the ETA self-reminder section"
+  require_text "$f" 'It is recurring, not a' "the recurring-schedule caveat"
+  require_text "$f" 'do not pass `--to`' "self-targeted schedule ownership"
   require_text "$f" 'reserved sender `schedule`' "the standing schedule-mail warning"
   require_text "$f" 'created by your current Butler identity' "identity-based schedule ownership"
   require_text "$f" 'the add asks for confirmation' "the owner-terminal schedule path"
@@ -226,8 +231,14 @@ for f in agents-topic.md agents-launch.md welcome.txt; do
 done
 require_text agents-root.md 'Add one for the Butler session' "the root's own schedule target"
 require_text agents-root.md 'The Butler session is the target' "the root command as confirmation"
+require_text agents-root.md '## Orchestrator communication' "the orchestrator communication section"
+require_text agents-root.md 'Report progress and results relatively' "frequent owner reporting"
+require_text agents-root.md 'never call the' "the Matrix-only communication rule"
+require_text agents-root.md 'silence is not approval' "the prepared-text approval caveat"
 # The member prompt is what the agent sees before it reads AGENTS.md.
 require_text argv-claude.txt 'explain the assignment using STICC' "the STICC prompt cue"
+require_text argv-claude.txt 'Use 5W1H as an optional planning aid' "the 5W1H prompt cue"
+require_text argv-claude.txt 'self-targeted' "the ETA self-reminder prompt cue"
 
 if [[ ${GOLDEN_UPDATE:-} == 1 ]]; then
   mkdir -p "$GOLDEN"
