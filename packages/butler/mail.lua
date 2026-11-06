@@ -7,6 +7,25 @@ local function diagnostic(outcome, reason, correlation)
     pcall(diagnostics.record, "mail", outcome, reason, correlation)
   end
 end
+
+-- The SQLite index is a shadow. A missing/broken DB must never affect mail.
+local function index_delivery(recipient, id)
+  local db = config.inbox_db
+  if not db then return end
+  local ok, indexed = pcall(db.deliver, recipient, id)
+  if not ok or not indexed then diagnostic("degraded", "inbox_db_delivery", id) end
+end
+
+local function index_read(recipient, id)
+  local db = config.inbox_db
+  if not db then return end
+  local ok, indexed = pcall(db.read, recipient, id)
+  if not ok or not indexed then diagnostic("degraded", "inbox_db_read", id) end
+end
+
+local function index_reads(recipient, ids)
+  for _, id in ipairs(ids) do index_read(recipient, id) end
+end
 local bus = assert(config.bus)
 -- Trust words are bound at load (main.lua execs matrix_request before
 -- this file), so a later redefinition of the public entry cannot change them.
@@ -359,6 +378,7 @@ local function migrate_legacy(alias, id)
     end
     local copied, copy_err = append(target.inbox, table.concat(rows))
     if not copied then return nil, copy_err end
+    for _, message_id in ipairs(copy_ids) do index_delivery(id, message_id) end
   end
   local ack = {}
   for _, message_id in ipairs(unread) do
@@ -367,6 +387,7 @@ local function migrate_legacy(alias, id)
   if #ack > 0 then
     local marked, mark_err = append(source.read, table.concat(ack, "\n") .. "\n")
     if not marked then return nil, mark_err end
+    index_reads(alias, ack)
   end
   if bus.mail_loaded[id] then
     bus.mail_loaded[id] = nil
@@ -433,6 +454,7 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
     if not wrote then diagnostic("error", "envelope_write", id); return nil, "cannot write Butler mail envelope: " .. tostring(err) end
     wrote, err = append(disk.inbox, '{"message_id":' .. config.json_quote(id) .. '}\n')
     if not wrote then diagnostic("error", "inbox_append", id); return nil, "cannot deliver Butler mail: " .. tostring(err) end
+    index_delivery(recipient_id, id)
   end
   bus.objects[object_id], bus.messages[id] = object, message
   mailbox(recipient_id)[#mailbox(recipient_id) + 1] = id
@@ -542,6 +564,7 @@ local function deliver_forward(message)
       .. address_json(caller) .. ',"to":' .. address_json(target) .. ',"date":'
       .. config.json_quote(resent.date) .. note_json .. '}}\n')
     if not wrote then return nil, "cannot deliver the forward: " .. tostring(err) end
+    index_delivery(target.id, id)
   end
   bus.mail_resent[target.id] = bus.mail_resent[target.id] or {}
   bus.mail_resent[target.id][id] = resent
@@ -672,6 +695,7 @@ local function inbox(name)
   if disk and #shown > 0 then
     local wrote, err = append(disk.read, table.concat(shown, "\n") .. "\n")
     if not wrote then diagnostic("error", "read_state_write", shown[1]); return "mail read-state was not saved: " .. tostring(err) end
+    index_reads(name, shown)
   end
   -- Preserve the in-memory unread state when saving the read log fails.
   for _, id in ipairs(shown) do read[id] = true end
