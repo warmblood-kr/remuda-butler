@@ -446,6 +446,18 @@ for _, value in ipairs({ 42, "x\ny", "\27[31m", ("x"):rep(41) }) do
   bad.created_at = value
   ok("check refuses created_at " .. tostring(#tostring(value)), not schedule.check(bad))
 end
+for _, value in ipairs({ "yes", 1, {} }) do
+  local bad = entry("planted")
+  bad.once = value
+  ok("check refuses non-boolean once", not schedule.check(bad))
+end
+do
+  local bad = entry("planted")
+  bad.once_fired = true
+  ok("check refuses once_fired without once", not schedule.check(bad))
+  bad.once = true
+  ok("check accepts once_fired with once", schedule.check(bad))
+end
 local stamped = entry("planted")
 stamped.created_at = ("x"):rep(40)
 ok("check accepts a 40-byte created_at", schedule.check(stamped))
@@ -472,6 +484,33 @@ do
   ok("and is traced", traces[1] and traces[1]:find("^schedule_entry_dropped planted"))
   os.remove(path)
 end
+
+-- A one-shot fires once, disables itself, and retries a failed delivery.
+local function once_entry(name, last_fired)
+  local e = hourly_entry(name, last_fired)
+  e.once = true
+  return e
+end
+reset({ once_entry("once") })
+eq("a one-shot fires", schedule.tick(env(), noon), 1)
+eq("one mail", #sent, 1)
+eq("once_fired is recorded", stored("once").once_fired, true)
+eq("the one-shot disables itself", stored("once").enabled, false)
+eq("the delivered slot is recorded", stored("once").last_fired, slot_1007)
+eq("the same tick does not refire the one-shot", schedule.tick(env(), noon), 0)
+eq("the next day does not refire the one-shot", schedule.tick(env(), noon + 86400), 0)
+
+reset({ once_entry("retry") })
+send_error = "terminal busy"
+eq("a failed one-shot does not disable", schedule.tick(env(), noon), 0)
+eq("it stays enabled", stored("retry").enabled, true)
+eq("it is not marked delivered", stored("retry").once_fired, nil)
+eq("it did not spend the slot", stored("retry").last_fired, 0)
+send_error = nil
+eq("the one-shot retries after a failed send", schedule.tick(env(), noon + 20), 1)
+eq("one retry mail", #sent, 1)
+eq("the retry disables it", stored("retry").enabled, false)
+ok("the retry is traced", events[#events]:find("^schedule_fired retry slot="))
 
 -- Disabled schedules and several schedules.
 local off = hourly_entry("off")

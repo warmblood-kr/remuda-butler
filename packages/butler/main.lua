@@ -1214,15 +1214,16 @@ minutes or has an external wait, add a reminder to your own session at the ETA:
 
 ```
 remuda butler schedule add eta-check "<M> <H> * * *" \
-  "ETA reached: report progress to your leader or the owner, then remove this reminder: remuda butler schedule rm eta-check"
+  "ETA reached: report progress to your leader or the owner, then remove this reminder: remuda butler schedule rm eta-check" --once
 ```
 
 Use a short unique name in place of `eta-check`. This is a self-targeted reminder:
-do not pass `--to`. It is recurring, not a one-shot timer. It fires at that
-minute/hour every day until you remove it, and it can be skipped if your session is
-absent or its previous mail is unread. Remove it as soon as you report, replace it
-if the ETA moves, and do not leave a stale reminder. Skip it for short, sensitive,
-or no-report tasks; state the ETA in the first report instead. Only your own session
+do not pass `--to`. With `--once` it delivers at the next matching time and then
+disables itself; until it delivers it retries if your session is absent or its
+previous mail is unread. It is still a minute/hour slot, not an absolute deadline,
+so compute the ETA's minute and hour first. Remove it after reporting to keep the
+list clean, and replace it if the ETA moves. Skip it for short, sensitive, or
+no-report tasks; state the ETA in the first report instead. Only your own session
 is in scope; ask the owner for another session.
 
 ## Scheduled reminders

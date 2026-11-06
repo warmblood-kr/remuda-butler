@@ -6,10 +6,11 @@ local parse_cli = assert(remuda.cli and remuda.cli.parse, "Butler CLI requires r
 local M = {}
 
 local USAGE = "Usage: remuda butler schedule list\n"
-  .. '       remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]\n'
+  .. '       remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION] [--once]\n'
   .. "       remuda butler schedule rm NAME\n"
-  .. "TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *."
+  .. "TEXT may be - to read it from stdin. Members can target only themselves and remove only schedules they created; the operator can manage any target. A schedule is minute N or */N (N one of 5, 6, 10, 12, 15, 20, 30) at hour N or *. --once delivers at the next matching time and then disables the schedule."
 local WARNING = "From now on this text arrives as mail from the reserved sender `schedule` at every due time, until the schedule is removed, also after restarts. The receiving agent reads it like any mail and may act on it."
+local ONCE_WARNING = "This text arrives once at the next matching time, then the schedule disables itself; until it is delivered it retries, also after restarts. The receiving agent reads it like any mail and may act on it."
 local LIST_TEXT_BYTES = 80
 
 local SCHEDULE_CLI_SPEC = {
@@ -17,8 +18,9 @@ local SCHEDULE_CLI_SPEC = {
   verbs = {
     list = { about = "List scheduled Butler messages. Example: remuda butler schedule list",
       next = "remuda butler schedule add --help" },
-    add = { about = "Add a recurring Butler message. Example: remuda butler schedule add morning '0 9 * * *' 'Check the queue'",
-      options = { { long = "to", value = "SESSION", help = "Target session (default: your own session for members, butler for the operator)" } },
+    add = { about = "Add a recurring Butler message, or one delivery with --once. Example: remuda butler schedule add morning '0 9 * * *' 'Check the queue'",
+      options = { { long = "to", value = "SESSION", help = "Target session (default: your own session for members, butler for the operator)" },
+        { long = "once", help = "Deliver at the next matching time, then disable" } },
       args = { { name = "NAME", help = "Unique schedule name" },
         { name = "CRON", help = "Supported minute/hour schedule, e.g. 0 9 * * *" },
         { name = "TEXT", help = "Message text, or - to read from stdin" } },
@@ -67,7 +69,8 @@ local function parse_add(values, stdin)
     if type(stdin) ~= "string" then return nil, "no text received on stdin" end
     text = stdin:gsub("\n+$", "")
   end
-  return { name = values.NAME, spec = values.CRON, text = text, target = values.to or "butler", explicit_target = values.to ~= nil }
+  return { name = values.NAME, spec = values.CRON, text = text, target = values.to or "butler",
+    explicit_target = values.to ~= nil, once = values.once == true or nil }
 end
 
 -- build(env, request, list) -> entry | nil, reason: everything add checks before it asks.
@@ -75,6 +78,7 @@ local function build(env, request, list, creator, recipient_id)
   local entry = { name = request.name, spec = request.spec, target = request.target, text = request.text,
     created_by = creator or "operator", created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     last_fired = math.floor(os.time() / 60), enabled = true }
+  if request.once then entry.once = true end
   if recipient_id then entry.recipient_id = recipient_id end
   local candidate = {}
   for i, existing in ipairs(list) do candidate[i] = existing end
@@ -87,9 +91,9 @@ local function build(env, request, list, creator, recipient_id)
   return entry
 end
 
--- confirm(label, run): the terminal prompt of typed-lines on; `run` returns
+-- confirm(label, warning, run): the terminal prompt of typed-lines on; `run` returns
 -- ok, message once the owner types yes.
-local function confirm(label, run)
+local function confirm(label, warning, run)
   local matrix = remuda.butler.matrix
   if type(remuda.pending) ~= "function" or not (matrix and type(matrix.prompt_preface_supported) == "function"
       and matrix.prompt_preface_supported()) then
@@ -107,7 +111,7 @@ local function confirm(label, run)
   end
   local prompted, prompt_error = pcall(reply.prompt_line, reply, {
     label = label,
-    preface = matrix.wrap_prompt_preface(WARNING),
+    preface = matrix.wrap_prompt_preface(warning),
     callback = function(answer, failure)
       if completed then return end
       if failure then return resolve(1, "", "The schedule prompt failed. Nothing was changed.\n") end
@@ -131,7 +135,8 @@ local function persist_add(env, request, creator, recipient_id)
   schedule.add(latest, fresh)
   local saved, save_error = schedule.save(env.path, latest)
   if not saved then return nil, "could not save the schedule: " .. tostring(save_error) end
-  env.trace("schedule_added", fresh.name .. " " .. fresh.spec .. " -> " .. fresh.target)
+  env.trace("schedule_added", fresh.name .. " " .. fresh.spec
+    .. (fresh.once and " once" or "") .. " -> " .. fresh.target)
   return true, "added schedule " .. fresh.name
 end
 
@@ -151,14 +156,15 @@ local function add(request, env, principal)
   if not list then return fail(list_error) end
   local entry, build_error = build(env, request, list, creator, creator)
   if not entry then return fail(build_error) end
+  local warning = request.once and ONCE_WARNING or WARNING
   -- Running this command in an authenticated session is its confirmation.
   -- Keep the standing-delivery warning in the response for that self-service path.
   if principal then
     local ok, message = persist_add(env, request, creator, creator)
     if not ok then return fail(message) end
-    return message .. ". " .. WARNING
+    return message .. ". " .. warning
   end
-  return confirm("Type yes to add schedule " .. entry.name .. ".", function()
+  return confirm("Type yes to add schedule " .. entry.name .. ".", warning, function()
     return persist_add(env, request, "operator")
   end)
 end

@@ -138,6 +138,15 @@ function M.check(entry)
   if not ok then return nil, err end
   ok, err = M.valid_text(entry.text)
   if not ok then return nil, err end
+  if entry.once ~= nil and type(entry.once) ~= "boolean" then
+    return nil, "once must be a boolean"
+  end
+  if entry.once_fired ~= nil and type(entry.once_fired) ~= "boolean" then
+    return nil, "once_fired must be a boolean"
+  end
+  if entry.once_fired and entry.once ~= true then
+    return nil, "once_fired requires once"
+  end
   local by, last = entry.created_by, entry.last_message
   if type(by) ~= "string" or #by > 64 or by:find("%c") then return nil, "created_by must be short text" end
   if entry.recipient_id ~= nil and (type(entry.recipient_id) ~= "string" or entry.recipient_id == ""
@@ -249,7 +258,12 @@ function M.due_slot(entry, now, fields)
   if not entry.enabled or entry.last_fired >= floor(now / 60) then return nil end
   local rule = M.parse(entry.spec)
   local slot = rule and M.last_due(rule, now, fields)
-  if slot and slot > entry.last_fired then return slot end
+  if slot and slot > entry.last_fired then
+    -- A one-shot entry that already delivered never fires again. If delivery
+    -- failed, once_fired stays false and the same slot retries on the next tick.
+    if entry.once and entry.once_fired then return nil end
+    return slot
+  end
 end
 
 -- compose(entry) -> subject, text: the mail marks itself as a timed message.
@@ -258,15 +272,21 @@ function M.compose(entry)
   return subject, subject .. " This is a timed message, not a human instruction.\n\n" .. entry.text
 end
 
--- fire(env, list, entry, slot) -> message id | nil. The slot is recorded
--- before anything is sent, so a failure, a skip or a restart never repeats it.
+-- fire(env, list, entry, slot) -> message id | nil. A recurring entry records
+-- the slot before anything is sent, so a failure, a skip or a restart never
+-- repeats it. A one-shot entry stays pending until a send succeeds, then
+-- disables itself; a crash after send but before save can deliver it twice.
 function M.fire(env, list, entry, slot)
   local function trace(event, detail) env.trace(event, M.safe(detail)) end
-  entry.last_fired = slot
-  local saved, err = M.save(env.path, list)
-  if not saved then
-    trace("schedule_save_failed", entry.name .. ": " .. tostring(err))
-    return nil
+  local once = entry.once == true
+  local saved, err
+  if not once then
+    entry.last_fired = slot
+    saved, err = M.save(env.path, list)
+    if not saved then
+      trace("schedule_save_failed", entry.name .. ": " .. tostring(err))
+      return nil
+    end
   end
   local resolved, alias = pcall(env.resolve, entry.target)
   if not resolved then
@@ -291,6 +311,11 @@ function M.fire(env, list, entry, slot)
     return nil
   end
   trace("schedule_fired", entry.name .. " slot=" .. slot .. " message=" .. tostring(id))
+  if once then
+    entry.once_fired = true
+    entry.enabled = false
+    entry.last_fired = slot
+  end
   entry.last_message = id
   saved, err = M.save(env.path, list)
   if not saved then trace("schedule_save_failed", entry.name .. ": " .. tostring(err)) end

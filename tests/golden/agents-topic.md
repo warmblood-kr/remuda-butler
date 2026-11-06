@@ -114,15 +114,16 @@ minutes or has an external wait, add a reminder to your own session at the ETA:
 
 ```
 remuda butler schedule add eta-check "<M> <H> * * *" \
-  "ETA reached: report progress to your leader or the owner, then remove this reminder: remuda butler schedule rm eta-check"
+  "ETA reached: report progress to your leader or the owner, then remove this reminder: remuda butler schedule rm eta-check" --once
 ```
 
 Use a short unique name in place of `eta-check`. This is a self-targeted reminder:
-do not pass `--to`. It is recurring, not a one-shot timer. It fires at that
-minute/hour every day until you remove it, and it can be skipped if your session is
-absent or its previous mail is unread. Remove it as soon as you report, replace it
-if the ETA moves, and do not leave a stale reminder. Skip it for short, sensitive,
-or no-report tasks; state the ETA in the first report instead. Only your own session
+do not pass `--to`. With `--once` it delivers at the next matching time and then
+disables itself; until it delivers it retries if your session is absent or its
+previous mail is unread. It is still a minute/hour slot, not an absolute deadline,
+so compute the ETA's minute and hour first. Remove it after reporting to keep the
+list clean, and replace it if the ETA moves. Skip it for short, sensitive, or
+no-report tasks; state the ETA in the first report instead. Only your own session
 is in scope; ask the owner for another session.
 
 Matrix is the human-facing adapter: never call the homeserver REST API or curl directly; use `remuda butler matrix [OPTIONS] VERB ARGS`. Options go BEFORE the verb (`--json` for machine output; `--room ROOM` defaults to the configured room).
@@ -161,7 +162,7 @@ Butler loaded these guidance layers in this order when this session started.
 A later layer adds to or overrides an earlier one. Edit the files named here,
 not this block: Butler rewrites it on every session start.
 
-- framework: built in, version sha256:b5e6a3395abf
+- framework: built in, version sha256:a71545532b1f
 - cluster: not available (this Remuda core has no cluster file store; update Remuda)
 - team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
 - personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)

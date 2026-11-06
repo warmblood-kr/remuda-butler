@@ -117,6 +117,16 @@ ok("a new schedule starts at the current minute, not at an old slot",
   math.abs(entry.last_fired - os.time() / 60) <= 1)
 ok("the add is traced", traces[#traces]:find("^schedule_added north%-star 7 %* %* %* %* %-> butler"))
 
+-- --once stores a one-shot entry and says it delivers only once.
+local once_added, once_prompt = add(words("add", "once-job", "7 * * * *", "one shot", "--once"), "yes")
+eq("--once add completes", once_added.code, 0)
+ok("the one-shot warning says it arrives once", once_prompt.preface:find("arrives once", 1, true))
+local once_entry = select(2, schedule.find(stored(), "once-job"))
+eq("--once is stored", once_entry.once, true)
+eq("a one-shot starts enabled", once_entry.enabled, true)
+eq("a one-shot is not delivered yet", once_entry.once_fired, nil)
+ok("the one-shot add is traced", traces[#traces]:find("^schedule_added once%-job 7 %* %* %* %* once %-> butler"))
+
 local before = file_text()
 local nothing = add(words("add", "other", "7 * * * *", "text"), "no")
 eq("anything but yes cancels", nothing.code, 1)
