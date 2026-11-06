@@ -359,3 +359,14 @@ assert(numbers.record("n1", "butler_n1",
   { source_mail_id = "m", completed_at = "now", n = 1 }) == true)
 assert(numbers.record("n1", "butler_n1",
   { source_mail_id = "m", completed_at = "now", n = 1.5 }) == nil)
+
+-- Root arrays (tagged or untagged dense) are not receipt objects.
+assert(shape._canonical_result(remuda.json.array({ "a" })) == nil)
+assert(shape._canonical_result({ "a", "b" }) == nil)
+assert(shape._canonical_result(remuda.json.object({})) == "{}")
+
+-- Provenance policy is the same as the SQL backfill: printable ASCII only.
+assert(shape._classify_txn("r", "butler_r", false) == "live")
+assert(shape._classify_txn("r", "caller", false) == "historical")
+assert(shape._classify_txn("r", "caller-\1", false) == "unclassified")
+assert(shape._classify_txn("r", "caller-\195\169", false) == "unclassified")

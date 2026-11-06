@@ -21,6 +21,7 @@ local MAX_IMPORT_ROWS = 5000
 local MAX_IMPORT_MS = 2000
 local MAX_CANON_DEPTH = 8
 local MAX_CANON_KEYS = 64
+local MAX_CANON_ITEMS = 1024
 local MAX_CANON_BYTES = 4096
 local ARRAY_MT = getmetatable(json.array and json.array({}) or {})
 local OBJECT_MT = getmetatable(json.object and json.object({}) or {})
@@ -123,27 +124,37 @@ end
 
 local function dense_array(entries)
   local indexes = {}
+  local by_index = {}
   for _, entry in ipairs(entries) do
     if type(entry.key) ~= "number" or entry.key < 1
         or entry.key ~= math.floor(entry.key) then
-      return nil, false
+      return nil, false, nil
     end
     indexes[#indexes + 1] = entry.key
+    by_index[entry.key] = entry
   end
   table.sort(indexes)
   for index, value in ipairs(indexes) do
-    if value ~= index then return nil, true end
+    if value ~= index then return nil, true, by_index end
   end
-  return indexes, true
+  return indexes, true, by_index
 end
 
 local function canonical_table(value, depth, state)
   if depth > MAX_CANON_DEPTH then return nil, "result_oversize" end
+  -- Charge the item budget before copying/sorting entries. This bounds arrays
+  -- as well as object keys and avoids a huge temporary copy on rejection.
+  local count = 0
+  for _ in pairs(value) do
+    count = count + 1
+    if state.items + count > MAX_CANON_ITEMS then return nil, "result_oversize" end
+  end
+  state.items = state.items + count
   local mt = getmetatable(value)
   local tagged_array = mt == ARRAY_MT
   local tagged_object = mt == OBJECT_MT
   local entries = table_entries(value)
-  local indexes, all_positive = dense_array(entries)
+  local indexes, all_positive, by_index = dense_array(entries)
 
   local as_array
   if tagged_array then
@@ -167,10 +178,7 @@ local function canonical_table(value, depth, state)
     local parts = {}
     state.bytes = state.bytes + 2
     for _, index in ipairs(indexes or {}) do
-      local entry
-      for _, candidate in ipairs(entries) do
-        if candidate.key == index then entry = candidate; break end
-      end
+      local entry = by_index[index]
       local item, why = canonical_value(entry.value, depth + 1, state)
       if item == nil then return nil, why end
       parts[#parts + 1] = item
@@ -242,10 +250,15 @@ end
 -- A receipt result is either absent (null) or an object. A non-object root is a
 -- shape conflict; an absent result is not an empty object.
 local function canonical_result(result)
-  local state = { bytes = 0, keys = 0 }
+  local state = { bytes = 0, keys = 0, items = 0 }
   if result == nil or result == json.null then return "null" end
   if type(result) ~= "table" then return nil, "result_shape" end
-  if getmetatable(result) == ARRAY_MT then return nil, "result_shape" end
+  local mt = getmetatable(result)
+  if mt == ARRAY_MT then return nil, "result_shape" end
+  if mt ~= OBJECT_MT then
+    local indexes, all_positive = dense_array(table_entries(result))
+    if all_positive and indexes ~= nil then return nil, "result_shape" end
+  end
   local text, why = canonical_table(result, 1, state)
   if text == nil then return nil, why end
   return text
@@ -269,7 +282,7 @@ end
 -- historical during import; only a live `record` call can say `live`.
 local function classify_txn(reply_id, txn_id, imported)
   if type(txn_id) ~= "string" or txn_id == "" then return "unclassified" end
-  if txn_id:find("%c") or txn_id:match("^%s*$") then return "unclassified" end
+  if txn_id:find("[^ -~]") or txn_id:match("^%s*$") then return "unclassified" end
   if txn_id == "legacy_" .. reply_id then return "legacy" end
   if imported then return "historical" end
   if txn_id == "butler_" .. reply_id then return "live" end
@@ -527,5 +540,10 @@ function M.status()
   end
   return status
 end
+
+-- Internal seams for the shadow tests. They do not grant authority.
+M._canonical_result = canonical_result
+M._canonical_encoded = canonical_encoded
+M._classify_txn = classify_txn
 
 remuda._butler_relay_receipts = M
