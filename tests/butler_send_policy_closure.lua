@@ -18,8 +18,14 @@ remuda = { json = codec, _butler_notice = {},
     calls = calls + 1
     return { code = 0, stdout = "{}", stderr = "" }
   end } }
-assert(loadfile(root .. "/packages/butler/native_dispatch.lua"))()
+local dispatch_module = assert(loadfile(root .. "/packages/butler/native_dispatch.lua"))()
 local policy = assert(loadfile(root .. "/packages/butler/send_policy.lua"))()
+
+-- The one-shot transport factory is consumed synchronously during policy
+-- module initialization: no caller can take it after load, before any send.
+assert(dispatch_module.install == nil, "the transport factory door is already closed")
+local took, factory = pcall(function() return dispatch_module.install(policy) end)
+assert(not took or factory == nil, "a later factory takeover yields no factory")
 
 -- Raw constructors/adapters are not public, so a caller cannot obtain a send
 -- handle nor substitute callbacks for the genuine journal authority.

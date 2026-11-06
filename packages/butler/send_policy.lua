@@ -107,16 +107,12 @@ local function current(adapter)
   return agent.native == nil and adapter.native == nil
 end
 
--- Fixed transport factory, taken once at load from native_dispatch's one-shot
--- handoff. No caller-supplied runner, verb or options reach it.
+-- Fixed transport factory, consumed synchronously below at module load from
+-- native_dispatch's one-shot handoff. No caller-supplied runner, verb or
+-- options reach it, and the public install door is gone after this module is
+-- initialized.
 local make_channel
 local function channel_for(kind)
-  if not make_channel then
-    local transport = remuda.butler and remuda.butler.native_dispatch
-    if transport and type(transport.install) == "function" then
-      make_channel = transport.install(M)
-    end
-  end
   if not make_channel then return nil, "native_transport_unavailable" end
   return make_channel(kind)
 end
@@ -273,6 +269,15 @@ function M.send_message(session, intent)
   attempt.result = typed_result({ mail_id = attempt.ids and attempt.ids[1],
     status = status_of(sent, why), reason = why, route = adapter.route })
   return seam.resolve(sent, why, adapter, attempt)
+end
+
+-- Consume the transport factory now, before the finished admission surface is
+-- observable: a caller can never take the factory later and bypass the journal.
+do
+  local transport = remuda.butler.native_dispatch
+  if transport and type(transport.install) == "function" then
+    make_channel = transport.install(M)
+  end
 end
 
 remuda.butler.send_policy = M

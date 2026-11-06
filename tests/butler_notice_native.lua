@@ -82,6 +82,8 @@ local N = remuda._butler_notice
 assert(remuda.butler.send_policy.construct == nil and remuda.butler.send_policy.observe == nil,
   "the raw policy constructors stay private")
 assert(remuda._butler_notice._policy_bound, "the live notice image bound the policy once")
+assert(remuda.butler.native_dispatch.install == nil,
+  "the policy consumed the transport factory before the first native send")
 
 local on_begin, on_ls, on_retire
 local function reset()
