@@ -195,12 +195,24 @@ local function choose(candidates, opts, done)
     -- An old daemon ignores the launch field and still answers success. Check
     -- the listing before claiming the new instance is protected.
     if opts.remote_input_disabled == true and instance_id then
-      local rows = remuda.session and remuda.session.list and remuda.session.list() or remuda.ls()
-      local row
-      for _, candidate in ipairs(rows or {}) do
-        if candidate.name == name then row = candidate break end
+      local function protected()
+        local rows = remuda.session and remuda.session.list and remuda.session.list() or remuda.ls()
+        for _, candidate in ipairs(rows or {}) do
+          if candidate.name == name then
+            return candidate.instance_id == instance_id and candidate.remote_input_disabled == true
+          end
+        end
+        return false
       end
-      if not (row and row.instance_id == instance_id and row.remote_input_disabled == true) then
+      local checked = protected()
+      -- A hosted launch or an old daemon may not carry the flag in its listing.
+      -- One exact-instance setter retry recovers the supported path; if it still
+      -- fails, report degraded and keep the sender gate closed.
+      if not checked and type(remuda.session and remuda.session.remote_input) == "function" then
+        pcall(remuda.session.remote_input, name, instance_id, false)
+        checked = protected()
+      end
+      if not checked then
         bus.remote_input_unprotected = bus.remote_input_unprotected or {}
         bus.remote_input_unprotected[name] = true
         local trace = remuda._butler_session_trace or _G._butler_session_trace
