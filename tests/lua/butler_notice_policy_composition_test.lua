@@ -149,6 +149,131 @@ T.test("native Codex: real preflight reserves the journal before the process sin
   T.eq(out, "ok", "native composition")
 end)
 
+T.test("an active startup control defers only the legacy notice path", function()
+  local out = T.eval([==[
+    local bus = remuda._butler_bus
+    local spies = remuda._t_spies
+    local controls = remuda.butler.startup_controls
+    local real_schedule, real_cancel = remuda.schedule, remuda.cancel
+    local real_capture_styled = remuda.capture_styled
+    local real_capture, real_ls = remuda.capture, remuda.ls
+    remuda.schedule = function(spec) return { spec = spec } end
+    remuda.cancel = function() end
+    remuda.capture_styled = nil
+    local update_screen = "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything"
+    local composer_screen = "› Ask Codex to do anything"
+    local screen = update_screen
+    local m3 = { id = "m3-id", kind = "codex", instance_id = "inst-3",
+      parent = "butler", alias = "m3", last_screen = update_screen }
+    bus.agents.m3 = m3
+    remuda.ls = function()
+      return { { name = "m3", id = "row-3", instance_id = "inst-3", alive = true, attached = false } }
+    end
+    remuda.capture = function() return screen end
+    local owned = controls.start({ name = "m3", kind = "codex", parent = "butler",
+      agent = m3, model = "gpt", cwd = "/tmp", saved_id = nil, task_supplied = false })
+    assert(owned and controls.active("m3", m3) == owned, "control ownership was not registered")
+    -- The legacy notice policy must refuse while the update frame is live.
+    local sends = #spies.sends
+    local captures, checks = 0, 0
+    local capture_before = remuda.capture
+    remuda.capture = function(...)
+      captures = captures + 1
+      return capture_before(...)
+    end
+    local check_before = remuda.butler.dialogs.check
+    remuda.butler.dialogs.check = function(...)
+      checks = checks + 1
+      return check_before(...)
+    end
+    local allowed = remuda._butler_notify_policy("m3")
+    remuda.capture = capture_before
+    remuda.butler.dialogs.check = check_before
+    assert(allowed == false, "legacy notice policy admitted a live update modal")
+    assert(captures == 0 and checks == 0,
+      "the legacy policy consumed a controlled frame before refusing it")
+    remuda._butler_send("butler", "m3", "legacy while controlled")
+    remuda._butler_notice.deliver_notice("m3")
+    assert(#spies.sends == sends, "a legacy notice was typed into the unresolved update frame")
+    -- The active control owns the pane until it releases it, even after the
+    -- dialog cleared: the pointer must not replace the composer first.
+    screen = composer_screen
+    assert(remuda._butler_notify_policy("m3") == false,
+      "the legacy notice policy typed into a controlled startup pane")
+    local startup = remuda._butler_agent_startup.codex
+    assert(remuda._butler_chooser.known_startup_modal(startup, update_screen) == true,
+      "the update frame was not recognised as a live startup modal")
+    assert(remuda._butler_chooser.known_startup_modal(startup, composer_screen) == false,
+      "an empty composer was misread as a startup modal")
+    -- Native bound delivery is not this gate's to defer: the helper runs now.
+    local m4 = { id = "m4-id", kind = "codex", instance_id = "inst-4",
+      parent = "butler", alias = "m4",
+      native = { mode = "native", kind = "codex",
+        path = "/private/tmp/t/manifest.json", nonce = string.rep("cd", 16),
+        session_token = "row-4", row_id = "row-4", instance = "inst-4" } }
+    bus.agents.m4 = m4
+    remuda.ls = function()
+      return { { name = "m3", id = "row-3", instance_id = "inst-3", alive = true, attached = false },
+        { name = "m4", id = "row-4", instance_id = "inst-4", alive = true, attached = false } }
+    end
+    local owned4 = controls.start({ name = "m4", kind = "codex", parent = "butler",
+      agent = m4, model = "gpt", cwd = "/tmp", saved_id = nil, task_supplied = false })
+    assert(owned4, "native control ownership was not registered")
+    local runs = #spies.runs
+    local ok4, result4 = pcall(remuda._butler_send, "butler", "m4", "native while control")
+    assert(ok4 and tostring(result4):find("notified m4", 1, true) ~= nil,
+      "native delivery was deferred by the legacy gate: " .. tostring(result4))
+    assert(#spies.runs == runs + 1, "the native helper did not run under an active control")
+    assert(#spies.sends == sends, "the native bypass typed a legacy notice")
+    assert(spies.keys == 0 and spies.types == 0, "the native bypass pressed keys or typed")
+    local task_id = bus.inboxes["m4-id"][#bus.inboxes["m4-id"]]
+    -- The realistic busy case: the native Task was accepted, and the pane is
+    -- already working before the controller's first tick. It must release the
+    -- timer quietly without replaying the Task or typing anything.
+    screen = "esc to interrupt"
+    owned4.handle.spec.run()
+    assert(controls.active("m4", m4) == nil, "a busy native pane kept startup ownership")
+    assert(#spies.runs == runs + 1, "the busy release replayed the native helper")
+    assert(#spies.sends == sends, "the busy release typed a legacy notice")
+    assert(spies.keys == 0 and spies.types == 0, "the busy release pressed keys or typed")
+    assert(bus.inboxes["m4-id"][#bus.inboxes["m4-id"]] == task_id,
+      "the busy release queued a new Task")
+    assert(controls.take_evidence("m4", m4) == "esc to interrupt",
+      "the quiet stop did not preserve its last observed frame")
+    assert(controls.take_evidence("m4", m4) == nil,
+      "the quiet-stop frame was handed out twice")
+    controls.stop("m3", owned)
+    controls.stop("m4", owned4)
+    -- After ownership is gone the unresolved menu must still refuse the
+    -- legacy pointer; only the empty composer admits it.
+    bus.notices.m3 = nil
+    screen = update_screen
+    local after_failure = #spies.sends
+    remuda._butler_send("butler", "m3", "after give-up")
+    remuda._butler_notice.deliver_notice("m3")
+    assert(#spies.sends == after_failure,
+      "a released but unresolved update menu received a pointer")
+    -- Historical update text above a clear composer is transcript, not a live
+    -- choice, and stays admitted.
+    screen = "Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n\n● task finished\n\n● tests passed\n\n╭──────────────╮\n│ ›            │\n╰──────────────╯"
+    local sent_auto, auto_why = remuda.butler.dialogs.automatic_notice_send("m3",
+      "Butler message 01ARZ3NDEKTSV4RRFFQ69G5FAV arrived. Read it: remuda butler inbox",
+      { "01ARZ3NDEKTSV4RRFFQ69G5FAV" })
+    assert(sent_auto == true,
+      "historical update text blocked a clear composer: " .. tostring(auto_why))
+    assert(#spies.sends == after_failure + 1, "the admitted notice did not send")
+    screen = composer_screen
+    assert(remuda._butler_notify_policy("m3") == true,
+      "the legacy notice policy stayed closed after the control stopped")
+    bus.notices.m3, bus.agents.m3, bus.agents.m4 = nil, nil, nil
+    remuda.schedule, remuda.cancel = real_schedule, real_cancel
+    remuda.capture_styled = real_capture_styled
+    remuda.capture, remuda.ls = real_capture, real_ls
+    return "ok"
+  ]==])
+  T.eq(out, "ok", "startup control notice composition")
+end)
+
 T.test("journal write failure: zero native process sink", function()
   local out = T.eval([==[
     local bus = remuda._butler_bus
@@ -199,6 +324,56 @@ T.test("timeout is uncertain, persisted, and a second delivery is suppressed", f
     return "ok"
   ]==])
   T.eq(out, "ok", "uncertain persistence and suppression")
+end)
+
+T.test("manual changed-instance relaunch still suppresses accepted or uncertain Tasks", function()
+  local out = T.eval([==[
+    local bus = remuda._butler_bus
+    local spies = remuda._t_spies
+    local journal = remuda._butler_delivery_journal
+    local agent = bus.agents.m1
+    local real_ls = remuda.ls
+    local inbox = bus.inboxes["m1-id"] or {}
+    local accepted, uncertain
+    for _, id in ipairs(inbox) do
+      local state = journal.state_of("m1-id", id)
+      if state == "accepted_unread" then accepted = accepted or id end
+      if state == "uncertain" then uncertain = id end
+    end
+    assert(accepted and uncertain, "the accepted and uncertain journal ids are present")
+    local count = #inbox
+    local function relaunch_as(instance)
+      bus.agents.m1 = { id = "m1-id", kind = "codex", instance_id = instance,
+        parent = "butler", alias = "m1",
+        native = { mode = "native", kind = "codex",
+          path = "/private/tmp/t/manifest.json", nonce = string.rep("ef", 16),
+          session_token = "row-1", row_id = "row-1", instance = instance } }
+      remuda.ls = function()
+        return { { name = "m1", id = "row-1", instance_id = instance,
+          alive = true, attached = false } }
+      end
+    end
+    local cases = { { id = accepted, state = "accepted_unread", instance = "inst-a2" },
+      { id = uncertain, state = "uncertain", instance = "inst-u2" } }
+    for _, case in ipairs(cases) do
+      relaunch_as(case.instance)
+      assert(bus.agents.m1.id == "m1-id", "the logical recipient id changed")
+      local before = #spies.runs
+      remuda._butler_notify("m1", "Butler message " .. case.id
+        .. " arrived. Read it: MCP butler_inbox (or remuda butler inbox)", case.id, true)
+      remuda._butler_notice.deliver_notice("m1")
+      assert(#spies.runs == before, "a journaled Task replayed the helper after relaunch")
+      assert(journal.state_of("m1-id", case.id) == case.state,
+        "the journal state changed across the relaunch")
+      assert(journal.suppresses("m1-id", case.id) == true,
+        "the same ULID is not suppressed after the relaunch")
+      assert(#inbox == count, "a new Task was appended for the same ULID")
+    end
+    bus.agents.m1 = agent
+    remuda.ls = real_ls
+    return "ok"
+  ]==])
+  T.eq(out, "ok", "accepted/uncertain suppression across relaunch")
 end)
 
 T.test("_butler_report keeps the original string and returns the durable ULID", function()

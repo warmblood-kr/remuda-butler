@@ -711,6 +711,7 @@ remuda.butler.native_adopt.install({ bus = bus, launch = remuda.butler.native_la
   end,
   trace = function(...) return _butler_session_trace(...) end })
 remuda.exec("butler/launch")
+remuda.exec("butler/startup_controls")
 local launch_agent = remuda._butler_launch_impl.launch_agent
 -- Mail notice policy, recovery and delivery live in notice.lua.
 remuda._butler_notice_config = { bus = bus,
@@ -1727,7 +1728,25 @@ if not bus.close_wrapper_installed and type(remuda.close) == "function" then
   end
 end
 local function report_update_task_not_relaunched(record, reason)
-  if not record or not record.task or record.task == "" then return end
+  if not record then return end
+  -- Known routes keep the durable Task and its saved ULID; a control failure
+  -- must not be reported as an undelivered task or a reason to resend a body.
+  if type(record.saved_task_id) == "string" and record.saved_task_id ~= "" then
+    pcall(remuda._butler_send, "butler", record.parent or "butler",
+      "startup control failed for " .. tostring(record.name) .. "; task saved "
+        .. record.saved_task_id .. "; read the existing inbox. Do not resend the body.")
+    return
+  end
+  if not record.task or record.task == "" then
+    if record.task_supplied == true then
+      -- The routed task was supplied but never became durable mail; keep the
+      -- brief and never suggest resending a stored body.
+      pcall(remuda._butler_send, "butler", record.parent or "butler",
+        "startup control failed for " .. tostring(record.name)
+          .. "; the task was not saved and its brief is retained.")
+    end
+    return -- no task was ever supplied; nothing to resend
+  end
   -- The launch reports a lost first task itself; one mail per lost task.
   local delivery = bus.first_task_delivery and bus.first_task_delivery[record.name]
   if delivery then
@@ -1848,9 +1867,16 @@ function remuda._butler_session_exited(name, info)
     remuda._butler_relaunching = remuda._butler_relaunching or {}
     remuda._butler_relaunching[name] = os.time()
     _butler_session_trace("codex_updated_relaunch", name)
+    -- The brief and saved Task id travel with the launch context, not a
+    -- post-call mutation that races the asynchronous chooser.
+    local relaunch_context = {
+      original_task = update_restart.original_task,
+      saved_task_id = update_restart.saved_task_id,
+      task_supplied = update_restart.task_supplied,
+    }
     local ok, err = pcall(launch_agent, update_restart.kind, update_restart.name,
       update_restart.cwd, update_restart.model, update_restart.parent, update_restart.task,
-      update_restart.identity, nil, update_restart.profile)
+      update_restart.identity, nil, update_restart.profile, relaunch_context)
     if not ok then
       _butler_session_trace("codex_updated_relaunch_failed", name .. ": " .. tostring(err))
       remuda._butler_relaunching[name] = nil

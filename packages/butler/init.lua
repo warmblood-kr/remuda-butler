@@ -118,6 +118,10 @@ return {
     end
     if dialogs and dialogs.source_refresh_busy and dialogs.source_refresh_busy() then return "input recovery is active" end
     if next(state.active_choosers or {}) then return "a launch chooser is active" end
+    local controls = host.butler and host.butler.startup_controls
+    if controls and type(controls.active_count) == "function" and controls.active_count() > 0 then
+      return "a Codex startup control is active"
+    end
     if host._butler_launching or host._butler_start_pending then return "Butler is starting" end
     local bus = host._butler_bus or {}
     -- A reload replaces the Lua image. Do not drop a native publication
@@ -181,6 +185,8 @@ return {
   end,
   stop = function(state)
     if dialogs then dialogs.stop() end
+    local controls = host.butler and host.butler.startup_controls
+    if controls and type(controls.stop_all) == "function" then pcall(controls.stop_all) end
     if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
     local matrix = host.butler and host.butler.matrix
     if matrix and matrix.relay then pcall(matrix.relay.stop)

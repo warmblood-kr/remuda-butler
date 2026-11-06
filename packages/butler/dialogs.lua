@@ -86,6 +86,11 @@ local function startup_owned(name, agent, screen, signature)
   local owned = (bus.pending_tasks or {})[name] and delivery and delivery.state == 'waiting'
     and delivery.marker ~= nil and delivery.marker == agent.session_start_marker
   owned = owned or (type(update) == 'table' and update.identity == agent.id)
+  -- A task-independent Codex startup control owns this pane before it has an
+  -- update record; notices must not be typed into an unresolved update dialog.
+  local controls = remuda.butler and remuda.butler.startup_controls
+  owned = owned or (controls and type(controls.active) == "function"
+    and controls.active(name, agent) ~= nil)
   if not owned or not chooser or not chooser.startup_modal then return false end
   -- Broad historical markers are suitable for startup deferral, not input
   -- authorization. Match the current geometry and validate its option labels.
@@ -178,6 +183,19 @@ local function current_geometry(screen, geometry)
   local current = {}
   for index = first, last do current[#current + 1] = lines[index] end
   return table.concat(current, '\n')
+end
+
+-- A live Codex update choice, not a historical title: the update modal must
+-- sit in the current bottom block, above any transcript that followed it.
+local function live_update_choice(agent, screen)
+  local startup = (remuda._butler_agent_startup or {})[agent.kind] or {}
+  local chooser = remuda._butler_chooser
+  local compaction = remuda._butler_compaction
+  if not (chooser and chooser.startup_modal and compaction) then return false end
+  local tail = compaction.bottom_screen_lines(screen, 8)
+  if type(tail) ~= 'table' or #tail == 0 then return false end
+  local modal = chooser.startup_modal(startup, table.concat(tail, '\n'))
+  return modal ~= nil and modal.update == true
 end
 
 -- The agent file's dialog_states list (agents/claudecode.lua, agents/codex.lua)
@@ -706,8 +724,11 @@ end
 -- Narrow automatic-mail-wakeup capability (owner decisions 2026-11-03 and
 -- 2026-11-05). A notice is a Butler-generated pointer, not owner text, so it
 -- bypasses the modal *prediction* gate (M.check) and nothing else: every
--- general send/type_text/key still passes that gate, and startup/approved
--- flows are untouched. Attachment, busy state and composer contents are not
+-- general send/type_text/key still passes that gate, while one narrow
+-- exception refuses this legacy sender only: an exact task-independent Codex
+-- startup control owns the alias until it resolves the update, relaunches or
+-- quietly gives up. Native bound delivery never reaches this function.
+-- Attachment, busy state and composer contents are not
 -- automatic admission gates; this capability no longer refuses an attached
 -- pane. It keeps its live-session and bound-instance preflight, its own audit
 -- and the agent-object/generation recheck. The core send word is still
@@ -754,6 +775,26 @@ function M.automatic_notice_send(name, text, message_ids, still_current)
   end
   local agent, actual = preflight()
   if not agent then return false, actual end
+  -- A task-independent Codex startup control owns this legacy pane until it
+  -- resolves the update, relaunches or quietly gives up. Native bound delivery
+  -- never reaches this sender, so its immediate path is unchanged.
+  local controls = remuda.butler and remuda.butler.startup_controls
+  if controls and type(controls.active) == "function"
+      and controls.active(name, agent) ~= nil then
+    return false, 'startup_control_owned'
+  end
+  -- Fail closed after a control gives up: an unresolved startup menu still on
+  -- the pane would swallow the pointer. The progress screen ("Updating
+  -- Codex...") is not a choice menu and keeps its existing timeout notice.
+  if agent.kind == 'codex' then
+    local captured, screen = pcall(remuda.capture, name)
+    if not captured or type(screen) ~= 'string' then
+      return false, 'capture_unavailable'
+    end
+    if live_update_choice(agent, screen) then
+      return false, 'startup_update_unresolved'
+    end
+  end
   local state = states[name] or {}
   state.instance = type(actual) == 'string' and actual or state.instance
   if not audit(name, agent, state, 'automatic-mail-wakeup', 'send', 'transport_only') then
