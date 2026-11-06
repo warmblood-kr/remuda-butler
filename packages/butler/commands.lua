@@ -229,6 +229,8 @@ local NATIVE_CLI_SPEC = {
     },
   },
 }
+local NATIVE_HELP = "Usage: remuda butler native adopt-codex ALIAS --socket PATH --thread UUID\n"
+  .. "       remuda butler native adopt-opencode ALIAS --endpoint URL --conversation SES_ID --password-stdin\n"
 local function native_tail(args)
   local argv = {}
   for index = 2, #args do argv[#argv + 1] = args[index] end
@@ -246,7 +248,11 @@ command(5.9, "native", "  remuda butler native adopt-codex ALIAS --socket PATH -
         .. "Next: remuda butler native --help", 1)
     end
   end
-  local report = cli_parser(NATIVE_CLI_SPEC, native_tail(args))
+  -- A bare help token has no sub-verb for NATIVE_CLI_SPEC to describe; answer
+  -- it with the two documented forms instead of the sub-verb parser's refusal.
+  local argv = native_tail(args)
+  if #argv == 1 and (argv[1] == "--help" or argv[1] == "-h") then return NATIVE_HELP end
+  local report = cli_parser(NATIVE_CLI_SPEC, argv)
   if report.kind == "help" then return report.text end
   if not report.ok then
     if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end

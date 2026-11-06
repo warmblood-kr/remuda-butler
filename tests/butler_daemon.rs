@@ -1807,6 +1807,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
         local inbox, owned, notices, reconcile, compaction, scheduled, owned_contributions = 0, 0, 0, 0, 0, 0, -1
         local switch_verbs = {}
         local input_queue_commands = 0
+        local native_commands = 0
         for _, hook in ipairs(remuda.hook_list()) do
           if hook.group == "remuda-module:butler" then owned = owned + 1 end
           if hook.event == "butler/deliver" and hook.id == "inbox"
@@ -1829,6 +1830,11 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
                     "input-queue must retain its executable lifecycle command")
                   input_queue_commands = input_queue_commands + 1
                 end
+                if point == "butler.command" and item.id == "native" then
+                  assert(item.entry.verb == "native" and type(item.entry.run) == "function",
+                    "native must retain its executable lifecycle command")
+                  native_commands = native_commands + 1
+                end
                 if point == "butler.command" and item.id
                     and (item.id == "typed-lines" or item.id == "shell-lines"
                       or item.id == "status-commands") then
@@ -1840,7 +1846,7 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
         end
         table.sort(switch_verbs)
         return table.concat({ inbox, owned, notices, reconcile, compaction, scheduled, owned_contributions,
-          table.concat(switch_verbs, ","), input_queue_commands }, "|")
+          table.concat(switch_verbs, ","), input_queue_commands, native_commands }, "|")
     "#;
     let initial = eval(&path, counts);
     assert!(
@@ -1848,10 +1854,11 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
         // Require its identity exactly once as well as the total; reload and
         // rollback below must preserve this complete registration snapshot.
         // OpenCode contributes its agent/launch registrations alongside the
-        // durable input operator command, and the prepared-text guidance
-        // contribution adds one more owned registration.
-        initial == "1|4|1|1|1|1|35|shell-lines,status-commands,typed-lines|1"
-            || initial == "1|4|1|1|1|1|-1||0",
+        // durable input operator command, the prepared-text guidance
+        // contribution adds one more owned registration, and the native
+        // adoption command adds the 36th.
+        initial == "1|4|1|1|1|1|36|shell-lines,status-commands,typed-lines|1|1"
+            || initial == "1|4|1|1|1|1|-1||0|0",
         "unexpected Butler lifecycle registrations: {initial}"
     );
 
