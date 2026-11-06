@@ -380,6 +380,9 @@ local function render_human(verb, options, result)
           .. tostring(budget.warn_values) .. " values, stop "
           .. tostring(budget.stop_values) .. " values)"
       end
+    elseif type(budget) == "table" then
+      lines[#lines + 1] = "Relay state: unavailable ("
+        .. terminal_safe(tostring(budget.reason or budget.level or "unknown")) .. ")"
     end
     return table.concat(lines, "\n") .. "\n"
   elseif verb == "notifications" then

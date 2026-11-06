@@ -669,7 +669,7 @@ function relay.json_budget(state)
     seen[table_value] = nil
   end
   walk(state)
-  local encoded_ok, encoded = pcall(json.encode, state)
+  local encoded_ok, encoded, encode_why = pcall(json.encode, state)
   local bytes = encoded_ok and type(encoded) == "string" and #encoded or nil
   local level = "ok"
   if values >= RELAY_JSON_STOP_VALUES
@@ -679,7 +679,16 @@ function relay.json_budget(state)
       or (bytes and bytes >= RELAY_JSON_WARN_BYTES) then
     level = "warn"
   end
-  if not encoded_ok then level = values >= RELAY_JSON_STOP_VALUES and "stop" or "unknown" end
+  -- Core encode returns nil, reason for depth/limit/shape failures without
+  -- raising. Success requires a string, not just a successful pcall.
+  local encode_error = nil
+  if not encoded_ok then
+    encode_error = tostring(encoded)
+    level = values >= RELAY_JSON_STOP_VALUES and "stop" or "unknown"
+  elseif bytes == nil then
+    encode_error = tostring(encode_why or "encoder returned no text")
+    level = values >= RELAY_JSON_STOP_VALUES and "stop" or "unknown"
+  end
   return {
     values = values,
     bytes = bytes,
@@ -689,7 +698,7 @@ function relay.json_budget(state)
     stop_values = RELAY_JSON_STOP_VALUES,
     warn_bytes = RELAY_JSON_WARN_BYTES,
     stop_bytes = RELAY_JSON_STOP_BYTES,
-    encode_error = encoded_ok and nil or tostring(encoded),
+    encode_error = encode_error,
   }
 end
 
