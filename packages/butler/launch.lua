@@ -98,7 +98,7 @@ local function trust_env()
 end
 
 local FIRST_TASK_TYPE_LIMIT = 8192
-local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity, fresh_trusted_cwd, profile)
+local function launch_agent(kind, requested_name, cwd, model, parent, task, relaunch_identity, fresh_trusted_cwd, profile, relaunch_context)
   local candidates = kind and { kind } or configured_agent_order()
   local compatible = {}
   for _, candidate in ipairs(candidates) do
@@ -307,6 +307,9 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     trust_reported = waiting_for_trust, trust_answered = trust_answered,
     instance_id = instance_id, instance_binding = instance_id and 1 or nil, -- from the remuda.new return only
   }
+  if relaunch_context and type(relaunch_context.original_task) == "string" then
+    bus.agents[actual].task = relaunch_context.original_task
+  end
   -- A new incarnation never inherits a done request left at its alias (remuda#606).
   if remuda._butler_done then remuda._butler_done[actual] = nil end
   bus.tokens[token] = { id = identity.id, generation = bus.agents[actual].session_start_marker,
@@ -413,9 +416,35 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   -- helper or the composer. Persist the whole task as durable Butler mail; the
   -- ordinary native notice then carries only the canonical pointer after the
   -- binding publishes. A failed write is reported, never typed instead.
+  local supplied_task = type(task) == "string" and task ~= ""
+  local controls = remuda.butler and remuda.butler.startup_controls
+  local context = relaunch_context
+  local effective_supplied = context and context.task_supplied
+  if effective_supplied == nil then effective_supplied = supplied_task end
+  local control_state
+  if kind == "codex" and controls and type(controls.start) == "function" then
+    -- Register the control owner before any legacy notice can be typed. The
+    -- saved ULID is filled after the durable queue without re-saving.
+    local stated, control, why = pcall(controls.start, { name = actual, kind = kind,
+      parent = parent, identity = bus.agents[actual] and bus.agents[actual].id,
+      agent = bus.agents[actual], model = model, cwd = launch_cwd, profile = profile,
+      saved_id = context and context.saved_task_id, task_supplied = effective_supplied,
+      original_task = bus.agents[actual] and bus.agents[actual].task })
+    if stated and control then control_state = control end
+    if not stated or not control then
+      local reason = tostring(stated and why or control)
+      _butler_session_trace("startup_control_start_failed", actual .. ": " .. reason)
+      local text = effective_supplied
+        and ("startup control failed for " .. actual
+          .. "; the durable mail path continues and its outcome is reported separately.")
+        or ("startup control failed for " .. actual .. "; no task was supplied.")
+      pcall(remuda._butler_send, "butler", parent or "butler", text)
+    end
+  end
   local native_binding = bus.agents[actual].native
   local native_task = remuda.butler and remuda.butler.native_task
-  if task and task ~= "" and native_task and native_task.route(bus.agents[actual], kind) then
+  local saved_task_id
+  if supplied_task and native_task and native_task.route(bus.agents[actual], kind) then
     local saved_id, save_why, info = native_task.queue({
       queue_message = queue_message, mail_address = mail_address,
       send = remuda._butler_send, trace = _butler_session_trace,
@@ -444,6 +473,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     end
     -- Suppress the raw/PTY body path on both durable success and failure. The
     -- agent record and saved mail keep the full brief; this only stops typing.
+    saved_task_id = saved_id
+    if control_state and type(controls.set_saved) == "function" then
+      pcall(controls.set_saved, actual, saved_id, control_state)
+    end
     task = ""
   end
   -- Launch completion is a real lifecycle point: if the wrapper/channel has
@@ -948,15 +981,35 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       -- Startup/task confirmation owns its captures. Reuse that evidence so
       -- this observer cannot advance a scripted TUI or race its startup dialogs.
       local delivery = bus.first_task_delivery and bus.first_task_delivery[actual]
+      local controls = remuda.butler and remuda.butler.startup_controls
+      local control = controls and controls.active and controls.active(actual, agent)
       local captured, screen
-      if bus.pending_tasks[actual] then
-        captured, screen = delivery and delivery.last_screen ~= nil, delivery and delivery.last_screen
+      if control then
+        -- The active control is the single capture owner; never advance its
+        -- scripted pane just because its first tick has not run yet.
+        captured, screen = control.last_screen ~= nil, control.last_screen
       else
-        captured, screen = pcall(remuda.capture, actual)
+        -- A quiet stop may have just released the pane after capturing a
+        -- model rejection; take that one frame instead of capturing again.
+        local evidence = controls and controls.take_evidence
+          and controls.take_evidence(actual, agent)
+        if evidence ~= nil then
+          captured, screen = true, evidence
+        elseif bus.pending_tasks[actual] then
+          captured, screen = delivery and delivery.last_screen ~= nil, delivery and delivery.last_screen
+        else
+          captured, screen = pcall(remuda.capture, actual)
+        end
       end
       local rejected = captured and chooser.model_rejection(screen)
       if rejected then
         remuda.cancel(monitor)
+        -- Stop only the controller captured for this exact launch; never a
+        -- replacement under the same alias. Stopping sends no keys and closes
+        -- no pane, so the durable Task journal and its mail stay untouched.
+        if control and controls and type(controls.stop) == "function" then
+          pcall(controls.stop, actual, control)
+        end
         if delivery and delivery.marker == agent.session_start_marker then
           delivery.state = "failed"
           bus.pending_tasks[actual] = nil

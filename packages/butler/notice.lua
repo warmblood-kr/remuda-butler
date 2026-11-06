@@ -224,6 +224,15 @@ end
 -- capture is refused, since type_text inserts at the cursor. Busy clients still require EMPTY.
 function remuda._butler_notify_policy(session, now)
   now = now or os.time()
+  -- A task-independent Codex startup control owns the pane until it resolves
+  -- the update, relaunches or quietly gives up. Refuse before any ls/capture/
+  -- dialog consumer so the legacy policy cannot eat the owner's next frame.
+  -- Native bound delivery bypasses this policy entirely.
+  local controls = remuda.butler and remuda.butler.startup_controls
+  if controls and type(controls.active) == "function"
+      and controls.active(session, bus.agents[session]) ~= nil then
+    return false
+  end
   local row
   for _, candidate in ipairs(remuda.ls()) do
     if candidate.name == session then row = candidate end

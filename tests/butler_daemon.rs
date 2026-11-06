@@ -4596,6 +4596,21 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             ["t-claude-human-trust"] = true,
             ["t-claude-launch-unknown"] = true,
             ["t-claude-launch-transient"] = true,
+            -- Force the real startup probe for every scripted Codex pane so the
+            -- chooser itself detects and hands off the update dialog.
+            ["t-codex"] = true,
+            ["t-codex-peer"] = true,
+            ["t-codex-unanswerable"] = true,
+            ["t-codex-running"] = true,
+            ["t-codex-human"] = true,
+            ["t-codex-close"] = true,
+            ["t-codex-skip-label"] = true,
+            ["t-codex-timeout"] = true,
+            ["t-codex-versionless"] = true,
+            ["t-codex-human-owner"] = true,
+            ["t-codex-gui-close"] = true,
+            -- The unknown-dialog topic fails before any Task is routed.
+            ["t-stuck"] = true,
           }}
           remuda._butler_agent_builders.claude = function() return {{"sh"}} end
           remuda._butler_agent_builders.codex = function() return {{"sh", "-c", "sleep 30"}} end
@@ -4617,25 +4632,26 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             ["t-claude-launch-unknown"] = {{ "Workspace access changed\n ❯ 1. Continue\n   2. Cancel" }},
             ["t-claude-launch-transient"] = {{ "Continue setup", rule .. "\n❯ \n" .. rule }},
             ["t-codex"] = {{
-              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything",
+              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version",
               "› Ask Codex to do anything",
             }},
             ["t-codex-peer"] = {{
-              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything",
+              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version",
               "› Ask Codex to do anything",
             }},
             ["t-codex-timeout"] = {{
-              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything",
+              "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version",
               "› Ask Codex to do anything",
             }},
             ["t-codex-unanswerable"] = {{ "Update available\n› 1. Install update\n  2. Later" }},
             ["t-codex-human"] = {{ "Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip" }},
             ["t-codex-close"] = {{ "Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip" }},
             ["t-codex-skip-label"] = {{ "Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip for now\n  3. Skip until next version" }},
-            ["t-codex-versionless"] = {{ "Update available\n› 1. Update now\n  2. Skip", "› Ask Codex to do anything" }},
+            ["t-codex-versionless"] = {{ "Update available\n› 1. Update now\n  2. Skip" }},
             ["t-codex-human-owner"] = {{ "Update available\n› 1. Update now\n  2. Skip" }},
             ["t-codex-gui-close"] = {{ "Update available · 0.157.1 → 0.158.0\n› 1. Update now\n  2. Skip" }},
             ["t-codex-running"] = {{ "› Ask Codex to do anything" }},
+            ["t-codex-busy"] = {{ "esc to interrupt" }},
             ["t-claude-human-trust"] = {{ "Accessing workspace:\n ❯ No, exit\n   Yes, I trust this folder" }},
             ["t-stuck"] = {{ " Some unknown dialog\n ❯ 1. No, exit" }},
           }}
@@ -4679,23 +4695,35 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             return rows
           end
           local native_new = remuda.new
+          local updated_relaunches = {{}}
           remuda.new = function(name, ...)
             local actual, instance_id = native_new(name, ...)
             if name:match("^t%-codex") then log[#log + 1] = name .. " launch" end
+            -- A successful update replaces the binary: its fresh pane no longer
+            -- paints the old update menu. Keep the unanswerable menu static.
+            if name == "t-codex" or name == "t-codex-peer" then
+              updated_relaunches[name] = (updated_relaunches[name] or 0) + 1
+              if updated_relaunches[name] > 1 then
+                screens[name] = {{ "› Ask Codex to do anything" }}
+              end
+            end
             if name == "t-codex-versionless" then
               versionless_launches = versionless_launches + 1
               if versionless_launches > 1 then screens[name] = {{ "› Ask Codex to do anything" }} end
             end
             if name == "t-codex-timeout" then
               log[#log + 1] = name .. " launch"
-              screens[name] = {{ "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version\n› Ask Codex to do anything" }}
+              screens[name] = {{ "  Update available · 0.156.0 → 0.157.1\n› 1. Update now\n  2. Skip\n  3. Skip until next version" }}
             end
             return actual, instance_id
           end
           remuda.capture = function(n)
             local q = screens[n]
-            if #q > 1 then return table.remove(q, 1) end
-            return q[1]
+            -- A Codex update frame is state, not a frame counter: hold it until
+            -- the real key handler (or the process exit) changes the screen.
+            -- Claude keeps its intentional partial-paint transitions.
+            if n:match("^t%-codex") or #q == 1 then return q[1] end
+            return table.remove(q, 1)
           end
           remuda.capture_styled = nil
           remuda.key = function(n, k)
@@ -4750,9 +4778,11 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
             local glyph = n == "t-codex" and "› " or "❯ "
             screens[n] = {{ glyph .. t, glyph }}
           end
-          local dialogs = remuda.butler and remuda.butler.dialogs
-          if dialogs and type(dialogs.automatic_notice_send) == "function" then
-            dialogs.automatic_notice_send = function(n, t) notice_send(n, t); return true end
+          -- Keep the real automatic_notice_send (live-row preflight, audit,
+          -- startup-control ownership); only replace its frozen raw sink.
+          local originals = remuda._butler_dialog_originals
+          if originals and type(originals.send) == "function" then
+            originals.send = function(n, t) notice_send(n, t); return true end
           else
             remuda.send = function(n, t) notice_send(n, t); return true end
           end
@@ -4777,6 +4807,7 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
           remuda._butler_topic_delegate("t-codex-peer", "task peer", nil, "codex", leader)
           remuda._butler_topic_delegate("t-codex-unanswerable", "task unanswerable", nil, "codex", leader)
           remuda._butler_topic_new("t-codex-running", nil, "codex")
+          remuda._butler_topic_delegate("t-codex-busy", "busy task", nil, "codex", leader)
           remuda._butler_topic_delegate("t-codex-human", "task human", nil, "codex", leader)
           remuda._butler_topic_delegate("t-claude-human-trust", "task human trust", nil, "claude", leader)
           remuda._butler_topic_delegate("t-stuck", "task three", nil, "claude", leader)
@@ -4795,19 +4826,21 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     let log = loop {
         let log = eval(&path, "return table.concat(remuda._t, '\\n')");
         let traced = std::fs::read_to_string(&trace).unwrap_or_default();
-        // The leader's "task not delivered" notice is typed too; count only
-        // the topic sessions' own lines.
-        let typed = log.lines().filter(|l| l.starts_with("t-") && l.contains(" type ")).count();
-        if [
-            "t-stuck",
-            "t-codex-unanswerable",
-            "t-codex-human",
-            "t-claude-human-trust",
-        ]
-        .iter()
-        .all(|n| traced.contains(&format!("first_task_delivery\t{n}")))
-            && traced.contains("launch_failed\tt-claude-launch-unknown")
-        {
+        // Known kinds route their whole brief to durable Task mail; the pane
+        // only ever receives the canonical pointer. Settle on the durable
+        // routes and the startup-control give-ups, never on typed bodies.
+        let routed = |name: &str| {
+            traced.contains(&format!("first_task_mail_routed\t{name} message="))
+        };
+        let mail_done = ["t-claude", "t-codex", "t-codex-peer", "t-codex-busy"]
+            .iter().all(|n| routed(n));
+        let busy_released = traced.contains("startup_control_stop\tt-codex-busy busy");
+        let controls_done = ["t-codex-unanswerable", "t-codex-human"]
+            .iter()
+            .all(|n| traced.contains(&format!("startup_control_failed\t{n}")));
+        let failed = |name: &str| traced.contains(&format!("launch_failed\t{name}:"));
+        let launches_done = failed("t-claude-launch-unknown") && failed("t-stuck");
+        if mail_done && controls_done && launches_done {
             eval(&path, "remuda._butler_notice_clock = nil");
         }
         // Notices batch: one "Butler message ID ..." or "N new Butler messages".
@@ -4817,8 +4850,11 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
                 l.starts_with("butler send ")
                     && (l.contains("Butler message") || l.contains("new Butler messages arrived"))
             });
-        if typed == 3 && traced.contains("first_task_delivery\tt-stuck")
-            && leader_noticed
+        let relaunched = |name: &str| {
+            log.lines().filter(|l| l.to_string() == format!("{name} launch")).count() == 2
+        };
+        let owner_done = relaunched("t-codex") && relaunched("t-codex-peer");
+        if mail_done && controls_done && launches_done && owner_done && busy_released && leader_noticed
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch'] ~= nil)") == "true"
             && eval(&path, "return tostring(remuda._butler_bus.agents['t-claude-launch-transient'] ~= nil)") == "true"
             && eval(&path, "return remuda._butler_sessions()")
@@ -4832,8 +4868,27 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         );
         std::thread::sleep(Duration::from_millis(100));
     };
+    let settled_trace = std::fs::read_to_string(&trace).unwrap_or_default();
+    let routed_id = |name: &str| -> String {
+        settled_trace
+            .lines()
+            .find(|l| l.contains(&format!("first_task_mail_routed\t{name} message=")))
+            .and_then(|l| l.split("message=").nth(1))
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let claude_id = routed_id("t-claude");
+    assert!(!claude_id.is_empty(), "Claude brief was not routed to durable Task mail");
+    assert_eq!(settled_trace.lines().filter(|l| l.contains("first_task_mail_routed\tt-claude message=")).count(), 1,
+        "Claude brief was routed more than once: {settled_trace}");
     let claude: Vec<&str> = log.lines().filter(|l| l.starts_with("t-claude ")).collect();
-    assert_eq!(claude, ["t-claude key <down>", "t-claude key RET", "t-claude type task one"]);
+    assert_eq!(claude.len(), 3, "Claude did not receive exactly its trust keys and one pointer: {log}");
+    assert_eq!(claude[0], "t-claude key <down>");
+    assert_eq!(claude[1], "t-claude key RET");
+    assert_eq!(claude[2], format!("t-claude send Butler message {claude_id} Task arrived. Read it: remuda butler inbox"),
+        "Claude pointer did not name the saved Task id: {log}");
+    assert!(!claude.iter().any(|l| l.contains(" type ")), "Claude brief was typed instead of mailed: {log}");
     let launch_rows: Vec<&str> = log.lines().filter(|l| l.starts_with("t-claude-launch key ")).collect();
     assert_eq!(launch_rows, ["t-claude-launch key <down>", "t-claude-launch key RET"],
         "launch did not answer the exact captured trust dialog: {log}");
@@ -4842,6 +4897,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         "failed launch omitted the unknown dialog's label: {launch_report}");
     assert!(!launch_report.contains("t-claude-launch-transient: claude: dialog"),
         "a changing partial screen was rejected as an unknown dialog: {launch_report}");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.codex_update_state.version)"),
+        "0.156.0->0.157.1", "version metadata was lost when keys moved to the current region");
     let codex_key_one = log.lines().find(|l| l.ends_with(" key 1")).unwrap();
     let update_owner = codex_key_one.split_whitespace().next().unwrap();
     assert_eq!(log.lines().filter(|l| l.ends_with(" key 1")).count(), 1, "more than one member upgraded: {log}");
@@ -4850,7 +4907,36 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         let rows: Vec<&str> = log.lines().filter(|l| l.starts_with(&format!("{member} "))).collect();
         let launches = rows.iter().filter(|l| l.ends_with(" launch")).count();
         assert_eq!(launches, 2, "owner and waiter should both relaunch after update: {log}");
-        assert_eq!(rows.iter().filter(|l| l.ends_with(&format!(" type {task}"))).count(), 1, "task was not delivered exactly once: {log}");
+        assert_eq!(rows.iter().filter(|l| l.ends_with(&format!(" type {task}"))).count(), 0,
+            "task body was typed instead of mailed: {log}");
+        let saved = routed_id(member);
+        assert!(!saved.is_empty(), "brief was not routed to durable Task mail: {settled_trace}");
+        let start_at = settled_trace.lines().position(|l| l.contains(
+            &format!("startup_control_start\t{member} task=true saved=nil")));
+        let route_at = settled_trace.lines().position(|l| l.contains(
+            &format!("first_task_mail_routed\t{member} message=")));
+        assert!(start_at.is_some() && route_at.is_some() && start_at < route_at,
+            "control ownership was registered after the first notice path: {settled_trace}");
+        assert_eq!(settled_trace.lines().filter(|l| l.contains(&format!("first_task_mail_routed\t{member} message="))).count(), 1,
+            "brief was routed more than once: {settled_trace}");
+        // The relaunched incarnation keeps the same durable Task identity.
+        assert!(settled_trace.lines().any(|l| l.contains(&format!("startup_control_start\t{member} task=true saved={saved}"))),
+            "relaunch lost the saved Task id: {settled_trace}");
+        let bodies = eval(&path, &format!(r#"
+          local bus = remuda._butler_bus
+          local agent = bus.agents[{member:?}]
+          local n = 0
+          for _, id in ipairs(remuda._butler_mail.mailbox(agent.id)) do
+            local message = bus.messages[id]
+            local object = message and bus.objects[message.body.object_id]
+            if id == {saved:?} and message.subject == "Task"
+                and object and object.content == {task:?} then n = n + 1 end
+          end
+          return tostring(n)
+        "#));
+        assert_eq!(bodies, "1", "durable Task id/subject/body changed across relaunch for {member}");
+        assert_eq!(log.lines().filter(|l| l.starts_with(&format!("{member} send Butler message {saved} "))).count(), 1,
+            "pointer was not typed exactly once for the saved Task: {log}");
         if member == update_owner {
             assert!(rows.iter().any(|l| l.ends_with(" key 1")), "owner did not select Update now: {log}");
         } else {
@@ -4858,34 +4944,27 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         }
     }
     assert!(!log.contains("t-stuck "), "typed into an unknown dialog: {log}");
-    assert!(std::fs::read_to_string(&trace).unwrap_or_default().contains("Workspace access changed"),
-        "launch failure did not preserve the unknown dialog label");
-    assert!(log.contains(" send Butler message ") || log.contains(" new Butler messages arrived"),
-        "the leader is told about t-stuck: {log}");
+    assert!(settled_trace.contains("launch_failed\tt-stuck:"),
+        "t-stuck did not fail at the startup probe: {settled_trace}");
+    assert!(!settled_trace.contains("first_task_mail_routed\tt-stuck"),
+        "a failed prelaunch probe still routed a Task: {settled_trace}");
+    assert_eq!(settled_trace.lines().filter(|l| l.contains("first_task_native_mail\tt-stuck")).count(), 0,
+        "a failed prelaunch probe still saved a Task body: {settled_trace}");
+    let stuck_report = eval(&path, "return remuda._butler_sessions()");
+    assert!(stuck_report.contains("t-stuck") && stuck_report.contains("last screen:  Some unknown dialog"),
+        "the failed launch omitted its dialog report: {stuck_report}");
     assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('initial task for t-stuck was not delivered', 1, true) then found=true end end; return tostring(found)"),
-        "true", "the first-task failure was not mailed to the leader");
-    // A batched notice does not name t-stuck; its give-up mail must.
-    let leader_mail = eval(
-        &path,
-        r#"
-          local bus, out = remuda._butler_bus, {}
-          local id = bus.agents[remuda._butler_initial_name].id
-          for _, m in ipairs(remuda._butler_mail.mailbox(id)) do
-            local message = bus.messages[m]
-            local object = message and bus.objects[message.body.object_id]
-            out[#out + 1] = object and object.content or ""
-          end
-          return table.concat(out, "\n")
-        "#,
-    );
-    assert!(
-        leader_mail.contains("initial task for t-stuck was not delivered"),
-        "the leader is told about t-stuck: {leader_mail}"
-    );
-    assert_eq!(leader_mail.matches("initial task for t-stuck was not delivered").count(), 1,
-        "the leader received duplicate first-task failure mail: {leader_mail}");
-    assert!(leader_mail.contains("remuda butler send 't-stuck' 'task three'"),
-        "the failure mail omitted the shell-quoted resend command: {leader_mail}");
+        "false", "a prelaunch failure invented a task-delivery claim");
+    assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find(\"remuda butler send 't-stuck'\", 1, true) then found=true end end; return tostring(found)"),
+        "false", "the leader was told to resend a body that was never saved");
+    assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-busy key ") || l.starts_with("t-codex-busy type ")).count(), 0,
+        "a busy native-delivered pane received input: {log}");
+    assert!(settled_trace.contains("startup_control_stop\tt-codex-busy busy"),
+        "a busy pane without an update kept startup ownership: {settled_trace}");
+    assert_eq!(settled_trace.lines().filter(|l| l.contains("startup_control_stop\t") && l.ends_with(" busy")).count(), 1,
+        "an update owner was released as a busy no-update pane: {settled_trace}");
+    assert_eq!(settled_trace.lines().filter(|l| l.contains("first_task_mail_routed\tt-codex-busy message=")).count(), 1,
+        "the busy pane's Task was not routed exactly once: {settled_trace}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-unanswerable key ")).count(), 0, "an unknown update menu was answered: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-codex-human key ")).count(), 0, "a human-attached pane was changed: {log}");
     assert_eq!(log.lines().filter(|l| l.starts_with("t-claude-human-trust key ")).count(), 0, "modal keys were pressed after give_up: {log}");
@@ -4917,12 +4996,15 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     let skip_deadline = Instant::now() + Duration::from_secs(10);
     let skip_label_log = loop {
         let log = eval(&path, "return table.concat(remuda._t, '\\n')");
-        if log.contains("t-codex-skip-label type task after skip label") { break log; }
+        let traced = std::fs::read_to_string(&trace).unwrap_or_default();
+        if log.contains("t-codex-skip-label key 2")
+            && traced.contains("first_task_mail_routed\tt-codex-skip-label message=") { break log; }
         assert!(Instant::now() < skip_deadline, "prefix Skip label was not handled: {log}");
         std::thread::sleep(Duration::from_millis(100));
     };
     assert!(skip_label_log.contains("t-codex-skip-label key 2"), "did not choose Skip for now: {skip_label_log}");
     assert!(!skip_label_log.contains("t-codex-skip-label key 3"), "preferred Skip until next version: {skip_label_log}");
+    assert!(!skip_label_log.contains("t-codex-skip-label type "), "typed the brief instead of mailing it: {skip_label_log}");
     eval(
         &path,
         r#"
@@ -4955,12 +5037,23 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
     let versionless_deadline = Instant::now() + Duration::from_secs(10);
     let versionless_log = loop {
         let log = eval(&path, "return table.concat(remuda._t, '\\n')");
-        if log.contains("t-codex-versionless type versionless task") { break log; }
+        let traced = std::fs::read_to_string(&trace).unwrap_or_default();
+        let saved = traced.lines()
+            .find(|l| l.contains("first_task_mail_routed\tt-codex-versionless message="))
+            .and_then(|l| l.split("message=").nth(1))
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or_default();
+        let relaunched = !saved.is_empty() && traced.contains(&format!(
+            "startup_control_start\tt-codex-versionless task=true saved={saved}"));
+        if log.contains("t-codex-versionless key 1")
+            && log.lines().filter(|l| *l == "t-codex-versionless launch").count() == 2
+            && relaunched { break log; }
         assert!(Instant::now() < versionless_deadline, "versionless update dialog did not select Update now: {log}");
         std::thread::sleep(Duration::from_millis(100));
     };
     assert_eq!(versionless_log.lines().filter(|l| l.starts_with("t-codex-versionless key 1")).count(), 1, "versionless update did not select Update now: {versionless_log}");
-    assert_eq!(versionless_log.lines().filter(|l| l.starts_with("t-codex-versionless type versionless task")).count(), 1, "versionless task delivery duplicated: {versionless_log}");
+    assert_eq!(versionless_log.lines().filter(|l| l.starts_with("t-codex-versionless type ")).count(), 0, "typed the brief instead of mailing it: {versionless_log}");
+    assert_eq!(std::fs::read_to_string(&trace).unwrap_or_default().lines().filter(|l| l.contains("first_task_mail_routed\tt-codex-versionless message=")).count(), 1, "durable Task route duplicated across relaunch");
     assert_eq!(versionless_log.lines().filter(|l| l.starts_with("t-codex-versionless launch")).count(), 2, "successful exiting update was not relaunched: {versionless_log}");
     eval(&path, r#"remuda._butler_bus.codex_update_state={claimed=false,done=false,waiting={},restart_waiting={}}; remuda._butler_topic_delegate("t-codex-human-owner", "task after human", nil, "codex", remuda._butler_initial_name)"#);
     let human_owner_deadline = Instant::now() + Duration::from_secs(10);
@@ -4970,18 +5063,38 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         assert!(Instant::now() < human_owner_deadline, "human-attached completed update did not escalate: {traced}");
         std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.codex_update_state.claimed == false and remuda._butler_bus.pending_tasks['t-codex-human-owner'] == nil)"), "true", "human-blocked update retained its claim or pending task");
+    assert_eq!(eval(&path, "local b=remuda._butler_bus; return tostring(b.codex_update_state.claimed == false and (b.pending_tasks == nil or b.pending_tasks['t-codex-human-owner'] == nil))"), "true", "human-blocked update retained its claim or pending task");
     let human_owner_log = eval(&path, "return table.concat(remuda._t, '\\n')");
     assert_eq!(human_owner_log.lines().filter(|l| l.starts_with("t-codex-human-owner key ")).count(), 1, "unexpected key count for attached update pane: {human_owner_log}");
     assert_eq!(human_owner_log.lines().filter(|l| l.starts_with("t-codex-human-owner launch")).count(), 1, "closed/relaunched an attached update pane: {human_owner_log}");
+    assert!(!human_owner_log.contains("t-codex-human-owner type "), "typed a brief instead of mailing it: {human_owner_log}");
     eval(&path, r#"remuda._butler_bus.codex_update_state={claimed=false,done=false,waiting={},restart_waiting={}}; remuda._butler_topic_delegate("t-codex-gui-close", "task gui close", nil, "codex", remuda._butler_initial_name)"#);
     let gui_close_deadline = Instant::now() + Duration::from_secs(10);
-    while eval(&path, "return tostring(remuda._butler_bus.agents['t-codex-gui-close'] == nil)") != "true" {
-        assert!(Instant::now() < gui_close_deadline, "screen close was not observed");
+    loop {
+        let traced = std::fs::read_to_string(&trace).unwrap_or_default();
+        let gone = eval(&path, "return tostring(remuda._butler_bus.agents['t-codex-gui-close'] == nil)");
+        if gone == "true"
+            && traced.contains("first_task_mail_routed\tt-codex-gui-close message=")
+            && traced.contains("startup_control_start\tt-codex-gui-close") {
+            break;
+        }
+        assert!(Instant::now() < gui_close_deadline,
+            "screen close was not observed or the durable route never landed: {traced}");
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.codex_update_state.done_version ~= '0.157.1->0.158.0' and remuda._butler_bus.codex_update_state.claimed == false and remuda._butler_bus.codex_update_relaunches['t-codex-gui-close'] == nil)"), "true", "screen close was mistaken for update completion");
-    assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('t-codex-gui-close was not delivered', 1, true) then found=true end end; return tostring(found)"), "true", "aborted update silently lost its task");
+    assert_eq!(eval(&path, "local found=false; for _,o in pairs(remuda._butler_bus.objects) do if (o.content or ''):find('t-codex-gui-close was not delivered', 1, true) then found=true end end; return tostring(found)"), "false", "a saved Task was falsely reported undelivered after a screen close");
+    let gui_trace = std::fs::read_to_string(&trace).unwrap_or_default();
+    let gui_saved = gui_trace.lines()
+        .find(|l| l.contains("first_task_mail_routed\tt-codex-gui-close message="))
+        .and_then(|l| l.split("message=").nth(1))
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or("");
+    let gui_lines: Vec<&str> = gui_trace.lines().filter(|l| l.contains("t-codex-gui-close")).collect();
+    assert!(!gui_saved.is_empty(), "the aborted pane lost its durable Task route: {gui_lines:?}");
+    let gui_mail = eval(&path, "local bus, out = remuda._butler_bus, {}; local id = bus.agents[remuda._butler_initial_name].id; for _, m in ipairs(remuda._butler_mail.mailbox(id)) do local message = bus.messages[m]; local object = message and bus.objects[message.body.object_id]; out[#out + 1] = object and object.content or '' end; return table.concat(out, '\\n')");
+    assert!(gui_mail.contains(&format!("startup control failed for t-codex-gui-close; task saved {gui_saved}; read the existing inbox. Do not resend the body.")),
+        "the aborted update did not report its saved Task id truthfully: {gui_mail}");
     eval(&path, r#"remuda.capture_styled=function() return {rows={[2]={{text="",dim=false}},[3]={{text="",dim=false}}},cursor={row=3}} end"#);
     eval(&path, r#"remuda._butler_notice_clock = function() return 0 end
         remuda._butler_notify("t-codex-timeout", "Butler message 01M3MX8NCGV5GVSGN104YP4TFT arrived. Read them: remuda butler inbox", "01M3MX8NCGV5GVSGN104YP4TFT", true)
