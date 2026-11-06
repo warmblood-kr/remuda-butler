@@ -370,3 +370,17 @@ assert(shape._classify_txn("r", "butler_r", false) == "live")
 assert(shape._classify_txn("r", "caller", false) == "historical")
 assert(shape._classify_txn("r", "caller-\1", false) == "unclassified")
 assert(shape._classify_txn("r", "caller-\195\169", false) == "unclassified")
+
+-- A migrated phase-1 row has no canonical witness; comparison must decode it.
+local legacy_db = fake_db()
+local legacy = load(function() return legacy_db end)
+local legacy_receipt = { source_mail_id = "m", event_id = "e", completed_at = "now" }
+legacy_db.rows.old = { txn_id = "butler_old", source_mail_id = "m", event_id = "e",
+  status = "sent", completed_at = "now",
+  result_json = remuda.json.encode(legacy_receipt), receipt_canonical = nil }
+assert(legacy.record("old", "butler_old", legacy_receipt) == true,
+  "a migrated row without a witness still compares canonically")
+legacy_db.rows.old.result_json = remuda.json.encode(
+  { source_mail_id = "m", event_id = "different", completed_at = "now" })
+assert(legacy.record("old", "butler_old", legacy_receipt) == nil)
+assert(conflict(legacy_db, "old", "value_conflict"))
