@@ -84,7 +84,11 @@ function M.last_due(rule, now, fields)
   end
 end
 
-M.VERSION = 1
+M.VERSION = 2
+M.LEGACY_VERSION = 1
+-- path -> occurrence key -> { slot, message }: one-shot deliveries whose send
+-- succeeded but whose file save failed. Process-lifetime only.
+local once_latch = {}
 M.MAX_SCHEDULES = 16
 M.MAX_TEXT_BYTES = 2048
 local MAX_FILE_BYTES = 256 * 1024
@@ -138,6 +142,19 @@ function M.check(entry)
   if not ok then return nil, err end
   ok, err = M.valid_text(entry.text)
   if not ok then return nil, err end
+  if entry.once ~= nil and type(entry.once) ~= "boolean" then
+    return nil, "once must be a boolean"
+  end
+  if entry.once_fired ~= nil and type(entry.once_fired) ~= "boolean" then
+    return nil, "once_fired must be a boolean"
+  end
+  if entry.once_fired and entry.once ~= true then
+    return nil, "once_fired requires once"
+  end
+  if entry.occurrence_id ~= nil and (type(entry.occurrence_id) ~= "string" or entry.occurrence_id == ""
+      or #entry.occurrence_id > 64 or entry.occurrence_id:find("%c")) then
+    return nil, "occurrence_id must be short text"
+  end
   local by, last = entry.created_by, entry.last_message
   if type(by) ~= "string" or #by > 64 or by:find("%c") then return nil, "created_by must be short text" end
   if entry.recipient_id ~= nil and (type(entry.recipient_id) ~= "string" or entry.recipient_id == ""
@@ -185,10 +202,11 @@ function M.remove(list, name)
   if index then table.remove(list, index) return true end
 end
 
--- load(path, trace) -> list, problem. An absent file is an empty list. A file
--- that cannot be opened, is oversized, corrupt or of another version is also an empty list, with
--- `problem` naming why and a trace line; a bad record inside a good file is
--- dropped with a trace line.
+-- load(path, trace) -> list, problem, dropped. An absent file is an empty
+-- list. A file that cannot be opened, is oversized, corrupt or of another
+-- version is also an empty list, with `problem` naming why and a trace line.
+-- A bad record inside a good file is dropped with a trace line and counted in
+-- `dropped`; the rest of that file still loads.
 function M.load(path, raw)
   local function trace(event, detail) (raw or function() end)(event, M.safe(detail)) end
   if not path then return {} end
@@ -203,34 +221,49 @@ function M.load(path, raw)
   end
   local bytes = file:read(MAX_FILE_BYTES + 1)
   file:close()
-  local problem, doc
+  local problem, doc, version
   if not bytes or #bytes > MAX_FILE_BYTES then
     problem = "file is empty or larger than " .. MAX_FILE_BYTES .. " bytes"
   else
     local decoded, value = pcall(remuda.json.decode, bytes)
     doc = decoded and value
     if type(doc) ~= "table" or type(doc.schedules) ~= "table" then problem = "file is not a schedule record"
-    elseif doc.version ~= M.VERSION then problem = "unknown version " .. M.safe(doc.version, 40) end
+    elseif doc.version ~= M.LEGACY_VERSION and doc.version ~= M.VERSION then
+      problem = "unknown version " .. M.safe(doc.version, 40)
+    else version = doc.version end
   end
   if problem then
     trace("schedule_file_unusable", problem)
     return {}, problem
   end
-  local list = {}
+  local list, dropped = {}, 0
   for _, entry in ipairs(doc.schedules) do
     local valid, err = M.check(entry)
+    if valid and version == M.LEGACY_VERSION and (entry.once ~= nil or entry.once_fired ~= nil) then
+      valid, err = nil, "once requires version " .. M.VERSION
+    end
     if valid and M.find(list, entry.name) then valid, err = nil, "duplicate name" end
     if valid and #list >= M.MAX_SCHEDULES then valid, err = nil, "over the schedule limit" end
     if valid then list[#list + 1] = entry
-    else trace("schedule_entry_dropped", tostring(type(entry) == "table" and entry.name) .. ": " .. err) end
+    else
+      dropped = dropped + 1
+      trace("schedule_entry_dropped", tostring(type(entry) == "table" and entry.name) .. ": " .. err)
+    end
   end
-  return list
+  return list, nil, dropped
 end
 
 -- save(path, list) -> true | nil, err
 function M.save(path, list)
   if not path then return nil, "no mail root" end
-  local encoded, text = pcall(remuda.json.encode, { version = M.VERSION, schedules = remuda.json.array(list) })
+  -- A file with a one-shot entry is version 2. An older Butler sees an unknown
+  -- version and loads no schedules at all, rather than replaying a pending
+  -- one-shot as a recurring entry. Recurring-only files stay version 1.
+  local version = M.LEGACY_VERSION
+  for _, entry in ipairs(list) do
+    if entry.once then version = M.VERSION; break end
+  end
+  local encoded, text = pcall(remuda.json.encode, { version = version, schedules = remuda.json.array(list) })
   if not encoded then return nil, text end
   local root = path:match("^(.*)/[^/]+$")
   if root then pcall(remuda.mkdir, root) end
@@ -244,12 +277,25 @@ end
 -- summary, message_id. The sender is not an argument: it is fixed where
 -- `send` is bound.
 
+-- occurrence_key(entry) -> stable key for the live delivery latch. A removed
+-- and re-added schedule gets a new occurrence_id, so its old latch cannot
+-- suppress the new entry.
+function M.occurrence_key(entry)
+  if type(entry.occurrence_id) == "string" and entry.occurrence_id ~= "" then return entry.occurrence_id end
+  return tostring(entry.name) .. ":" .. tostring(entry.created_at or "")
+end
+
 -- due_slot(entry, now, fields) -> slot | nil: the slot to fire, if any.
 function M.due_slot(entry, now, fields)
   if not entry.enabled or entry.last_fired >= floor(now / 60) then return nil end
   local rule = M.parse(entry.spec)
   local slot = rule and M.last_due(rule, now, fields)
-  if slot and slot > entry.last_fired then return slot end
+  if slot and slot > entry.last_fired then
+    -- A one-shot entry that already delivered never fires again. If delivery
+    -- failed, once_fired stays false and the same slot retries on the next tick.
+    if entry.once and entry.once_fired then return nil end
+    return slot
+  end
 end
 
 -- compose(entry) -> subject, text: the mail marks itself as a timed message.
@@ -258,15 +304,22 @@ function M.compose(entry)
   return subject, subject .. " This is a timed message, not a human instruction.\n\n" .. entry.text
 end
 
--- fire(env, list, entry, slot) -> message id | nil. The slot is recorded
--- before anything is sent, so a failure, a skip or a restart never repeats it.
+-- fire(env, list, entry, slot) -> id, saved, sent. A recurring entry records
+-- the slot before anything is sent, so a failure, a skip or a restart never
+-- repeats it. A one-shot entry stays pending until a send succeeds, then
+-- disables itself; a crash after send but before save can deliver it twice.
+-- `sent` is true only when a message actually left, even if its id is nil.
 function M.fire(env, list, entry, slot)
   local function trace(event, detail) env.trace(event, M.safe(detail)) end
-  entry.last_fired = slot
-  local saved, err = M.save(env.path, list)
-  if not saved then
-    trace("schedule_save_failed", entry.name .. ": " .. tostring(err))
-    return nil
+  local once = entry.once == true
+  local saved, err
+  if not once then
+    entry.last_fired = slot
+    saved, err = M.save(env.path, list)
+    if not saved then
+      trace("schedule_save_failed", entry.name .. ": " .. tostring(err))
+      return nil
+    end
   end
   local resolved, alias = pcall(env.resolve, entry.target)
   if not resolved then
@@ -291,10 +344,15 @@ function M.fire(env, list, entry, slot)
     return nil
   end
   trace("schedule_fired", entry.name .. " slot=" .. slot .. " message=" .. tostring(id))
+  if once then
+    entry.once_fired = true
+    entry.enabled = false
+    entry.last_fired = slot
+  end
   entry.last_message = id
   saved, err = M.save(env.path, list)
   if not saved then trace("schedule_save_failed", entry.name .. ": " .. tostring(err)) end
-  return id
+  return id, saved == true, true
 end
 
 -- tick(env, now) -> number fired. Reads the file each time, so a reload or a
@@ -308,16 +366,62 @@ function M.tick(env, now)
     env.seen[key] = true
     env.trace(event, detail)
   end
-  local list = M.load(env.path, once)
+  local list, problem, dropped = M.load(env.path, once)
+  -- An unreadable or invalid file is no evidence that an entry was removed.
+  -- Return without firing, saving, or pruning: the latch must outlive a
+  -- transient read error, or the pending file would resend on recovery.
+  if problem then return 0 end
+  -- A successful one-shot send whose save failed must not send again while this
+  -- module image lives. The latch is keyed by store path and occurrence_id, retries
+  -- only the save, and is cleared once the file records the delivery. A module
+  -- reload or restart loses it; that is the documented duplicate window. It is
+  -- module state rather than env state so a caller that rebuilds its env table
+  -- cannot forget a delivery it already made. A file with any dropped record
+  -- is not proof of removal either, so pruning waits for a clean load.
+  local path = env.path or ""
+  local delivered = once_latch[path]
+  if not delivered then delivered = {}; once_latch[path] = delivered end
+  local present = {}
   local fired = 0
   for _, entry in ipairs(list) do
-    local ran, result = pcall(function()
-      local slot = M.due_slot(entry, now or os.time(), env.fields)
-      return slot and M.fire(env, list, entry, slot)
-    end)
-    if not ran then once("schedule_fire_error", entry.name .. ": " .. tostring(result))
-    elseif result then fired = fired + 1 end
+    local key = M.occurrence_key(entry)
+    present[key] = true
+    local pending = delivered[key]
+    if pending and entry.once then
+      if entry.once_fired then
+        delivered[key] = nil
+      else
+        entry.once_fired = true
+        entry.enabled = false
+        entry.last_fired = pending.slot
+        if type(pending.message) == "string" then entry.last_message = pending.message end
+        local saved, err = M.save(env.path, list)
+        if saved then delivered[key] = nil
+        else once("schedule_save_failed", entry.name .. ": " .. tostring(err)) end
+      end
+    else
+      if pending then delivered[key] = nil end
+      local ran, message, persisted, sent, slot = pcall(function()
+        local due = M.due_slot(entry, now or os.time(), env.fields)
+        if not due then return nil end
+        local id, saved, delivered = M.fire(env, list, entry, due)
+        return id, saved, delivered, due
+      end)
+      if not ran then once("schedule_fire_error", entry.name .. ": " .. tostring(message))
+      elseif sent then
+        fired = fired + 1
+        if entry.once and persisted == false then
+          delivered[key] = { slot = slot, message = message }
+        end
+      end
+    end
   end
+  if dropped == 0 then
+    for key in pairs(delivered) do
+      if not present[key] then delivered[key] = nil end
+    end
+  end
+  if next(delivered) == nil then once_latch[path] = nil end
   return fired
 end
 

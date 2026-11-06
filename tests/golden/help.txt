@@ -35,7 +35,7 @@ Matrix:
 
 Schedule:
   remuda butler schedule list
-  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]
+  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION] [--once]
   remuda butler schedule rm <name>
 
 Health and accounts:

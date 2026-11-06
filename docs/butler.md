@@ -291,7 +291,7 @@ as ordinary Butler mail.
 
 ```
 remuda butler schedule list
-remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION]
+remuda butler schedule add NAME "M H * * *" TEXT [--to SESSION] [--once]
 remuda butler schedule rm NAME
 ```
 
@@ -304,6 +304,25 @@ the minute is `N` or `*/N` (N is 5, 6, 10, 12, 15, 20 or 30, so the gap
 stays the same across the hour), the hour is `N` or `*`, and day,
 month and weekday are `*`. `7 * * * *` is minute 7 of every hour,
 `0 9 * * *` is 09:00 daily, `*/30 * * * *` is every half hour.
+
+`--once` delivers at the next matching time and then disables the entry. Until a
+send succeeds it stays pending, so an absent target or an unread previous mail
+is retried rather than lost. A crash after sending but before saving can deliver
+it twice; so can a module reload or restart after a save that kept failing, once
+per reload. While the scheduler module image lives, a failed save does not
+resend: it retries only the save, and a transient unreadable file keeps the
+latch. It is still a minute/hour slot, not an absolute deadline: use it only
+when the next matching minute/hour is within 24 hours, and pick the next future
+minute (scheduling the current minute waits for the next day). For longer work
+use a nearer checkpoint or state the date in the report. A one-shot that has
+delivered stays in `list` as `off  once-done` until `rm` removes it; a pending
+one shows `once-pending`. Delivered entries still count toward the 16-schedule
+limit, so remove them when they are no longer useful.
+
+A file that contains any one-shot is stored as version 2. An older Butler
+cannot read it and loads no schedules from it at all, so a downgrade also stops
+the recurring entries in the same file until that Butler is upgraded again or
+the file is removed.
 
 `list` is open to every session and prints each schedule's name, spec, target,
 state, last firing and the first 80 bytes of its text. An authenticated Butler

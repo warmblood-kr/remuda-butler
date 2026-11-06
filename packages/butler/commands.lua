@@ -573,10 +573,10 @@ command(22, "input-queue", "  remuda butler input-queue status [ID] | cancel ID 
   return feature.cli(rest, resolve_principal(caller))
 end)
 command(18, "schedule", "  remuda butler schedule list\n"
-  .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION]\n'
+  .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION] [--once]\n'
   .. "  remuda butler schedule rm <name>", function(args, caller)
   if wants_verb_help(args) then
-    return verb_help("schedule", "Recurring Butler messages. Forms: list; add NAME \"M H * * *\" TEXT|- [--to SESSION]; rm NAME. Example: remuda butler schedule list", "remuda butler schedule add --help")
+    return verb_help("schedule", "Butler messages. Forms: list; add NAME \"M H * * *\" TEXT|- [--to SESSION] [--once]; rm NAME. Example: remuda butler schedule list", "remuda butler schedule add --help")
   end
   local principal = resolve_principal(caller)
   if principal.tag ~= "member" and principal.tag ~= "operator" then
