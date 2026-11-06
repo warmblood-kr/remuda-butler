@@ -9117,6 +9117,33 @@ do
   assert(relay_module.instance == nil, "mismatch must not create an instance")
   remuda._butler_relay_receipts = previous
 end
+do
+  -- Real remuda.json fixture for the receipt canonicalizer: no fake codec.
+  local old_config = remuda._butler_relay_receipts_config
+  local old_receipts = remuda._butler_relay_receipts
+  remuda._butler_relay_receipts_config = {}
+  dofile("packages/butler/relay_receipts.lua")
+  local receipts = assert(remuda._butler_relay_receipts)
+  local first = receipts._canonical_result({ b = 2, a = 1, text = "é\n" })
+  local second = receipts._canonical_result({ text = "é\n", a = 1, b = 2 })
+  assert(first == second, "real JSON: object key order is not data")
+  local encoded = remuda.json.encode({ a = 1, b = { c = 2 } })
+  assert(receipts._canonical_encoded(encoded)
+    == receipts._canonical_result({ a = 1, b = { c = 2 } }), "real JSON decode")
+  assert(receipts._canonical_result(remuda.json.array({})) == "[]")
+  assert(receipts._canonical_result(remuda.json.object({})) == "{}")
+  assert(receipts._canonical_result(remuda.json.null) == "null")
+  local ab = receipts._canonical_result({ event_ids = remuda.json.array({ "a", "b" }) })
+  local ba = receipts._canonical_result({ event_ids = remuda.json.array({ "b", "a" }) })
+  assert(ab ~= ba, "real JSON: array order is data")
+  assert(receipts._canonical_result({ "a", "b" }) == nil, "untagged root array is not a receipt")
+  if math.maxinteger then
+    assert(receipts._canonical_result({ n = math.maxinteger }) ~= nil, "integer endpoint")
+  end
+  remuda._butler_relay_receipts_config = old_config
+  remuda._butler_relay_receipts = old_receipts
+end
+
 print('ok: Matrix durable owner plaintext admission contract')
 
 -- Keep the isolated mail persistence fixture after all relay tests: it loads

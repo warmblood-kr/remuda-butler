@@ -52,6 +52,7 @@ if [[ $mode == policy ]]; then
   # corpus needs a pinned daemon. The inbox shadow is new code; a policy run
   # that never executes it would report green without testing it.
   run butler_inbox_db.lua luajit "tests/butler_inbox_db.lua"
+  run relay_receipts_db.lua luajit "tests/relay_receipts_db.lua"
 fi
 if [[ $mode == all ]]; then
 for lua in "$REPO"/tests/*.lua; do
