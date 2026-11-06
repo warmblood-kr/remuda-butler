@@ -157,6 +157,15 @@ local function render(probe_results, platform)
     if type(agent) == "table" and not (principal and principal.bound(agent)) then unbound = unbound + 1 end
   end
   if unbound > 0 then lines[#lines + 1] = unbound .. " members not instance-bound: relaunch to bind" end
+  local unprotected = {}
+  for name in pairs((remuda._butler_bus or {}).remote_input_unprotected or {}) do
+    unprotected[#unprotected + 1] = tostring(name)
+  end
+  table.sort(unprotected)
+  if #unprotected > 0 then
+    lines[#lines + 1] = "Remote input protection degraded: " .. table.concat(unprotected, ", ")
+      .. "; keep remote-send off and verify the exact panes"
+  end
   -- Read-only automatic-delivery journal state (states/counts/IDs/reasons only).
   local delivery = remuda.butler and remuda.butler.delivery_status
   if delivery and type(delivery.lines) == "function" then
