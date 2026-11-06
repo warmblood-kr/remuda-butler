@@ -196,7 +196,8 @@ local function choose(candidates, opts, done)
     -- the listing before claiming the new instance is protected.
     if opts.remote_input_disabled == true and instance_id then
       local function protected()
-        local rows = remuda.session and remuda.session.list and remuda.session.list() or remuda.ls()
+        local session_api = type(remuda.session) == "table" and remuda.session or nil
+        local rows = session_api and session_api.list and session_api.list() or remuda.ls()
         for _, candidate in ipairs(rows or {}) do
           if candidate.name == name then
             return candidate.instance_id == instance_id and candidate.remote_input_disabled == true
@@ -208,8 +209,9 @@ local function choose(candidates, opts, done)
       -- A hosted launch or an old daemon may not carry the flag in its listing.
       -- One exact-instance setter retry recovers the supported path; if it still
       -- fails, report degraded and keep the sender gate closed.
-      if not checked and type(remuda.session and remuda.session.remote_input) == "function" then
-        pcall(remuda.session.remote_input, name, instance_id, false)
+      local session_api = type(remuda.session) == "table" and remuda.session or nil
+      if not checked and type(session_api and session_api.remote_input) == "function" then
+        pcall(session_api.remote_input, name, instance_id, false)
         checked = protected()
       end
       bus.remote_input_unprotected = bus.remote_input_unprotected or {}

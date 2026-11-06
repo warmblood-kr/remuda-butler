@@ -102,7 +102,8 @@ function remuda._butler_sessions()
   -- One list read keeps the ACTIVITY column and the session detail on the same
   -- snapshot. Without the row's instance_id, a reused name is not enriched.
   local live = {}
-  local listed = remuda.session and remuda.session.list
+  local session_api = type(remuda.session) == "table" and remuda.session or nil
+  local listed = session_api and session_api.list
   if type(listed) == "function" then
     local ok, sessions = pcall(listed)
     if ok and type(sessions) == "table" then
@@ -327,7 +328,8 @@ local function status_row(agent, session)
   else
     return instance_row(agent, session)
   end
-  local listed = remuda.session and remuda.session.list
+  local session_api = type(remuda.session) == "table" and remuda.session or nil
+  local listed = session_api and session_api.list
   if type(listed) ~= "function" then return nil end
   local ok, rows = pcall(listed)
   if not ok or type(rows) ~= "table" then return nil end
