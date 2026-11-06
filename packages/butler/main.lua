@@ -121,6 +121,19 @@ local directory_is_under = paths.directory_is_under
 local json_quote = paths.json_quote
 -- This internal module is the single inbound Matrix entry point. It registers
 -- only the optional relay and remains inert when credentials are absent.
+remuda._butler_relay_receipts_config = { open = remuda.db and remuda.db.open }
+remuda.exec("butler/relay_receipts")
+if remuda._butler_relay_receipts then
+  -- Open in the mod's own startup context; a later `-e`/tool caller cannot.
+  local ok, status = pcall(remuda._butler_relay_receipts.status)
+  if ok and type(status) == "table" and status.error then
+    local diagnostics = remuda._butler_diagnostics
+    if diagnostics and type(diagnostics.record) == "function" then
+      pcall(diagnostics.record, "relay_db", "degraded", "open_at_boot",
+        tostring(status.error))
+    end
+  end
+end
 remuda.exec("butler/matrix_request")
 remuda.exec("butler/matrix")
 -- The root Butler's permission rule and the write-only-when-changed helper

@@ -84,6 +84,18 @@ fi
 "$REMUDA_BIN" -s "$SERVER" -e 'assert(remuda._butler_mail.inbox("member-id"):find("hello", 1, true))' >/dev/null
 [ "$(count 'member-id' read)" = 1 ] || { echo "read state was not indexed"; exit 1; }
 
+# The relay receipt shadow shares the same private database and must apply
+# its migration and accept a post-JSON-commit record.
+"$REMUDA_BIN" -s "$SERVER" -e '
+  local receipts = assert(remuda._butler_relay_receipts, "relay receipts module")
+  local recorded, why = receipts.record("r1", "butler_r1", { source_mail_id = "m1",
+    event_id = "e1", completed_at = "2026-11-06T00:00:00Z" })
+  assert(recorded, "shadow record: " .. tostring(why))
+  local row = assert(receipts.get("r1"))
+  assert(row.reply_id == "r1" and row.txn_id == "butler_r1", "row")
+  assert(row.status == "sent", "status")
+' >/dev/null
+
 # The daemon must report the schema version and leave the file path usable.
 "$REMUDA_BIN" -s "$SERVER" db status butler >/dev/null
 printf 'PASS\n'

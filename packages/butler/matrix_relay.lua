@@ -900,6 +900,8 @@ function relay.new(options)
   if not cfg then error(config_error, 0) end
   local state_path, ack_path = config_path .. ".since", config_path .. ".acks"
   local state, state_error, quarantine_pruned = load_state(state_path, cfg.rooms)
+  local receipts_module = remuda._butler_relay_receipts
+  if receipts_module then pcall(receipts_module.import_all, state.reply_results) end
   if state_error then
     warn_once("state", state_path .. "\0" .. state_error,
       "butler invalid Matrix relay state; starting from a fresh baseline: " .. tostring(state_error))
@@ -1321,10 +1323,15 @@ function relay.new(options)
           end
           state.reply_results[reply_id] = { source_mail_id = item.source_mail_id,
             reply_mail_id = reply_id, room_id = item.room_id, thread_root = item.thread_root,
-            event_id = sent_id, event_ids = ids, completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
+            event_id = sent_id, event_ids = ids, txn_id = item.txn_id,
+            completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
           trim_map(state.reply_results, MAX_REPLY_RESULTS, "completed_at")
           state.reply_outbox[reply_id] = nil
           persist()
+          local receipts_module = remuda._butler_relay_receipts
+          if receipts_module then
+            pcall(receipts_module.record, reply_id, item.txn_id, state.reply_results[reply_id])
+          end
           if callback then callback(state.reply_results[reply_id]) end
           return
         end
@@ -1333,7 +1340,8 @@ function relay.new(options)
       if item.attempts >= 8 then
         state.reply_results[reply_id] = { source_mail_id = item.source_mail_id,
           reply_mail_id = reply_id, room_id = item.room_id, thread_root = item.thread_root,
-          event_id = "", error = item.last_error, completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
+          event_id = "", error = item.last_error, txn_id = item.txn_id,
+          completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
         state.reply_outbox[reply_id] = nil
         trim_map(state.reply_results, MAX_REPLY_RESULTS, "completed_at")
       else
@@ -1341,6 +1349,10 @@ function relay.new(options)
         schedule_reply_retry(reply_id, math.min(60, 2 ^ math.min(6, item.attempts - 1)))
       end
       persist()
+      local receipts_module = remuda._butler_relay_receipts
+      if receipts_module and state.reply_results[reply_id] then
+        pcall(receipts_module.record, reply_id, item.txn_id, state.reply_results[reply_id])
+      end
       if callback then callback({ error = item.last_error, attempts = item.attempts }) end
     end)
   end
@@ -2796,6 +2808,13 @@ end
 function relay.start(config)
   if relay.instance then return false end
   if not config or not config.config_path then return false end
+  local receipts = remuda._butler_relay_receipts
+  if receipts and receipts.authority_state() == "mismatch" then
+    -- A future/unknown authority is not the same as a missing database: do
+    -- not keep serving JSON sends as if the shadow disagreed on purpose.
+    diagnostic("error", "receipt_authority_mismatch", nil)
+    return false
+  end
   relay.instance = relay.new({ config_path = config.config_path, matrix = matrix,
     deliver = function(event)
       local body = event.body
