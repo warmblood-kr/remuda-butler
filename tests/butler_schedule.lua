@@ -553,6 +553,48 @@ eq("it sent nothing while unread", #sent, 0)
 unread_ids["m-old"] = nil
 eq("it delivers once the previous mail is read", schedule.tick(env(), noon + 20), 1)
 
+-- A successful one-shot send whose save fails must not resend while this
+-- process lives; the latch retries only the save.
+reset({ once_entry("latch-survive") })
+local latch_fail = true
+remuda.fs.write_atomic = function(...)
+  if latch_fail then latch_fail = false; return nil, "disk full" end
+  return real_write_atomic(...)
+end
+eq("the send succeeds with a failed save", schedule.tick(env(), noon), 1)
+eq("one mail before the corrupt read", #sent, 1)
+local pending_copy = stored("latch-survive")
+local corrupt = assert(io.open(fire_path, "wb")); corrupt:write("{{{ not a record"); corrupt:close()
+eq("a corrupt read fires nothing", schedule.tick(env(), noon + 20), 0)
+eq("a corrupt read does not resend", #sent, 1)
+assert(schedule.save(fire_path, { pending_copy }))
+eq("recovery retries only the save", schedule.tick(env(), noon + 40), 0)
+eq("still one mail after recovery", #sent, 1)
+eq("the recovered one-shot is disabled", stored("latch-survive").enabled, false)
+
+-- A dropped record is not proof of removal either.
+reset({ once_entry("drop-keep") })
+local drop_fail = true
+remuda.fs.write_atomic = function(...)
+  if drop_fail then drop_fail = false; return nil, "disk full" end
+  return real_write_atomic(...)
+end
+eq("the send succeeds before the drop", schedule.tick(env(), noon), 1)
+local keep_copy = stored("drop-keep")
+local bad_record = { name = "Bad", spec = "7 * * * *", target = "butler", text = "t",
+  created_by = "operator", created_at = "2026-10-02T00:00:00Z", last_fired = 0, enabled = true }
+local other_record = entry("other"); other_record.enabled = false
+local raw = remuda.json.encode({ version = 2,
+  schedules = remuda.json.array({ other_record, bad_record }) })
+local dropped_file = assert(io.open(fire_path, "wb")); dropped_file:write(raw); dropped_file:close()
+eq("a dropped record fires nothing", schedule.tick(env(), noon + 20), 0)
+eq("a dropped record does not resend", #sent, 1)
+assert(schedule.save(fire_path, { keep_copy }))
+eq("the restored file retries only the save", schedule.tick(env(), noon + 40), 0)
+eq("still one mail after the drop", #sent, 1)
+eq("the restored one-shot is disabled", stored("drop-keep").enabled, false)
+remuda.fs.write_atomic = real_write_atomic
+
 -- A restart loses the in-memory latch: the documented at-least-once window.
 reset({ once_entry("restart-once") })
 local fail_the_save = true

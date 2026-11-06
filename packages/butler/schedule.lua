@@ -202,10 +202,11 @@ function M.remove(list, name)
   if index then table.remove(list, index) return true end
 end
 
--- load(path, trace) -> list, problem. An absent file is an empty list. A file
--- that cannot be opened, is oversized, corrupt or of another version is also an empty list, with
--- `problem` naming why and a trace line; a bad record inside a good file is
--- dropped with a trace line.
+-- load(path, trace) -> list, problem, dropped. An absent file is an empty
+-- list. A file that cannot be opened, is oversized, corrupt or of another
+-- version is also an empty list, with `problem` naming why and a trace line.
+-- A bad record inside a good file is dropped with a trace line and counted in
+-- `dropped`; the rest of that file still loads.
 function M.load(path, raw)
   local function trace(event, detail) (raw or function() end)(event, M.safe(detail)) end
   if not path then return {} end
@@ -235,7 +236,7 @@ function M.load(path, raw)
     trace("schedule_file_unusable", problem)
     return {}, problem
   end
-  local list = {}
+  local list, dropped = {}, 0
   for _, entry in ipairs(doc.schedules) do
     local valid, err = M.check(entry)
     if valid and version == M.LEGACY_VERSION and (entry.once ~= nil or entry.once_fired ~= nil) then
@@ -244,9 +245,12 @@ function M.load(path, raw)
     if valid and M.find(list, entry.name) then valid, err = nil, "duplicate name" end
     if valid and #list >= M.MAX_SCHEDULES then valid, err = nil, "over the schedule limit" end
     if valid then list[#list + 1] = entry
-    else trace("schedule_entry_dropped", tostring(type(entry) == "table" and entry.name) .. ": " .. err) end
+    else
+      dropped = dropped + 1
+      trace("schedule_entry_dropped", tostring(type(entry) == "table" and entry.name) .. ": " .. err)
+    end
   end
-  return list
+  return list, nil, dropped
 end
 
 -- save(path, list) -> true | nil, err
@@ -362,13 +366,18 @@ function M.tick(env, now)
     env.seen[key] = true
     env.trace(event, detail)
   end
-  local list = M.load(env.path, once)
+  local list, problem, dropped = M.load(env.path, once)
+  -- An unreadable or invalid file is no evidence that an entry was removed.
+  -- Return without firing, saving, or pruning: the latch must outlive a
+  -- transient read error, or the pending file would resend on recovery.
+  if problem then return 0 end
   -- A successful one-shot send whose save failed must not send again while this
-  -- process lives. The latch is keyed by store path and occurrence_id, retries
-  -- only the save, and is cleared once the file records the delivery. A restart
-  -- loses it; that is the documented at-least-once duplicate window. It is
+  -- module image lives. The latch is keyed by store path and occurrence_id, retries
+  -- only the save, and is cleared once the file records the delivery. A module
+  -- reload or restart loses it; that is the documented duplicate window. It is
   -- module state rather than env state so a caller that rebuilds its env table
-  -- cannot forget a delivery it already made.
+  -- cannot forget a delivery it already made. A file with any dropped record
+  -- is not proof of removal either, so pruning waits for a clean load.
   local path = env.path or ""
   local delivered = once_latch[path]
   if not delivered then delivered = {}; once_latch[path] = delivered end
@@ -407,8 +416,10 @@ function M.tick(env, now)
       end
     end
   end
-  for key in pairs(delivered) do
-    if not present[key] then delivered[key] = nil end
+  if dropped == 0 then
+    for key in pairs(delivered) do
+      if not present[key] then delivered[key] = nil end
+    end
   end
   if next(delivered) == nil then once_latch[path] = nil end
   return fired

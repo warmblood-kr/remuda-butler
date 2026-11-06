@@ -308,15 +308,21 @@ month and weekday are `*`. `7 * * * *` is minute 7 of every hour,
 `--once` delivers at the next matching time and then disables the entry. Until a
 send succeeds it stays pending, so an absent target or an unread previous mail
 is retried rather than lost. A crash after sending but before saving can deliver
-it twice; so can a restart after a save that kept failing. While the process
-lives, a failed save does not resend: it retries only the save. It is still a
-minute/hour slot, not an absolute deadline: use it only when the next matching
-minute/hour is within 24 hours, and pick the next future minute (scheduling the
-current minute waits for the next day). For longer work use a nearer checkpoint
-or state the date in the report. A one-shot that has delivered stays in `list`
-as `off  once-done` until `rm` removes it; a pending one shows `once-pending`.
-Delivered entries still count toward the 16-schedule limit, so remove them when
-they are no longer useful.
+it twice; so can a module reload or restart after a save that kept failing, once
+per reload. While the scheduler module image lives, a failed save does not
+resend: it retries only the save, and a transient unreadable file keeps the
+latch. It is still a minute/hour slot, not an absolute deadline: use it only
+when the next matching minute/hour is within 24 hours, and pick the next future
+minute (scheduling the current minute waits for the next day). For longer work
+use a nearer checkpoint or state the date in the report. A one-shot that has
+delivered stays in `list` as `off  once-done` until `rm` removes it; a pending
+one shows `once-pending`. Delivered entries still count toward the 16-schedule
+limit, so remove them when they are no longer useful.
+
+A file that contains any one-shot is stored as version 2. An older Butler
+cannot read it and loads no schedules from it at all, so a downgrade also stops
+the recurring entries in the same file until that Butler is upgraded again or
+the file is removed.
 
 `list` is open to every session and prints each schedule's name, spec, target,
 state, last firing and the first 80 bytes of its text. An authenticated Butler
