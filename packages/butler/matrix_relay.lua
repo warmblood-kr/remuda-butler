@@ -656,11 +656,30 @@ local function subscribe(state, room_id, thread_id, mail_id)
   return true
 end
 
+-- The exact shape save_state encodes. `state.processed` is an internal map and
+-- `processed_order` must be a tagged array; encoding the raw state would fail
+-- on those two empty tables even though the real save succeeds.
+local function relay_json_view(state)
+  return { since = state.since,
+    processed_event_ids = json.array(state.processed_order or {}),
+    messages_since = state.messages_since, pending_events = state.pending,
+    quarantine = state.quarantine, matrix_mail_routes = state.routes,
+    matrix_own_events = state.own_events,
+    matrix_reply_outbox = state.reply_outbox,
+    matrix_reply_results = state.reply_results,
+    matrix_thread_subscriptions = state.subscriptions, approvals = state.approvals,
+    matrix_unfollowed_threads = state.unfollowed,
+    invite_dedupe = state.invite_dedupe,
+    auto_join_timestamps = state.auto_join_timestamps,
+    typed_line_timestamps = state.typed_line_timestamps }
+end
+
 -- Read-only encoder budget for the whole relay state. The value count mirrors
 -- the core encoder (one per table pair plus the root); bytes come from the real
 -- encoder when it can produce them. No state is written and no body is shown.
 function relay.json_budget(state)
   if type(state) ~= "table" then return nil, "state is not a table" end
+  local view = relay_json_view(state)
   local values = 1
   local seen = {}
   local cyclic = false
@@ -673,8 +692,8 @@ function relay.json_budget(state)
     end
     seen[table_value] = nil
   end
-  walk(state)
-  local encoded_ok, encoded, encode_why = pcall(json.encode, state)
+  walk(view)
+  local encoded_ok, encoded, encode_why = pcall(json.encode, view)
   local bytes = encoded_ok and type(encoded) == "string" and #encoded or nil
   local level = "ok"
   if values >= RELAY_JSON_STOP_VALUES
