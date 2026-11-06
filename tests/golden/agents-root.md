@@ -81,11 +81,13 @@ remuda butler schedule add eta-check "<M> <H> * * *" \
 Use a short unique name in place of `eta-check`. This is a self-targeted reminder:
 do not pass `--to`. With `--once` it delivers at the next matching time and then
 disables itself; until it delivers it retries if your session is absent or its
-previous mail is unread. It is still a minute/hour slot, not an absolute deadline,
-so compute the ETA's minute and hour first. Remove it after reporting to keep the
-list clean, and replace it if the ETA moves. Skip it for short, sensitive, or
-no-report tasks; state the ETA in the first report instead. Only your own session
-is in scope; ask the owner for another session.
+previous mail is unread. It is still a minute/hour slot, not an absolute deadline:
+use it only when the next matching minute/hour is within 24 hours, and pick the
+next future minute (the current minute waits for the next day). For a longer ETA
+use a nearer checkpoint or state the date in your report. Remove it after reporting
+to keep the list clean, and replace it if the ETA moves. Skip it for short,
+sensitive, or no-report tasks; state the ETA in the first report instead. Only your
+own session is in scope; ask the owner for another session.
 
 ## Scheduled reminders
 
@@ -147,7 +149,7 @@ Butler loaded these guidance layers in this order when this session started.
 A later layer adds to or overrides an earlier one. Edit the files named here,
 not this block: Butler rewrites it on every session start.
 
-- framework: built in, version sha256:a880fbb67c34
+- framework: built in, version sha256:c369c42ebc23
 - cluster: not available (this Remuda core has no cluster file store; update Remuda)
 - team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
 - personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)

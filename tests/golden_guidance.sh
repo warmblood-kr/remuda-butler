@@ -207,6 +207,7 @@ for f in agents-root.md agents-topic.md agents-launch.md welcome.txt; do
   require_text "$f" 'not a required message format' "5W1H optionality"
   require_text "$f" '### ETA and self-reminder' "the ETA self-reminder section"
   require_text "$f" 'With `--once` it delivers at the next matching time' "the one-shot schedule caveat"
+  require_text "$f" 'within 24 hours' "the one-shot horizon"
   require_text "$f" 'do not pass `--to`' "self-targeted schedule ownership"
   require_text "$f" 'reserved sender `schedule`' "the standing schedule-mail warning"
   require_text "$f" 'created by your current Butler identity' "identity-based schedule ownership"

@@ -197,7 +197,7 @@ eq("newlines and quotes survive", schedule.load(path, trace)[1].text, multi.text
 -- A corrupt, oversized or foreign-version file loads as an empty list and says why.
 for label, contents in pairs({
   corrupt = "{{{ not a record", empty = "", wrong_shape = "{[\"version\"]=1}",
-  newer = "{[\"version\"]=2,[\"schedules\"]={}}",
+  newer = "{[\"version\"]=3,[\"schedules\"]={}}",
   oversized = "{[\"version\"]=1,[\"schedules\"]={},[\"pad\"]=\"" .. ("x"):rep(300 * 1024) .. "\"}",
 }) do
   put(contents)
@@ -511,6 +511,72 @@ eq("the one-shot retries after a failed send", schedule.tick(env(), noon + 20), 
 eq("one retry mail", #sent, 1)
 eq("the retry disables it", stored("retry").enabled, false)
 ok("the retry is traced", events[#events]:find("^schedule_fired retry slot="))
+
+-- A successful one-shot send whose save fails must not resend while the process
+-- is alive; the latch retries only the save.
+reset({ once_entry("save-fail") })
+local real_write_atomic = remuda.fs.write_atomic
+local fail_writes = 3
+remuda.fs.write_atomic = function(...)
+  if fail_writes > 0 then fail_writes = fail_writes - 1; return nil, "disk full" end
+  return real_write_atomic(...)
+end
+eq("send succeeds but its save fails", schedule.tick(env(), noon), 1)
+eq("one mail for that delivery", #sent, 1)
+eq("the next tick only retries the save", schedule.tick(env(), noon + 20), 0)
+eq("the third tick only retries the save", schedule.tick(env(), noon + 40), 0)
+eq("still one mail", #sent, 1)
+eq("the fourth tick only retries the save", schedule.tick(env(), noon + 60), 0)
+eq("still one mail after three failed saves", #sent, 1)
+fail_writes = 0
+eq("save recovery does not resend", schedule.tick(env(), noon + 80), 0)
+eq("one mail after recovery", #sent, 1)
+eq("the delivered one-shot is disabled on disk", stored("save-fail").enabled, false)
+eq("the delivered one-shot is marked once_fired", stored("save-fail").once_fired, true)
+remuda.fs.write_atomic = real_write_atomic
+
+-- A one-shot with an absent target stays pending and retries when it returns.
+reset({ once_entry("absent-once") })
+absent["butler"] = true
+eq("an absent target is not a delivery", schedule.tick(env(), noon), 0)
+eq("the one-shot stays pending", stored("absent-once").once_fired, nil)
+eq("it stays enabled", stored("absent-once").enabled, true)
+absent["butler"] = nil
+eq("it delivers when the target returns", schedule.tick(env(), noon + 20), 1)
+eq("the recovered delivery disables it", stored("absent-once").enabled, false)
+
+-- Unread gating applies to a one-shot: it waits instead of piling up mail.
+reset({ (function() local e = once_entry("unread-once"); e.last_message = "m-old"; return e end)() })
+unread_ids["m-old"] = true
+eq("an unread previous mail holds the one-shot", schedule.tick(env(), noon), 0)
+eq("it sent nothing while unread", #sent, 0)
+unread_ids["m-old"] = nil
+eq("it delivers once the previous mail is read", schedule.tick(env(), noon + 20), 1)
+
+-- A restart loses the in-memory latch: the documented at-least-once window.
+reset({ once_entry("restart-once") })
+local fail_the_save = true
+remuda.fs.write_atomic = function(...)
+  if fail_the_save then fail_the_save = false; return nil, "disk full" end
+  return real_write_atomic(...)
+end
+eq("the send succeeds with a failed save", schedule.tick(env(), noon), 1)
+eq("one mail before the restart", #sent, 1)
+remuda.fs.write_atomic = real_write_atomic
+local restarted = dofile("packages/butler/schedule.lua")
+eq("a fresh process resends the unsaved delivery", restarted.tick(env(), noon + 20), 1)
+eq("the duplicate is the documented at-least-once case", #sent, 2)
+
+-- A one-shot file is version 2; a version 1 file cannot smuggle once fields.
+reset({ once_entry("v2") })
+ok("a one-shot file is version 2", fire_path and (function()
+  local f = assert(io.open(fire_path, "rb")); local text = f:read("*a"); f:close()
+  return text:find('["version"]=2', 1, true) ~= nil
+end)())
+put(remuda.json.encode({ version = 1, schedules = { once_entry("smuggle") } }))
+traces = {}
+eq("version 1 refuses once fields", #schedule.load(path, trace), 0)
+ok("the version 1 refusal is traced", traces[1] and traces[1]:find("^schedule_entry_dropped smuggle: once requires version 2"))
 
 -- Disabled schedules and several schedules.
 local off = hourly_entry("off")

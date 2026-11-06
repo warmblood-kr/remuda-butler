@@ -44,11 +44,16 @@ function M.describe(entry)
     local formatted, text = pcall(os.date, "%Y-%m-%d %H:%M", entry.last_fired * 60)
     fired = formatted and type(text) == "string" and text or "?"
   end
-  return table.concat({
+  local parts = {
     terminal_safe(entry.name), terminal_safe(entry.spec), "-> " .. terminal_safe(entry.target),
-    entry.enabled and "on" or "off", "last " .. fired,
-    shortened(terminal_safe(entry.text), LIST_TEXT_BYTES),
-  }, "  ")
+    entry.enabled and "on" or "off",
+  }
+  if entry.once then
+    parts[#parts + 1] = entry.once_fired and "once-done" or "once-pending"
+  end
+  parts[#parts + 1] = "last " .. fired
+  parts[#parts + 1] = shortened(terminal_safe(entry.text), LIST_TEXT_BYTES)
+  return table.concat(parts, "  ")
 end
 
 -- load_list(env) -> list | nil, reason. A file that cannot be read is never
@@ -78,7 +83,11 @@ local function build(env, request, list, creator, recipient_id)
   local entry = { name = request.name, spec = request.spec, target = request.target, text = request.text,
     created_by = creator or "operator", created_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
     last_fired = math.floor(os.time() / 60), enabled = true }
-  if request.once then entry.once = true end
+  if request.once then
+    entry.once = true
+    entry.occurrence_id = (type(remuda._butler_new_ulid) == "function" and remuda._butler_new_ulid())
+      or (tostring(os.time()) .. "-" .. tostring(math.random(100000, 999999)))
+  end
   if recipient_id then entry.recipient_id = recipient_id end
   local candidate = {}
   for i, existing in ipairs(list) do candidate[i] = existing end
