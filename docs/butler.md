@@ -523,12 +523,20 @@ ordinary mail path. `remuda butler status-commands on|off` turns it off or on
 any value other than `true` or `false` turns it off.
 
 Root posts are delivered from anyone. In the HOME room, every thread reply is
-delivered whether or not you follow it. In other rooms, thread replies are
-delivered only in followed threads or when a message mentions the Butler;
-replying, sending, and a mention from an allowlisted sender follow automatically.
-Non-allowlisted senders arrive marked as information with `trusted=false`.
+delivered unless you explicitly unfollowed that thread. In other rooms, thread
+replies are delivered only in followed threads or when a message mentions the
+Butler; replying, sending, and a mention from an allowlisted sender follow
+automatically. Non-allowlisted senders arrive marked as information with
+`trusted=false`.
 Use `follow EVENT_ID` and `unfollow EVENT_ID` to manage subscriptions; the
-relay allows up to 5000 followed threads in total. Accepted messages from
+relay allows up to 5000 followed threads in total. Unfollow is stronger than
+removing a follow: an explicitly unfollowed thread's unmentioned replies stay
+out of the inbox under every room policy, including HOME's `all`. A mention in
+that thread still delivers that one message but does not re-follow the thread;
+`follow` clears the marker and restores delivery. The explicit unfollow markers
+are kept in relay state (at most 5000, oldest dropped first) and survive a
+restart; a message already waiting for context is rechecked and suppressed when
+its thread is unfollowed before delivery. Accepted messages from
 non-allowlisted senders are limited per room in a rolling hour by
 `untrusted_per_room_hour` (default 20). Once the cap is reached, those messages
 are left undelivered, rather than quarantined. The HOME room receives a summary
@@ -551,12 +559,16 @@ or untrusted messages. If reading the thread fails or a request times out (10
 seconds each), the mail arrives with a short failure line and the original
 message. The fetch does not delay mail from other threads.
 
-Configure `b2b_max_turns` (default 6) for consecutive messages from other Butlers in one
-thread, `posts_per_hour` (default 30) for posts that are not a reply to a person
+Configure `b2b_max_turns` (default 6) for real exchanges between different
+Butlers in one thread, `posts_per_hour` (default 30) for posts that are not a
+reply to a person
 on the allowlist, and
 `untrusted_per_room_hour` (default 20) for non-allowlisted messages delivered
-from each room. The Butler's own replies neither increment nor reset the peer
-counter, so normal progress reports do not exhaust it. Replies to verified
+from each room. Consecutive messages from the same Butler count once, so one
+agent's follow-up reports do not consume the limit; a message from a different
+Butler starts a new turn. The Butler's own replies neither increment nor reset
+the peer counter but are a boundary: the other Butler's next message is a new
+turn. Replies to verified
 people on the allowlist remain available even when peer replies are paused.
 These counters are held
 in memory and reset when the daemon restarts. `b2b_max_turns` and
@@ -648,8 +660,10 @@ Butler inbox. `none` suppresses all room messages. Read or change the policy
 with `remuda butler matrix [--room ROOM] notifications [all|mentions-followed|none]`;
 without a mode, the command shows the current value. This is operator-only.
 Changing it applies to the running relay immediately. `follow` and `unfollow`
-control thread replies in `mentions-followed` rooms; `all` deliberately
-delivers every message regardless of follow state.
+control thread replies; `all` delivers every message except unmentioned replies
+in a thread you explicitly unfollowed. A mention in an unfollowed thread still
+delivers that message but does not re-follow it, so later unmentioned replies
+stay muted until `follow`.
 
 Add `deny_room=!ROOM_ID` or `deny_room=#alias:server` for each denied room, and
 `deny_server=host` for each denied server. Room IDs, canonical aliases, room
@@ -813,8 +827,8 @@ file contains:
    (default 30; a Claude guard approval keeps its fixed 5 minute window);
    `approval_room=all|home` selects the joined ALL-BUTLERS room or HOME
    (default `all`);
-   `b2b_max_turns=N` sets the consecutive messages from other Butlers limit per thread
-   (default 6); `posts_per_hour=N` caps posts that are not a reply to a person
+   `b2b_max_turns=N` sets the limit on real exchanges between different Butlers per thread
+   (default 6; consecutive messages from the same Butler count once); `posts_per_hour=N` caps posts that are not a reply to a person
    on the allowlist (default 30);
    `untrusted_per_room_hour=N` sets the per-room non-allowlisted message limit
    (default 20);

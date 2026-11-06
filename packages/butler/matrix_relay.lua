@@ -53,6 +53,7 @@ local QUARANTINE_TTL_SECONDS = 30 * 24 * 60 * 60
 local MAX_MAIL_ROUTES = 5000
 local MAX_OWN_EVENTS_PER_ROOM = 500
 local MAX_THREAD_SUBSCRIPTIONS = 5000
+local MAX_UNFOLLOWED_THREADS = 5000
 local MAX_REPLY_OUTBOX = 1000
 local MAX_REPLY_RESULTS = 5000
 local MAX_MAIL_REPLY_BYTES = 64 * 1024
@@ -564,6 +565,55 @@ local function trim_invite_dedupe(map, now)
   trim_map(map, MAX_INVITE_DEDUPE, "created_at")
 end
 
+-- Explicit unfollow markers are independent of subscriptions: follow clears the
+-- marker, while a mention auto-follow never does. Trimmed across all rooms like
+-- the flat routes map, oldest first and ties by room/root for determinism.
+local function trim_unfollowed(map)
+  local count = 0
+  for _, roots in pairs(map) do
+    for _ in pairs(roots) do count = count + 1 end
+  end
+  while count > MAX_UNFOLLOWED_THREADS do
+    local oldest_room, oldest_root, oldest_at
+    for room, roots in pairs(map) do
+      for root, item in pairs(roots) do
+        local at = type(item) == "table" and type(item.created_at) == "string" and item.created_at or ""
+        if oldest_root == nil or at < oldest_at or (at == oldest_at
+          and (room < oldest_room or (room == oldest_room and root < oldest_root))) then
+          oldest_room, oldest_root, oldest_at = room, root, at
+        end
+      end
+    end
+    if oldest_root == nil then break end
+    map[oldest_room][oldest_root] = nil
+    if next(map[oldest_room]) == nil then map[oldest_room] = nil end
+    count = count - 1
+  end
+end
+
+local function unfollowed(state, room_id, thread_id)
+  local roots = type(room_id) == "string" and state.unfollowed[room_id] or nil
+  return type(roots) == "table" and type(thread_id) == "string" and roots[thread_id] ~= nil
+end
+
+local function mark_unfollowed(state, room_id, thread_id)
+  local roots = state.unfollowed[room_id]
+  if not roots then
+    roots = json.object({})
+    state.unfollowed[room_id] = roots
+  end
+  roots[thread_id] = { created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
+  trim_unfollowed(state.unfollowed)
+end
+
+local function clear_unfollowed(state, room_id, thread_id)
+  local roots = state.unfollowed[room_id]
+  if type(roots) ~= "table" or roots[thread_id] == nil then return false end
+  roots[thread_id] = nil
+  if next(roots) == nil then state.unfollowed[room_id] = nil end
+  return true
+end
+
 local function valid_event_key(id)
   return type(id) == "string" and #id <= 255 and id:sub(1, 1) == "$"
     and not id:find("[^\33-\126]")
@@ -601,6 +651,7 @@ local function empty_state()
     own_events = json.object({}),
     invite_dedupe = json.object({}),
     subscriptions = json.object({}),
+    unfollowed = json.object({}),
     auto_join_timestamps = json.array({}),
     typed_line_timestamps = json.array({}),
     reply_outbox = json.object({}), reply_results = json.object({}), approvals = json.object({}) }
@@ -632,6 +683,7 @@ local function load_state(path, rooms)
   local reply_outbox = value.matrix_reply_outbox or json.object({})
   local reply_results = value.matrix_reply_results or json.object({})
   local subscriptions = value.matrix_thread_subscriptions or json.object({})
+  local unfollowed_threads = value.matrix_unfollowed_threads or json.object({})
   local approvals = value.approvals or json.object({})
   local invite_dedupe = value.invite_dedupe or json.object({})
   local auto_join_timestamps = value.auto_join_timestamps or json.array({})
@@ -663,6 +715,10 @@ local function load_state(path, rooms)
   if type(typed_line_timestamps) ~= "table" or typed_line_timestamps == json.null
     or getmetatable(typed_line_timestamps) ~= JSON_ARRAY_MT then
     return empty_state(), "invalid Matrix relay typed-line timestamps"
+  end
+  if type(unfollowed_threads) ~= "table" or unfollowed_threads == json.null
+    or getmetatable(unfollowed_threads) == JSON_ARRAY_MT then
+    return empty_state(), "invalid Matrix relay unfollow state"
   end
   local state = empty_state()
   local quarantine_pruned = false
@@ -714,6 +770,23 @@ local function load_state(path, rooms)
       state.subscriptions[room_id] = valid_roots
     end
   end
+  for room_id, roots in pairs(unfollowed_threads) do
+    if type(room_id) == "string" and room_id ~= "" and type(roots) == "table"
+      and roots ~= json.null and getmetatable(roots) ~= JSON_ARRAY_MT then
+      local valid_roots = json.object({})
+      for thread_id, item in pairs(roots) do
+        if type(thread_id) == "string" and thread_id ~= "" then
+          if type(item) == "table" and type(item.created_at) == "string" then
+            valid_roots[thread_id] = { created_at = item.created_at }
+          elseif item == true then
+            valid_roots[thread_id] = { created_at = "" }
+          end
+        end
+      end
+      if next(valid_roots) ~= nil then state.unfollowed[room_id] = valid_roots end
+    end
+  end
+  trim_unfollowed(state.unfollowed)
   for _, id in ipairs(processed_ids) do
     if type(id) ~= "string" then return empty_state(), "invalid processed event ID" end
     if id ~= "" then add_processed(state, id) end
@@ -811,6 +884,7 @@ local function save_state(path, state)
     matrix_own_events = state.own_events,
     matrix_reply_outbox = state.reply_outbox, matrix_reply_results = state.reply_results,
     matrix_thread_subscriptions = state.subscriptions, approvals = state.approvals,
+    matrix_unfollowed_threads = state.unfollowed,
     invite_dedupe = state.invite_dedupe,
     auto_join_timestamps = state.auto_join_timestamps,
     typed_line_timestamps = state.typed_line_timestamps })
@@ -891,7 +965,11 @@ function relay.new(options)
     return false
   end
 
-  local function note_turn(room, root, kind)
+  -- Only an exchange between different agents counts: consecutive progress
+  -- reports from the same Butler share one turn. A human reply resets the
+  -- streak; our own replies move last_agent to us without incrementing, so the
+  -- peer's next message starts a new turn.
+  local function note_turn(room, root, kind, sender)
     if type(room) ~= "string" or not valid_event_key(root) then return 0 end
     local room_turns = b2b_turns[room]
     if kind == "human" then
@@ -904,7 +982,9 @@ function relay.new(options)
     if kind ~= "agent" then return 0 end
     if not room_turns then room_turns = {}; b2b_turns[room] = room_turns end
     local turns = room_turns[root]
-    if not turns then turns = { n = 0, notified = false }; room_turns[root] = turns end
+    if not turns then turns = { n = 0, notified = false, last_agent = nil }; room_turns[root] = turns end
+    if turns.last_agent == sender then return turns.n end
+    turns.last_agent = sender
     turns.n = turns.n + 1
     if turns.n >= cfg.b2b_max_turns and not turns.notified then
       turns.notified = true
@@ -941,10 +1021,12 @@ function relay.new(options)
 
   function instance:note_own_turn(room, root)
     -- The loop budget counts messages from other Butlers, not our progress
-    -- reports. Do not reset the peer streak either: genuine ping-pong must
-    -- still stop when the other Butler reaches the limit.
+    -- reports. Our reply is a boundary: it makes the peer's next message a new
+    -- turn, but does not increment or reset the peer count.
     local turns = b2b_turns[room] and b2b_turns[room][root]
-    return turns and turns.n or 0
+    if not turns then return 0 end
+    turns.last_agent = cfg.self_mxid
+    return turns.n
   end
 
   local approval = remuda.butler and remuda.butler.approval
@@ -1089,7 +1171,11 @@ function relay.new(options)
     for source_mail_id, route in pairs(state.routes) do
       if route.event_id == event_id or route.last_reply_event_id == event_id then
         route.last_reply_event_id = sent_id
-        subscribe(state, route.room_id, route.thread_root or route.event_id, source_mail_id)
+        -- Replying follows the thread, but never an explicitly unfollowed one.
+        local root = route.thread_root or route.event_id
+        if not unfollowed(state, route.room_id, root) then
+          subscribe(state, route.room_id, root, source_mail_id)
+        end
         persist()
         return true
       end
@@ -1172,6 +1258,7 @@ function relay.new(options)
   function instance:subscribe_thread(room_id, thread_id, mail_id)
     if type(room_id) ~= "string" or cfg.rooms[room_id] == nil then return false end
     if not subscribe(state, room_id, thread_id, mail_id) then return false end
+    clear_unfollowed(state, room_id, thread_id)
     persist()
     return true
   end
@@ -1179,8 +1266,10 @@ function relay.new(options)
   function instance:unsubscribe_thread(room_id, thread_id)
     if type(room_id) ~= "string" or type(thread_id) ~= "string" then return false end
     local subscriptions = state.subscriptions[room_id]
-    if type(subscriptions) ~= "table" or subscriptions[thread_id] == nil then return false end
-    subscriptions[thread_id] = nil
+    if type(subscriptions) == "table" then subscriptions[thread_id] = nil end
+    -- The explicit marker is what mutes unmentioned thread replies, also in
+    -- HOME (mode all). It survives restart until an explicit follow clears it.
+    mark_unfollowed(state, room_id, thread_id)
     persist()
     return true
   end
@@ -1222,7 +1311,10 @@ function relay.new(options)
           route.from_agent, route.room_kind = item.from_agent, item.room_kind
           route.last_reply_mail_id, route.last_reply_event_id = reply_id, sent_id
           state.routes[item.source_mail_id] = route
-          subscribe(state, route.room_id, route.thread_root or route.event_id, item.source_mail_id)
+          local root = route.thread_root or route.event_id
+          if not unfollowed(state, route.room_id, root) then
+            subscribe(state, route.room_id, root, item.source_mail_id)
+          end
           state.reply_results[reply_id] = { source_mail_id = item.source_mail_id,
             reply_mail_id = reply_id, room_id = item.room_id, thread_root = item.thread_root,
             event_id = sent_id, event_ids = ids, completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
@@ -1445,7 +1537,10 @@ function relay.new(options)
         local event = state.pending[id]
         if event and not delivery_retry_waiting[id] then
           local subscriptions = state.subscriptions[event.room_id] or {}
-          if not matrix.delivery_policy.accept_pending(cfg, event.room_id, subscriptions, event) then
+          local root_unfollowed = event.thread_root ~= nil
+            and unfollowed(state, event.room_id, event.thread_root)
+          if not matrix.delivery_policy.accept_pending(cfg, event.room_id, subscriptions, event,
+              root_unfollowed) then
             diagnostic("filtered", "filter_policy", id)
             add_processed(state, event.event_id)
             state.pending[id] = nil
@@ -1474,7 +1569,8 @@ function relay.new(options)
                   room_kind = event.room_kind,
                   created_at = event.created_at }
                 local followed_root = event.thread_root or (event.subscribe_thread and event.event_id or nil)
-                if event.subscribe_thread and followed_root then
+                if event.subscribe_thread and followed_root
+                    and not unfollowed(state, event.room_id, followed_root) then
                   subscribe(state, event.room_id, followed_root, event.context_mail_id or result.id)
                 end
                 trim_map(state.routes, MAX_MAIL_ROUTES, "created_at")
@@ -2085,14 +2181,18 @@ function relay.new(options)
           local subscriptions = state.subscriptions[actual_room] or json.object({})
           state.subscriptions[actual_room] = subscriptions
           local follow_root = thread_root or ev.event_id
+          -- An explicit unfollow mutes unmentioned replies in that thread; a
+          -- mention in it is still delivered but never re-follows it.
+          local root_unfollowed = thread_root ~= nil and unfollowed(state, actual_room, thread_root)
           local auto_followed = false
-          if trusted and is_mention and not subscriptions[follow_root] then
+          if trusted and is_mention and not subscriptions[follow_root]
+              and not unfollowed(state, actual_room, follow_root) then
             auto_followed = subscribe(state, actual_room, follow_root, nil)
           end
           local is_agent = sender_kind == "AGENT"
           local accepted = matrix.delivery_policy.accept_received(cfg, actual_room, subscriptions, {
             thread_root = thread_root, is_mention = is_mention, is_room_mention = is_room_mention,
-          })
+          }, root_unfollowed)
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
           local thread_root_mail_id = thread_root
@@ -2131,7 +2231,7 @@ function relay.new(options)
             if auto_followed then persist() end
           else
           local root = thread_root or ev.event_id
-          if is_agent then note_turn(actual_room, root, "agent")
+          if is_agent then note_turn(actual_room, root, "agent", ev.sender)
           elseif trusted and sender_kind == "HUMAN" then note_turn(actual_room, root, "human") end
           state.pending[ev.event_id] = {
             sender = ev.sender, room_id = actual_room, event_id = ev.event_id,

@@ -3757,13 +3757,14 @@ local function test_rx_thread_reply_needs_follow_home_joined()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
-    -- HOME delivers every thread reply, followed or not (as on main).
+    -- HOME delivers every thread reply unless that thread was explicitly
+    -- unfollowed (as on main before unfollow markers).
     rx_sync(client, HOME, { rx_msg("$root-home", OWNER, "root"),
       rx_msg("$root-home-t1", OWNER, "reply", rx_thread("$root-home")),
       rx_msg("$home-deep", OWNER, "reply to a reply", { rel_type = "m.thread", event_id = "$unknown-root",
         ["m.in_reply_to"] = { event_id = "$unknown-reply" } }) })
     assert(rx_find(delivered, "$root-home") and rx_find(delivered, "$root-home-t1")
-      and rx_find(delivered, "$home-deep"), "HOME delivers an unfollowed thread reply")
+      and rx_find(delivered, "$home-deep"), "HOME delivers a thread reply that was never unfollowed")
     assert(not rx_followed(relay, HOME, "$root-home"), "delivery in HOME does not follow the thread")
     -- A joined room delivers a thread reply only in a followed thread.
     rx_sync(client, NEW, { rx_msg("$root-new", OWNER, "root"),
@@ -3845,18 +3846,25 @@ function test_rx_room_notification_modes()
     relay:subscribe_thread(NEW, "$none-mentioned-root")
     relay:unsubscribe_thread(NEW, "$none-mentioned-root")
     rx_sync(client, NEW, { rx_msg("$none-mentioned", OWNER, "@bot:example.org mention after unfollow",
-      rx_thread("$none-mentioned-root")) })
-    assert(not rx_find(delivered, "$none-mentioned"), "none mode still suppresses the mention's inbox delivery")
-    assert(rx_followed(relay, NEW, "$none-mentioned-root"),
-      "a trusted mention auto-follows even while room notifications are none")
+      rx_thread("$none-mentioned-root")),
+      rx_msg("$none-auto", OWNER, "@bot:example.org fresh mention", rx_thread("$none-auto-root")) })
+    assert(not rx_find(delivered, "$none-mentioned") and not rx_find(delivered, "$none-auto"),
+      "none mode still suppresses the mention's inbox delivery")
+    assert(not rx_followed(relay, NEW, "$none-mentioned-root"),
+      "a mention does not re-follow an explicitly unfollowed thread")
+    assert(rx_followed(relay, NEW, "$none-auto-root"),
+      "a trusted mention in a thread without an unfollow marker auto-follows even while room notifications are none")
 
     remuda._butler_matrix_config = { config_path = path }
     remuda._butler_matrix_paths = remuda._butler_matrix_config
     local following = capture_matrix_cli({ "matrix", "--room", NEW, "notifications", "mentions-followed" })
     assert(following and following.code == 0, "the owner can restore mentions-followed mode")
-    rx_sync(client, NEW, { rx_msg("$none-mentioned-reply", OWNER, "followed after mode restore",
-      rx_thread("$none-mentioned-root")) })
-    assert(rx_find(delivered, "$none-mentioned-reply"),
+    rx_sync(client, NEW, { rx_msg("$none-mentioned-reply", OWNER, "unmentioned after unfollow",
+      rx_thread("$none-mentioned-root")),
+      rx_msg("$none-auto-reply", OWNER, "followed after mode restore", rx_thread("$none-auto-root")) })
+    assert(not rx_find(delivered, "$none-mentioned-reply"),
+      "the explicitly unfollowed thread stays muted after the mode restore")
+    assert(rx_find(delivered, "$none-auto-reply"),
       "the mention received while none was active still follows the thread")
 
     relay:stop()
@@ -3870,8 +3878,14 @@ function test_rx_room_notification_modes()
     assert(rx_followed(pending, NEW, "$pending-unfollow-root"), "the mention follows before context completes")
     pending:unsubscribe_thread(NEW, "$pending-unfollow-root")
     rx_context(pending_client, true)
-    assert(not rx_find(pending_delivered, "$pending-unfollow"),
-      "a pending mention is suppressed if its thread is unfollowed before delivery")
+    assert(rx_find(pending_delivered, "$pending-unfollow"),
+      "a mention pending when its thread is explicitly unfollowed is still delivered once")
+    assert(not rx_followed(pending, NEW, "$pending-unfollow-root"),
+      "delivering that mention does not re-follow the explicitly unfollowed thread")
+    rx_sync(pending_client, NEW, { rx_msg("$pending-unfollow-later", OWNER, "later unmentioned reply",
+      rx_thread("$pending-unfollow-root")) })
+    assert(not rx_find(pending_delivered, "$pending-unfollow-later"),
+      "a later unmentioned reply in the explicitly unfollowed thread is suppressed")
 
     pending:subscribe_thread(NEW, "$pending-reply-root")
     rx_sync(pending_client, NEW, {
@@ -3882,6 +3896,8 @@ function test_rx_room_notification_modes()
     rx_context(pending_client, true)
     assert(not rx_find(pending_delivered, "$pending-reply"),
       "an unmentioned pending reply is suppressed if its thread is unfollowed before delivery")
+    assert(not pending:state().pending["$pending-reply"] and pending:state().processed["$pending-reply"],
+      "the unfollow-suppressed pending reply is durably marked processed")
 
     rx_sync(pending_client, NEW, {
       rx_msg("$pending-none", OWNER, "@bot:example.org switch to none while waiting",
@@ -3926,11 +3942,24 @@ local function test_rx_follow_unfollow_verbs()
         and result.stdout:find("Next: remuda butler matrix --room '" .. NEW .. "' follow '$f-root'", 1, true),
         "unfollow prints what it did and a Next line, got: " .. tostring(result and result.stdout))
       assert(not rx_followed(relay, NEW, "$f-root"), "unfollow must remove the thread")
+      assert((((relay:state().unfollowed or {})[NEW] or {})["$f-root"] ~= nil), "unfollow records an explicit marker")
       rx_sync(client, NEW, { rx_msg("$f-t2", OWNER, "in thread", rx_thread("$f-root")) })
       assert(not rx_find(delivered, "$f-t2"), "a reply after unfollow is not delivered in a joined room")
       result = capture_matrix_cli({ "matrix", "--room", NEW, "unfollow", "$f-root" })
-      assert(result and result.code == 0 and result.stdout:find("Not following", 1, true),
-        "unfollow of an unknown thread is not an error")
+      assert(result and result.code == 0 and result.stdout:find("Stopped following thread $f-root", 1, true),
+        "unfollow of an already unfollowed thread is still success, got: " .. tostring(result and result.stdout))
+      result = capture_matrix_cli({ "matrix", "--room", NEW, "unfollow", "$f-never" })
+      assert(result and result.code == 0 and result.stdout:find("Stopped following thread $f-never", 1, true),
+        "unfollow of a thread that was never followed records the marker without an error, got: "
+          .. tostring(result and result.stdout))
+      assert((((relay:state().unfollowed or {})[NEW] or {})["$f-never"] ~= nil),
+        "a thread that was never followed still gets an explicit unfollow marker")
+      result = capture_matrix_cli({ "matrix", "--room", NEW, "follow", "$f-root" })
+      assert(result and result.code == 0 and result.stdout:find("Following thread $f-root", 1, true),
+        "explicit follow succeeds after unfollow: " .. tostring(result and result.stderr))
+      assert((((relay:state().unfollowed or {})[NEW] or {})["$f-root"] == nil), "explicit follow clears the unfollow marker")
+      rx_sync(client, NEW, { rx_msg("$f-t3", OWNER, "in thread after refollow", rx_thread("$f-root")) })
+      assert(rx_find(delivered, "$f-t3"), "delivery resumes after an explicit follow")
 
       result = capture_matrix_cli({ "matrix", "follow", "$h-root" })
       assert(result and result.code == 0 and rx_followed(relay, HOME, "$h-root")
@@ -4071,6 +4100,7 @@ local function test_rx_follows_survive_restart()
     local again, client2, delivered = rx_relay(path)
     assert(rx_followed(again, NEW, "$keep") and not rx_followed(again, NEW, "$gone"),
       "the follow set (and an unfollow) survives a restart")
+    assert((((again:state().unfollowed or {})[NEW] or {})["$gone"] ~= nil), "the explicit unfollow marker survives a restart")
     rx_sync(client2, NEW, { rx_msg("$keep-t", OWNER, "after restart", rx_thread("$keep")),
       rx_msg("$gone-t", OWNER, "after restart", rx_thread("$gone")) })
     assert(rx_find(delivered, "$keep-t") and not rx_find(delivered, "$gone-t"),
@@ -4133,7 +4163,7 @@ local function test_rx_untrusted_room_cap_logs_once_home_summary()
     rx_sync(client, HOME, { rx_msg("$h1", STRANGER, "home 1"),
       rx_msg("$h2", STRANGER, "home thread", rx_thread("$nope")), rx_msg("$h3", STRANGER, "home 3") })
     assert(rx_find(delivered, "$h2") and not rx_find(delivered, "$h3"),
-      "the cap is per room, and an unfollowed thread reply in HOME is accepted, so it counts")
+      "the cap is per room, and a HOME thread reply with no explicit unfollow is accepted, so it counts")
     rx_sync(client, NEW, { rx_msg("$u6", STRANGER, "@bot:example.org still capped") })
     assert(not rx_find(delivered, "$u6"), "the room stays capped within the hour")
     local warnings, new_warnings = 0, 0
@@ -4187,7 +4217,7 @@ end
 
 -- Old rule (PR 1, test_rx_b2b_block_kept_TODO_pr2): a mail reply to a Butler was
 -- refused with "Butler-to-Butler replies are disabled" and can_reply_to was false.
--- Replaced by the loop guard b2b_max_turns (test_rx_b2b_turn_guard_home_line_once).
+-- Replaced by the loop guard b2b_max_turns (test_rx_b2b_turn_guard_counts_distinct_agents).
 local function test_rx_b2b_reply_to_butler_is_queued()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
@@ -4436,13 +4466,36 @@ local function rx_http_texts(calls, text)
   return n
 end
 
-local function test_rx_b2b_turn_guard_home_line_once()
+local function test_rx_b2b_turn_guard_counts_distinct_agents()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
     relay_module.instance = relay
     local line = "Two Butlers talked 6 turns without a human, so I paused thread $gt (" .. HOME .. ") to avoid ping-pong. No action needed; reply in that thread only if you want it to continue."
     rx_post_http(path, function(calls)
+      -- One Butler's consecutive reports are one turn, not six.
+      relay:subscribe_thread(HOME, "$gt-same")
+      local reports = {}
+      for i = 1, 8 do
+        reports[#reports + 1] = rx_msg("$gt-same-" .. i, RX_ALLY, "@bot:example.org report " .. i, rx_thread("$gt-same"))
+      end
+      rx_sync(client, HOME, reports)
+      assert(rx_find(delivered, "$gt-same-8"), "Butler reports in a followed thread are delivered")
+      assert(not relay:b2b_stopped(HOME, "$gt-same"),
+        "8 consecutive reports from ONE Butler do not consume turns")
+      assert(client:messages(HOME, "paused thread $gt-same (") == 0,
+        "one Butler's consecutive reports post no ping-pong line")
+      -- Alternating agents are real exchanges and reach the limit.
+      relay:subscribe_thread(HOME, "$gt-alt")
+      for i = 1, 6 do
+        rx_sync(client, HOME, { rx_msg("$gt-alt-" .. i, i % 2 == 1 and RX_ALLY or RX_PREFIX,
+          "@bot:example.org alt " .. i, rx_thread("$gt-alt")) })
+      end
+      assert(relay:b2b_stopped(HOME, "$gt-alt"),
+        "six messages alternating between DIFFERENT agents stop the thread")
+      assert(client:messages(HOME, "paused thread $gt-alt (") == 1,
+        "the alternating exchange posts ONE ping-pong line")
+
       rx_sync(client, HOME, { rx_msg("$gt", OWNER, "@bot:example.org and @agent-ally:example.org, talk") })
       relay:subscribe_thread(HOME, "$gt")
       for i = 1, 8 do
@@ -4453,12 +4506,16 @@ local function test_rx_b2b_turn_guard_home_line_once()
       assert(not relay:b2b_stopped(HOME, "$gt"), "our own reports do not start a peer-only streak")
       assert(client:messages(HOME, line) + rx_http_texts(calls, line) == 0,
         "normal progress reports do not announce a Butler ping-pong")
-      for i = 1, 5 do rx_sync(client, HOME, { rx_msg("$gt-a" .. i, RX_ALLY, "@bot:example.org turn " .. i, rx_thread("$gt")) }) end
+      -- Our reply between peer messages is a boundary, so each peer message is
+      -- a new turn; the reply itself neither increments nor resets it.
+      for i = 1, 5 do
+        rx_sync(client, HOME, { rx_msg("$gt-a" .. i, RX_ALLY, "@bot:example.org turn " .. i, rx_thread("$gt")) })
+        local result = rx_cli({ "matrix", "reply", "$gt-a" .. i, "my turn" })
+        assert(result.code == 0, "a reply after " .. tostring(i)
+          .. " peer turns is allowed: " .. tostring(result.stderr))
+      end
       assert(rx_find(delivered, "$gt-a5"), "Butler turns in a followed thread are delivered")
-      local result = rx_cli({ "matrix", "reply", "$gt-a5", "my turn" })
-      assert(result.code == 0, "a reply after five peer turns is allowed: "
-        .. tostring(result.stderr))
-      result = rx_cli({ "matrix", "reply", "$gt-a5", "one more" })
+      local result = rx_cli({ "matrix", "reply", "$gt-a5", "one more" })
       assert(result.code == 0 and not relay:b2b_stopped(HOME, "$gt"),
         "our own replies neither increment nor reset the five peer turns")
       rx_sync(client, HOME, { rx_msg("$gt-a6", RX_ALLY, "@bot:example.org turn 6", rx_thread("$gt")) })
@@ -4797,7 +4854,8 @@ local function test_rx_only_allowlisted_human_resumes_stopped_thread()
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
     rx_sync(client, HOME, { rx_msg("$sr", RX_ALLY, "@bot:example.org ping") })
-    rx_sync(client, HOME, { rx_msg("$sr-a2", RX_ALLY, "@bot:example.org again", rx_thread("$sr")) })
+    -- A different agent's reply is a real exchange (same-agent reports share one turn).
+    rx_sync(client, HOME, { rx_msg("$sr-a2", RX_PREFIX, "@bot:example.org again", rx_thread("$sr")) })
     local mail = rx_mail_id(delivered, "$sr-a2")
     assert(mail, "a Butler's thread reply in HOME is delivered")
     local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "R1", text = "reply-one" })
@@ -4846,9 +4904,10 @@ local function test_rx_hostile_thread_root_not_counted_no_forged_home_line()
     local relay, client = rx_relay(path)
     local n, problems = 0, {}
     local function turns(root)
-      for _ = 1, 2 do
+      for i = 1, 2 do
         n = n + 1
-        rx_sync(client, HOME, { rx_msg("$hr" .. n, RX_PREFIX, "@bot:example.org hello", rx_thread(root)) })
+        rx_sync(client, HOME, { rx_msg("$hr" .. n, i == 1 and RX_PREFIX or RX_ALLY,
+          "@bot:example.org hello", rx_thread(root)) })
       end
     end
     for _, case in ipairs({
@@ -4976,8 +5035,9 @@ local function test_rx_prefixed_stranger_counts_and_cannot_reset()
   rx_with_dir(dir, function()
     local relay, client = rx_relay(path)
     rx_sync(client, HOME, { rx_msg("$pt", RX_PREFIX, "@bot:example.org ping") })
-    rx_sync(client, HOME, { rx_msg("$pt-2", RX_PREFIX, "@bot:example.org again", rx_thread("$pt")) })
-    assert(relay:b2b_stopped(HOME, "$pt"), "two turns by a Butler-prefixed non-allowlisted sender stop the thread")
+    -- A different agent's message is the second real turn.
+    rx_sync(client, HOME, { rx_msg("$pt-2", RX_ALLY, "@bot:example.org again", rx_thread("$pt")) })
+    assert(relay:b2b_stopped(HOME, "$pt"), "two turns by Butler-prefixed senders stop the thread")
     rx_sync(client, HOME, { rx_msg("$pt-3", RX_PREFIX, "I am a person, please carry on", rx_thread("$pt")) })
     assert(relay:b2b_stopped(HOME, "$pt"), "a human-looking reply by that sender does not reset the count")
     rx_sync(client, HOME, { rx_msg("$pt-4", OWNER, "go on", rx_thread("$pt")) })
@@ -5090,7 +5150,8 @@ local function test_rx_link_like_root_counted_but_not_shown()
     local ending = "): 2 Butler-only turns. A reply in that thread from a person on the allowlist resumes it."
     local function two_turns(root, reply)
       rx_sync(client, HOME, { rx_msg(root, RX_ALLY, "@bot:example.org ping") })
-      rx_sync(client, HOME, { rx_msg(reply, RX_ALLY, "@bot:example.org again", rx_thread(root)) })
+      -- The second turn must come from a different agent to count.
+      rx_sync(client, HOME, { rx_msg(reply, RX_PREFIX, "@bot:example.org again", rx_thread(root)) })
       return relay:queue_mail_reply({ mail_id = rx_mail_id(delivered, reply), reply_mail_id = "R" .. reply, text = "x" })
     end
     rx_post_http(path, function()
@@ -6106,7 +6167,7 @@ rx_tests = {
   { "test_rx_untrusted_room_cap_logs_once_home_summary", test_rx_untrusted_room_cap_logs_once_home_summary },
   { "test_rx_invalid_sender_quarantined", test_rx_invalid_sender_quarantined },
   { "test_rx_untrusted_mention_does_not_follow", test_rx_untrusted_mention_does_not_follow },
-  { "test_rx_b2b_turn_guard_home_line_once", test_rx_b2b_turn_guard_home_line_once },
+  { "test_rx_b2b_turn_guard_counts_distinct_agents", test_rx_b2b_turn_guard_counts_distinct_agents },
   { "test_rx_posts_per_hour_cap", test_rx_posts_per_hour_cap },
   { "test_rx_untrusted_room_cap_summary_no_quarantine", test_rx_untrusted_room_cap_summary_no_quarantine },
   { "test_rx_untrusted_room_cap_summary_floor_10min", test_rx_untrusted_room_cap_summary_floor_10min },
@@ -6125,6 +6186,45 @@ rx_tests = {
   { "test_rx_reply_to_allowlisted_human_takes_no_post_slot", test_rx_reply_to_allowlisted_human_takes_no_post_slot },
   { "test_rx_post_cap_home_line_once_per_hour", test_rx_post_cap_home_line_once_per_hour },
   { "test_rx_link_like_root_counted_but_not_shown", test_rx_link_like_root_counted_but_not_shown },
+  -- Explicit unfollow mutes unmentioned thread replies even in HOME's all mode.
+  -- A mention still delivers that message once but never re-follows the thread;
+  -- the marker survives restart and an explicit follow restores delivery.
+  { "test_rx_unfollow_mutes_thread_replies_in_all", function()
+    local dir, path = rx_fixture()
+    rx_with_dir(dir, function()
+      local relay, client, delivered = rx_relay(path)
+      rx_sync(client, HOME, { rx_msg("$uf-t0", OWNER, "thread reply", rx_thread("$uf-root")) })
+      assert(rx_find(delivered, "$uf-t0"),
+        "HOME all delivers an unmentioned reply in a thread that was never unfollowed")
+      relay:subscribe_thread(HOME, "$uf-root")
+      rx_sync(client, HOME, { rx_msg("$uf-t1", OWNER, "followed reply", rx_thread("$uf-root")) })
+      assert(rx_find(delivered, "$uf-t1"), "a followed thread delivers in HOME all")
+      relay:unsubscribe_thread(HOME, "$uf-root")
+      rx_sync(client, HOME, { rx_msg("$uf-t2", OWNER, "unmentioned after unfollow", rx_thread("$uf-root")) })
+      assert(not rx_find(delivered, "$uf-t2"),
+        "unfollow mutes an unmentioned thread reply even in HOME's default all policy")
+      rx_sync(client, HOME, { rx_msg("$uf-t3", OWNER, "@bot:example.org mention after unfollow",
+        rx_thread("$uf-root")) })
+      assert(rx_find(delivered, "$uf-t3"),
+        "a mention in an unfollowed thread still delivers that message")
+      assert(not rx_followed(relay, HOME, "$uf-root"),
+        "the delivered mention does not re-follow the explicitly unfollowed thread")
+      rx_sync(client, HOME, { rx_msg("$uf-t4", OWNER, "later unmentioned reply", rx_thread("$uf-root")) })
+      assert(not rx_find(delivered, "$uf-t4"), "a later unmentioned reply stays muted")
+      relay:subscribe_thread(HOME, "$uf-root")
+      rx_sync(client, HOME, { rx_msg("$uf-t5", OWNER, "after explicit follow", rx_thread("$uf-root")) })
+      assert(rx_find(delivered, "$uf-t5"), "an explicit follow restores delivery")
+      relay:unsubscribe_thread(HOME, "$uf-restart")
+      relay:stop()
+      local again, client2, delivered2 = rx_relay(path)
+      assert((((again:state().unfollowed or {})[HOME] or {})["$uf-restart"] ~= nil),
+        "the unfollow marker is persisted in relay state")
+      rx_sync(client2, HOME, { rx_msg("$uf-r1", OWNER, "after restart", rx_thread("$uf-restart")) })
+      assert(not rx_find(delivered2, "$uf-r1"),
+        "an unmentioned reply in the unfollowed thread is suppressed after restart")
+      again:stop()
+    end)
+  end },
   { "test_inbox_header_names_room_and_thread", ctx_tests.test_inbox_header_names_room_and_thread },
   { "test_matrix_thread_takes_room_from_route", ctx_tests.test_matrix_thread_takes_room_from_route },
   { "test_matrix_thread_takes_a_mail_id", ctx_tests.test_matrix_thread_takes_a_mail_id },
