@@ -1415,9 +1415,6 @@ local function native_row(session, native, options)
   if id ~= native.row_id then return nil, "stale_binding" end
   return row
 end
-local DEAD_BUILD_REASONS = { invalid_binding = true, invalid_nonce = true,
-  invalid_session = true, invalid_instance = true }
-
 local function native_target(session, native, still_current)
   local row, row_why = native_row(session, native)
   if not row then
@@ -1431,28 +1428,6 @@ local function native_target(session, native, still_current)
     if not ok or current ~= true then return false, "journal_generation_changed" end
   end
   return row
-end
-
-local function native_request(native, text, ids, request_id)
-  local dispatch = remuda.butler and remuda.butler.native_dispatch
-  if not dispatch or type(dispatch.build) ~= "function" then
-    return nil, nil, "native_uncertain: dispatch_unavailable"
-  end
-  if type(request_id) ~= "string" or request_id == "" then
-    return nil, nil, "native_not_written: request_id_unavailable"
-  end
-  local request, why = dispatch.build({ binding = native.path, nonce = native.nonce,
-    session = native.session_token or native.row_id, instance = native.instance,
-    request_id = request_id, text = text, message_ids = ids })
-  if not request then
-    -- A broken binding target disables the session; anything else is a local
-    -- preflight refusal that wrote nothing and may use the bounded schedule.
-    if DEAD_BUILD_REASONS[why] then
-      return nil, nil, "native_dead: " .. tostring(why)
-    end
-    return nil, nil, "native_not_written: " .. tostring(why)
-  end
-  return request, dispatch
 end
 
 local function startup_window(kind)
@@ -1508,65 +1483,133 @@ end
 
 -- One helper invocation; every response is mapped to the existing notice
 -- outcome classes. Never a PTY fallback and never a guessed success.
-local function native_notice_send(session, native, text, ids, still_current, request_id)
-  local row, target_why = native_target(session, native, still_current)
-  if not row then return false, target_why end
-  local request, dispatch, request_why = native_request(native, text, ids, request_id)
-  if not request then return false, request_why end
-  local result = dispatch.dispatch(request, { json = remuda.json,
-    runner = remuda.process and remuda.process.run, remuda = "remuda",
-    kind = native.kind })
-  local sent, why = native_outcome(result, native)
+local function native_typed_outcome(result, adapter)
+  local sent, why = native_outcome(result, adapter.native)
   -- Clear the fresh-launch marker only on a proven typed answer (accepted or a
   -- real dead/not-written refusal). An uncertain runner/spawn failure says
   -- nothing about publication, and a pending answer keeps waiting.
   local typed = sent or tostring(why):find("^native_dead:", 1) ~= nil
     or tostring(why):find("^native_not_written:", 1) ~= nil
-  if typed then clear_publication_wait(session, native) end
+  if typed then clear_publication_wait(adapter.session, adapter.native) end
   return sent, why
 end
--- The dialogs module's narrow automatic-wakeup capability is the only path
--- that bypasses the modal prediction gate. Without that module (isolated
--- tests or an older image) the raw core word is used after the same
--- live-session/bound-instance preflight and, when supplied, the generation
--- fence. Attachment itself is not an admission gate.
-local function notice_send(session, text, ids, still_current, frozen_native, request_id)
-  -- Only the frozen decision can select native: a mode change during the
-  -- journal write must never turn this attempt into a PTY write.
-  local native = frozen_native
-  if native and native.mode == "native" then
-    return native_notice_send(session, native, text, ids, still_current, request_id)
-  end
-  local dialogs = remuda.butler and remuda.butler.dialogs
-  if dialogs and type(dialogs.automatic_notice_send) == "function" then
-    local ok, sent, reason = pcall(dialogs.automatic_notice_send, session, text, ids, still_current)
-    if not ok then return false, tostring(sent) end
-    return sent == true, reason
-  end
-  local agent = bus.agents[session]
-  if not agent then return false, "session_unknown" end
-  local row
-  for _, candidate in ipairs(remuda.ls()) do
-    if candidate.name == session then row = candidate end
-  end
-  if not row or not row.alive then return false, "session_not_live" end
-  local expected, actual = agent.instance_id, row.instance_id
-  if type(expected) == "string" and expected ~= "" then
-    -- A bound instance with no readable row instance cannot be verified.
-    if type(actual) ~= "string" or actual == "" then return false, "session_instance_missing" end
-    if actual ~= expected then return false, "session_replaced" end
-  end
-  if type(remuda.send) ~= "function" then return false, "send_unavailable" end
-  if type(still_current) == "function" then
-    local ok_guard, current = pcall(still_current, { recipient_id = agent.id,
-      agent_instance = agent.instance_id, instance = actual, row_id = row.id })
-    if not ok_guard or current ~= true then return false, "journal_generation_changed" end
-  end
-  local ok, result, detail = pcall(remuda.send, session, text)
-  if ok and result ~= false then return true end
-  if ok then return false, "send_refused: " .. tostring(detail or result or "refused") end
-  return false, tostring(result or "send error")
+
+local function notice_seam(session, pending)
+  return {
+    -- A pending delegated task owns the PTY pane, never a native helper queue.
+    blocked = function(route)
+      return bus.pending_tasks[session] ~= nil and route ~= "native"
+    end,
+    unavailable = function(reason, detail)
+      if reason == "native_disabled" or reason == "native_state_unavailable"
+          or reason == "native_kind_unavailable" then
+        return defer_notice_send(session, pending, "native_disabled",
+          detail or reason)
+      end
+      return defer_notice_send(session, pending, "journal", detail or reason)
+    end,
+    reserve = function(adapter)
+      local state = { count = pending.count, message_ids = {} }
+      for _, id in ipairs(pending.message_order or {}) do
+        state.message_ids[#state.message_ids + 1] = id
+      end
+      local text = adapter.route == "native" and native_notice_text(pending)
+        or pending_notice_text(pending)
+      local live = bus.agents[session]
+      local snapshot = notice_attempt_snapshot(session, state, text,
+        live and live.native or nil)
+      if not snapshot then return nil, "journal_generation_changed" end
+      local entry, journal_why, journal = notice_journal_begin(session, state,
+        text, snapshot)
+      if not entry then return nil, journal_why end
+      local function still_current(observed)
+        return notice_attempt_current(journal, entry, snapshot, observed)
+      end
+      return { text = text, ids = state.message_ids, state = state,
+        request_id = snapshot.request_id, still_current = still_current,
+        entry = entry, journal = journal, snapshot = snapshot,
+        target = function(a) return native_target(session, a.native, still_current) end }
+    end,
+    native_outcome = native_typed_outcome,
+    resolve = function(sent, why, adapter, attempt)
+      local entry, journal, state = attempt.entry, attempt.journal, attempt.state
+      if sent then
+        local recorded, record_err = notice_journal_accepted(entry, journal)
+        if not recorded then
+          notice_journal_resolve_failed(session, state.message_ids, "accepted", record_err)
+        end
+        return complete_notice_recovery(session, state)
+      end
+      local kind = notice_send_error_kind(why)
+      if kind == "uncertain" then
+        local recorded, record_err = notice_journal_uncertain(entry, why, journal)
+        if not recorded then
+          notice_journal_resolve_failed(session, state.message_ids, "uncertain", record_err)
+        end
+        return notice_delivery_uncertain(session, state, why)
+      end
+      -- Everything else provably wrote nothing, so its reservation is released.
+      if kind == "native_dead" then
+        local released, release_err = notice_journal_abandon(entry, journal)
+        if not released then
+          notice_journal_resolve_failed(session, state.message_ids, "release", release_err)
+        end
+        if disable_native_if_current(session, attempt.snapshot, why) then
+          return defer_notice_send(session, pending, "native_disabled", why)
+        end
+        return defer_notice_send(session, pending, "target_changed", why)
+      end
+      if kind == "native_pending" or kind == "native_not_written" then
+        local released, release_err = notice_journal_abandon(entry, journal)
+        if not released then
+          notice_journal_resolve_failed(session, state.message_ids, "release", release_err)
+        end
+        if kind == "native_pending" then
+          return defer_notice_send(session, pending, "native_pending", why)
+        end
+        return notice_recovery_error(session, state, why)
+      end
+      if kind == "journal" and why and tostring(why):find("journal_generation_changed", 1, true) then
+        -- An invalidated attempt stays reserved. If this journal object is still the
+        -- owner, mark it UNCERTAIN now; a replacement journal already recovered it
+        -- from DISPATCHING on load, so never retire or abandon it here.
+        local mutable = notice_journal_mutable(journal, entry)
+        if mutable then pcall(journal.mark, entry, "uncertain", "journal_generation_changed") end
+        return defer_notice_send(session, pending, "journal", "journal_generation_changed")
+      end
+      local released, release_err = notice_journal_abandon(entry, journal)
+      if not released then
+        notice_journal_resolve_failed(session, state.message_ids, "release", release_err)
+        return defer_notice_send(session, pending, "journal", release_err)
+      end
+      if kind == "busy" or kind == "transport_attached" or kind == "dialog" or kind == "rate" then
+        return defer_notice_send(session, pending, kind, why)
+      end
+      -- not_typed / gone: nothing was written, so the bounded schedule owns it.
+      return notice_recovery_error(session, state,
+        kind == "gone" and "the recipient session is gone" or "the notice write was abandoned before typing")
+    end,
+  }
 end
+-- The common policy binds this exact notice image once. The factory closes
+-- over the live journal/current/outcome functions, so a caller can never pass
+-- substitute reservation callbacks through the public admission entrypoint.
+local function policy_make_seam(session)
+  local pending = bus.notices[session]
+  if not pending then return nil end
+  return notice_seam(session, pending)
+end
+
+local function bind_send_policy()
+  local policy = remuda.butler and remuda.butler.send_policy
+  if not policy or type(policy.bind) ~= "function" then return false end
+  if policy.bind(NOTICE_MODULE, policy_make_seam) then
+    NOTICE_MODULE._policy_bound = true
+    return true
+  end
+  return false
+end
+
 -- One send per coalesced notice. No screen parsing, no composer prediction,
 -- no modal prediction, no Return retry: the live-session/bound-instance
 -- preflight, the generation fence and the core's in-flight write guard decide.
@@ -1576,89 +1619,16 @@ local function deliver_notice(session)
   pending = refresh_pending_notice(session, pending)
   pending = pending and pending_without_reserved(session, pending)
   if not pending then return true end
-  local native = native_state(session)
-  if native and native.mode == "disabled" then
-    return defer_notice_send(session, pending, "native_disabled",
-      native.reason or "native delivery is disabled")
+  -- The common policy runs one OODA pass: observe -> decide -> construct one
+  -- typed adapter frozen for this incarnation -> reserve the existing journal
+  -- attempt -> act -> resolve through the existing outcome seam. A missing
+  -- policy is an explicit pre-write refusal: there is no alternate path.
+  local policy = remuda.butler and remuda.butler.send_policy
+  if not policy or type(policy.send_message) ~= "function" then
+    return defer_notice_send(session, pending, "journal", "send_policy_unavailable")
   end
-  -- A pending delegated task owns the PTY pane; it does not own a native
-  -- helper queue. Native delivery is never deferred behind task typing.
-  if bus.pending_tasks[session] and not (native and native.mode == "native") then
-    return false
-  end
-  local state = { count = pending.count, message_ids = {} }
-  for _, id in ipairs(pending.message_order or {}) do state.message_ids[#state.message_ids + 1] = id end
-  local text = native and native_notice_text(pending) or pending_notice_text(pending)
-  -- DISPATCHING is persisted before any bytes are written; without that write
-  -- there is no dispatch at all (no PTY bypass).
-  local snapshot = notice_attempt_snapshot(session, state, text, native)
-  if not snapshot then
-    return defer_notice_send(session, pending, "journal", "journal_generation_changed")
-  end
-  local entry, journal_why, journal = notice_journal_begin(session, state, text, snapshot)
-  if not entry then
-    return defer_notice_send(session, pending, "journal", journal_why)
-  end
-  local function still_current(observed)
-    return notice_attempt_current(journal, entry, snapshot, observed)
-  end
-  local sent, why = notice_send(session, text, state.message_ids, still_current,
-    snapshot.native, snapshot.request_id)
-  if sent then
-    local recorded, record_err = notice_journal_accepted(entry, journal)
-    if not recorded then
-      notice_journal_resolve_failed(session, state.message_ids, "accepted", record_err)
-    end
-    return complete_notice_recovery(session, state)
-  end
-  local kind = notice_send_error_kind(why)
-  if kind == "uncertain" then
-    local recorded, record_err = notice_journal_uncertain(entry, why, journal)
-    if not recorded then
-      notice_journal_resolve_failed(session, state.message_ids, "uncertain", record_err)
-    end
-    return notice_delivery_uncertain(session, state, why)
-  end
-  -- Everything else provably wrote nothing, so its reservation is released.
-  if kind == "native_dead" then
-    local released, release_err = notice_journal_abandon(entry, journal)
-    if not released then
-      notice_journal_resolve_failed(session, state.message_ids, "release", release_err)
-    end
-    if disable_native_if_current(session, snapshot, why) then
-      return defer_notice_send(session, pending, "native_disabled", why)
-    end
-    return defer_notice_send(session, pending, "target_changed", why)
-  end
-  if kind == "native_pending" or kind == "native_not_written" then
-    local released, release_err = notice_journal_abandon(entry, journal)
-    if not released then
-      notice_journal_resolve_failed(session, state.message_ids, "release", release_err)
-    end
-    if kind == "native_pending" then
-      return defer_notice_send(session, pending, "native_pending", why)
-    end
-    return notice_recovery_error(session, state, why)
-  end
-  if kind == "journal" and why and tostring(why):find("journal_generation_changed", 1, true) then
-    -- An invalidated attempt stays reserved. If this journal object is still the
-    -- owner, mark it UNCERTAIN now; a replacement journal already recovered it
-    -- from DISPATCHING on load, so never retire or abandon it here.
-    local mutable = notice_journal_mutable(journal, entry)
-    if mutable then pcall(journal.mark, entry, "uncertain", "journal_generation_changed") end
-    return defer_notice_send(session, pending, "journal", "journal_generation_changed")
-  end
-  local released, release_err = notice_journal_abandon(entry, journal)
-  if not released then
-    notice_journal_resolve_failed(session, state.message_ids, "release", release_err)
-    return defer_notice_send(session, pending, "journal", release_err)
-  end
-  if kind == "busy" or kind == "transport_attached" or kind == "dialog" or kind == "rate" then
-    return defer_notice_send(session, pending, kind, why)
-  end
-  -- not_typed / gone: nothing was written, so the bounded schedule owns it.
-  return notice_recovery_error(session, state,
-    kind == "gone" and "the recipient session is gone" or "the notice write was abandoned before typing")
+  if not NOTICE_MODULE._policy_bound then bind_send_policy() end
+  return policy.send_message(session, "mail_notice")
 end
 -- The poll and the debounce timers share this check.
 local function deliver_due_notice(session, now)
@@ -2218,3 +2188,4 @@ NOTICE_MODULE.native_publication = native_publication
 NOTICE_MODULE.remind_unread_notices = remind_unread_notices
 NOTICE_MODULE.complete_notice_recovery = complete_notice_recovery
 remuda._butler_notice = NOTICE_MODULE
+bind_send_policy()

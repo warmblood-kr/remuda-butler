@@ -684,6 +684,7 @@ remuda._butler_launch_config = { bus = bus,
   startup_action_safe = function(...) return startup_action_safe(...) end }
 remuda.exec("butler/native_config")
 remuda.exec("butler/native_dispatch")
+remuda.exec("butler/send_policy")
 remuda.exec("butler/native_launch")
 remuda.butler.native_launch.install({ paths = remuda._butler_paths,
   config = remuda.butler.native_config, json = remuda.json,

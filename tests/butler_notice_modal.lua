@@ -41,6 +41,7 @@ remuda._butler_notice_config = {
 }
 dofile('tests/notice_journal_stub.lua')
 dofile('packages/butler/notice.lua')
+dofile("tests/notice_policy_stub.lua")
 remuda._butler_send = function() return 'queued' end
 local N = remuda._butler_notice
 local MODAL = 'Do you want to proceed?\n❯ 1. Yes\n2. No\n'

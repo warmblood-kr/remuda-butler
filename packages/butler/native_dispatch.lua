@@ -305,7 +305,7 @@ end
 -- A nonzero exit, timeout or missing runner is never "nothing was written":
 -- the helper may have POSTed before it died, so it is uncertain and never
 -- retried automatically.
-function M.dispatch(request, options)
+local function run_dispatch(request, options)
   options = options or {}
   local kind = options.kind or "opencode"
   local verb = VERBS[kind]
@@ -319,6 +319,65 @@ function M.dispatch(request, options)
   local result, run_outcome = run_helper(runner, text, options, verb)
   if not result then return run_outcome end
   return result_outcome(result, options)
+end
+
+-- The transport dependencies are bound here, never supplied by a producer:
+-- runner, JSON codec and helper name come from this image. `install` is a
+-- one-shot load-time handoff to the common policy and closes itself; the
+-- returned per-kind factory mints attempts tracked in a private weak map and
+-- executes each at most once. This is a product-path guard, not same-account
+-- security isolation.
+local attempts = setmetatable({}, { __mode = "k" })
+local installed = false
+
+local function channel_for(kind)
+  if not VERBS[kind] then return nil, "invalid_kind" end
+  return {
+    prepare = function(fields)
+      local request, why = M.build(fields)
+      if not request then return nil, why end
+      local attempt = { request = request, kind = kind, used = false }
+      attempts[attempt] = true
+      return attempt
+    end,
+    send = function(attempt, guard)
+      if type(attempt) ~= "table" or not attempts[attempt]
+          or attempt.used or attempt.kind ~= kind then
+        return { outcome = "not_written", reason = "policy_attempt_required" }
+      end
+      if type(guard) ~= "function" then
+        return { outcome = "not_written", reason = "policy_guard_required" }
+      end
+      local ok, current = pcall(guard)
+      if not ok or current ~= true then
+        return { outcome = "not_written", reason = "policy_attempt_stale" }
+      end
+      attempt.used = true
+      attempts[attempt] = nil
+      return run_dispatch(attempt.request, {
+        json = remuda.json,
+        runner = remuda.process and remuda.process.run,
+        remuda = "remuda", kind = kind })
+    end,
+  }
+end
+
+-- Load-time one-shot handoff: only the module already installed as the common
+-- policy may take the factory, and the door is removed afterwards.
+function M.install(policy)
+  if installed or not remuda.butler or remuda.butler.send_policy ~= policy then
+    return nil
+  end
+  installed = true
+  M.install = nil
+  return channel_for
+end
+
+-- Compatibility refusal for older direct callers. It deliberately ignores
+-- every argument: no request, runner, options or shape field is read, and it
+-- never dispatches. The product path is the policy-owned factory above.
+function M.admit()
+  return { outcome = "not_written", reason = "policy_attempt_required" }
 end
 
 M.DEFAULT_TIMEOUT = DEFAULT_TIMEOUT
