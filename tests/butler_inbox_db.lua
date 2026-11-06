@@ -153,9 +153,38 @@ local commit_db = fake_db({ reason = "full", fail = function(sql) return sql == 
 local retrying = load(function() return commit_db end, root)
 assert(retrying.import_all() == nil, "a failed commit is not success")
 assert(commit_db.offsets["612f62:inbox"] == nil, "a failed commit does not advance the offset")
+assert(retrying.status().imported_bytes == 0,
+  "a failed commit counts no imported bytes")
 commit_db.fail = nil
 assert(retrying.import_all() == true, "the retry succeeds")
 assert(commit_db.offsets["612f62:inbox"] ~= nil, "the retry advances the offset")
+
+-- An unreadable log is an error, not an absent file: EACCES must not silently
+-- become an empty import.
+local real_open = io.open
+io.open = function(path, mode)
+  if path == root .. "/inboxes/denied.jsonl" then
+    return nil, "Permission denied", 13
+  end
+  return real_open(path, mode)
+end
+remuda.list_dir = function(path)
+  if path == root .. "/inboxes" then return { "denied.jsonl" } end
+  if path == root .. "/read" then return {} end
+  error("missing: " .. path)
+end
+local denied_db = fake_db()
+local denied_import = load(function() return denied_db end, root)
+assert(denied_import.import_all() == nil, "EACCES is not a fresh import")
+assert(tostring(denied_import.status().error):find("Permission denied", 1, true),
+  "the open failure names permission, not absence")
+io.open = real_open
+
+-- Restore the original directory scan for the remaining cases.
+remuda.list_dir = function(path)
+  if path == root .. "/inboxes" then return { "612f62.jsonl", "notes.txt" } end
+  error("missing: " .. path)
+end
 
 -- A same-size replacement with a different prefix is detected by the head
 -- fingerprint and rebuilt rather than trusted as an append.

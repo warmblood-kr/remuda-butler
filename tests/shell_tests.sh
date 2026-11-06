@@ -47,6 +47,12 @@ run() { # name command...
   local log="$T/$1.log"
   if (cd "$REPO" && "${@:2}") >"$log" 2>&1; then echo "PASS $1"; grep -E "^(codexless subset|NOTE)" "$log" || true; else echo "FAIL $1"; tail -20 "$log"; failed+=("$1"); fi
 }
+if [[ $mode == policy ]]; then
+  # Pure-Lua unit tests stay on pull requests even though the broader Lua
+  # corpus needs a pinned daemon. The inbox shadow is new code; a policy run
+  # that never executes it would report green without testing it.
+  run butler_inbox_db.lua luajit "tests/butler_inbox_db.lua"
+fi
 if [[ $mode == all ]]; then
 for lua in "$REPO"/tests/*.lua; do
   # session_tree.lua needs a live daemon's _butler_bus; session_tree.sh runs it.
