@@ -88,19 +88,27 @@ end
 function remuda._butler_sessions()
   -- main.lua reassigns its butler_attempts with this global; read it late.
   local butler_attempts = remuda._butler_attempts or {}
+  -- One list read keeps the ACTIVITY column and the session detail on the same
+  -- snapshot. Without the row's instance_id, a reused name is not enriched.
+  local live = {}
+  local listed = remuda.session and remuda.session.list
+  if type(listed) == "function" then
+    local ok, sessions = pcall(listed)
+    if ok and type(sessions) == "table" then
+      for _, session in ipairs(sessions) do live[session.name] = session end
+    end
+  end
   local rows = {}
   for _, item in ipairs(team_order()) do
     local agent = bus.agents[item.id]
-    -- Reuse the session detail hook's adapter signals. Do not infer agent
-    -- activity from whether the PTY child is alive: a live process can be
-    -- waiting for the owner, and a quiet screen can be unrecognised.
+    local session = live[item.id] or { name = item.id }
     local activity = "other"
     if type(remuda.session_detail) == "function" then
-      local ok, detail = pcall(remuda.session_detail, { name = item.id })
+      local ok, detail = pcall(remuda.session_detail, session)
       if ok and type(detail) == "string" then
-        local word = detail:match("^([^ ]+) · ")
+        local word = detail:match("^(.-) · ")
         if word == "working" or word == "idle" or word == "other" then activity = word end
-        if detail:match("^needs you · ") then activity = "needs you" end
+        if word == "needs you" then activity = "needs you" end
       end
     end
     rows[#rows + 1] = string.rep(" ", item.indent * 2) .. (item.orphan and "[orphan] " or "")
