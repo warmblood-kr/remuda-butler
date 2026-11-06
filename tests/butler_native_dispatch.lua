@@ -25,8 +25,33 @@ local codec = {
   decode = function(text) return assert(loadstring("return " .. text))() end,
 }
 
-remuda = {}
+remuda = { json = codec }
 local module = dofile("packages/butler/native_dispatch.lua")
+local notice_generation = {}
+remuda._butler_notice = notice_generation
+remuda.butler = remuda.butler or {}
+local policy = {}
+remuda.butler.send_policy = policy
+local transport = assert(module.install(policy), "the policy takes the one-shot factory")
+local function fields_of(request)
+  return { binding = request.binding, nonce = request.nonce,
+    session = request.session, instance = request.instance,
+    request_id = request.request_id, text = request.text,
+    message_ids = request.message_ids }
+end
+local function admit(request, opts)
+  opts = opts or {}
+  remuda.json = opts.json or codec
+  remuda.process = opts.runner and { run = opts.runner } or nil
+  local channel, why = transport(opts.kind or "opencode")
+  if not channel then
+    if why == "invalid_kind" then return { outcome = "dead_binding", reason = why } end
+    return { outcome = "not_written", reason = why }
+  end
+  local claim, build_why = channel.prepare(fields_of(request))
+  if not claim then return { outcome = "not_written", reason = build_why } end
+  return channel.send(claim, function() return true end)
+end
 local options = { json = codec }
 
 local base = {
@@ -135,37 +160,37 @@ local runner = function(spec)
   seen = spec
   return { code = 0, stdout = codec.encode({ outcome = "accepted_queue" }), stderr = "" }
 end
-local result = module.dispatch(request, { json = codec, runner = runner, remuda = "/bin/remuda" })
+local result = admit(request, { json = codec, runner = runner, remuda = "/bin/remuda" })
 assert(result.outcome == "accepted", "dispatch accepted")
-assert(seen.argv[1] == "/bin/remuda" and seen.argv[2] == "_agent_notice" and #seen.argv == 2,
+assert(seen.argv[1] == "remuda" and seen.argv[2] == "_agent_notice" and #seen.argv == 2,
   "exact helper argv, no flags")
 assert(seen.stdin == encoded and seen.timeout == 15, "exact stdin and a modest timeout")
-local timeout = module.dispatch(request, { json = codec,
+local timeout = admit(request, { json = codec,
   runner = function() return { code = 0, timed_out = true } end })
 assert(timeout.outcome == "uncertain" and timeout.reason == "timeout", "timeout is uncertain")
-local exited = module.dispatch(request, { json = codec,
+local exited = admit(request, { json = codec,
   runner = function() return { code = 7, stdout = "" } end })
 assert(exited.outcome == "uncertain", "nonzero helper exit is uncertain")
-local threw = module.dispatch(request, { json = codec,
+local threw = admit(request, { json = codec,
   runner = function() error("spawn failed") end })
 assert(threw.outcome == "uncertain", "spawn failure is uncertain")
-local no_runner = module.dispatch(request, { json = codec, runner = nil,
+local no_runner = admit(request, { json = codec, runner = nil,
   process = nil })
 assert(no_runner.outcome == "uncertain", "missing runner is uncertain")
 
 -- 5b. A completed nonzero with a typed refusal is authoritative; accepted or
 -- untyped output on nonzero stays uncertain.
-local refused = module.dispatch(request, { json = codec, runner = function()
+local refused = admit(request, { json = codec, runner = function()
   return { code = 1, stdout = codec.encode({ outcome = "definitely_not_written",
     reason = "wrapper_gone" }), stderr = "" }
 end })
 assert(refused.outcome == "dead_binding" and refused.reason == "wrapper_gone",
   "a typed refusal on nonzero is honored")
-local accepted_nonzero = module.dispatch(request, { json = codec, runner = function()
+local accepted_nonzero = admit(request, { json = codec, runner = function()
   return { code = 1, stdout = codec.encode({ outcome = "accepted_queue" }), stderr = "" }
 end })
 assert(accepted_nonzero.outcome == "uncertain", "accepted on nonzero is never accepted")
-local untyped = module.dispatch(request, { json = codec, runner = function()
+local untyped = admit(request, { json = codec, runner = function()
   return { code = 2, stdout = "boom", stderr = "boom" }
 end })
 assert(untyped.outcome == "uncertain" and untyped.reason == "helper_exit_2",
@@ -179,7 +204,7 @@ local huge_request = module.build({ binding = base.binding, nonce = base.nonce,
   text = "600 new Butler messages arrived. Read them: MCP butler_inbox (or remuda butler inbox)",
   message_ids = huge })
 assert(huge_request, "the request builder itself has no small count cap")
-local huge_result = module.dispatch(huge_request, { json = codec,
+local huge_result = admit(huge_request, { json = codec,
   runner = function() error("must not run") end })
 assert(huge_result.outcome == "not_written" and huge_result.reason == "request_too_large",
   "an oversized wire request is a proven pre-write refusal")
@@ -191,7 +216,7 @@ assert(module.verb("opencode") == "_agent_notice"
   and module.verb("ruby") == nil, "the verb map is closed and fixed")
 local function kind_case(kind, payload)
   local spec
-  local outcome = module.dispatch(request, { json = codec, kind = kind,
+  local outcome = admit(request, { json = codec, kind = kind,
     runner = function(value) spec = value
       return { code = 0, stdout = codec.encode(payload) } end })
   return outcome, spec
@@ -200,7 +225,7 @@ local codex_accepted, codex_spec = kind_case("codex", { outcome = "accepted_queu
 assert(codex_accepted.outcome == "accepted" and codex_spec.argv[2] == "_codex_notice"
   and #codex_spec.argv == 2, "Codex uses only _codex_notice")
 local claude_spec
-local claude_accepted = module.dispatch(request, { json = codec, kind = "claude",
+local claude_accepted = admit(request, { json = codec, kind = "claude",
   runner = function(value) claude_spec = value
     return { code = 0, stdout = codec.encode({ outcome = "accepted_queue" }) } end })
 assert(claude_accepted.outcome == "uncertain" and claude_spec.argv[2] == "_claude_notice",
@@ -225,9 +250,40 @@ local claude_dead = kind_case("claude", { outcome = "definitely_not_written",
   reason = "bridge_gone" })
 assert(claude_dead.outcome == "dead_binding", "a gone Claude channel is a dead binding")
 local ran = false
-local bad_kind = module.dispatch(request, { json = codec, kind = "ruby",
+local bad_kind = admit(request, { json = codec, kind = "ruby",
   runner = function() ran = true end })
 assert(bad_kind.outcome == "dead_binding" and bad_kind.reason == "invalid_kind" and not ran,
   "an unknown kind fails closed before any command")
+
+-- The raw dispatch/runner entrypoint is deliberately not exported, the
+-- one-shot factory is consumed, and a forged shape attempt cannot run a runner.
+assert(module.dispatch == nil, "no raw dispatch export")
+assert(module.install == nil, "the one-shot factory door is closed")
+local forged_calls = 0
+local forged = module.admit(request, { json = codec,
+  runner = function() forged_calls = forged_calls + 1 end },
+  { intent = "mail_notice", generation = notice_generation, record = {} })
+assert(forged_calls == 0 and forged.outcome == "not_written"
+  and forged.reason == "policy_attempt_required",
+  "forged shape fields and a caller runner never dispatch")
+local channel = assert(transport("opencode"))
+local untracked_calls = 0
+remuda.process = { run = function() untracked_calls = untracked_calls + 1 end }
+local untracked = channel.send({ request = request, kind = "opencode", used = false },
+  function() return true end)
+assert(untracked_calls == 0 and untracked.outcome == "not_written"
+  and untracked.reason == "policy_attempt_required",
+  "an untracked attempt table never runs the helper")
+local reused_claim = assert(channel.prepare(fields_of(request)))
+remuda.process = { run = function()
+  return { code = 0, stdout = codec.encode({ outcome = "accepted_queue" }), stderr = "" }
+end }
+assert(channel.send(reused_claim, function() return true end).outcome == "accepted",
+  "a tracked attempt dispatches once")
+local reused_calls = 0
+remuda.process = { run = function() reused_calls = reused_calls + 1 end }
+local reused = channel.send(reused_claim, function() return true end)
+assert(reused_calls == 0 and reused.outcome == "not_written"
+  and reused.reason == "policy_attempt_required", "an attempt is one-use")
 
 print("ok - native request is frozen, validated and mapped without guessing")

@@ -121,6 +121,7 @@ remuda.ls = function() return { { name = "lead", alive = true, attached = false,
 dofile("tests/notice_journal_stub.lua")
 dofile("packages/butler/native_dispatch.lua")
 dofile("packages/butler/native_launch.lua")
+dofile("packages/butler/send_policy.lua")
 dofile("packages/butler/notice.lua")
 local alerts, spawns = {}, {}
 remuda._butler_send = function(_, to, body)

@@ -38,6 +38,7 @@ remuda = {
 }
 dofile("tests/notice_journal_stub.lua")
 dofile("packages/butler/notice.lua")
+dofile("tests/notice_policy_stub.lua")
 remuda._butler_send = function() end
 local deliver = remuda._butler_notice.deliver_notice
 

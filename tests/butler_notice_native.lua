@@ -73,11 +73,15 @@ remuda = {
 dofile("tests/notice_journal_stub.lua")
 dofile("packages/butler/native_dispatch.lua")
 dofile("packages/butler/native_launch.lua")
+dofile("packages/butler/send_policy.lua")
 dofile("packages/butler/notice.lua")
 remuda._butler_send = function(_, to, body)
   if to == "alice" then alerts[#alerts + 1] = body end
 end
 local N = remuda._butler_notice
+assert(remuda.butler.send_policy.construct == nil and remuda.butler.send_policy.observe == nil,
+  "the raw policy constructors stay private")
+assert(remuda._butler_notice._policy_bound, "the live notice image bound the policy once")
 
 local on_begin, on_ls, on_retire
 local function reset()
