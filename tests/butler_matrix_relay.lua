@@ -9105,6 +9105,18 @@ do
   remuda.butler.owner_input=previous
   assert(ok,err)
 end
+do
+  -- A future/unknown receipt authority must stop relay activation, not keep
+  -- serving JSON sends as if the mismatch were intentional.
+  pcall(relay_module.stop)
+  local previous = remuda._butler_relay_receipts
+  remuda._butler_relay_receipts = { authority_state = function() return "mismatch" end }
+  local started
+  local ok = pcall(function() started = relay_module.start({ config_path = "/nonexistent" }) end)
+  assert(ok and started == false, "mismatch must refuse relay activation")
+  assert(relay_module.instance == nil, "mismatch must not create an instance")
+  remuda._butler_relay_receipts = previous
+end
 print('ok: Matrix durable owner plaintext admission contract')
 
 -- Keep the isolated mail persistence fixture after all relay tests: it loads
