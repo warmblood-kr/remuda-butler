@@ -422,4 +422,36 @@ assert(native_entry.run({}, args, caller) == "ran", "the exported entry runs thr
 assert(forwarded.verb == "native" and forwarded.args == args and forwarded.caller == caller,
   "the exported entry forwards argv and caller unchanged")
 
+-- 10. The forwarded runner keeps the root-only caller check: an agent caller is
+-- refused before parsing, and the root Butler reaches the verb's own help.
+remuda.cli = { parse = function()
+  return { kind = "help", text = "Usage: remuda butler native adopt-codex ALIAS --socket PATH --thread UUID" }
+end }
+remuda.extension_command = function() end
+remuda.fail = function(text, code) return { text = text, code = code } end
+remuda._butler_contribute = function() end
+remuda.butler.typed_lines_cli = { cli = function() end }
+remuda.butler.approve_text = {}
+remuda.butler.schedule_cli = { cli = function() end }
+remuda.butler.matrix = { cli_usage = function() return "" end, cli = function() end }
+remuda.butler.approval = { cli = function() end }
+remuda._butler_commands_config = {
+  current_agent = function(caller) return caller and caller.agent end,
+  OPERATOR = "operator",
+  contributions = function() return {} end,
+  registry_list = function() return {} end,
+  statusline = function() end,
+  resolve_principal = function() return { tag = "unidentified" } end,
+  resolve = function(name) return name end,
+  mail = {},
+}
+dofile("packages/butler/commands.lua")
+local denied = remuda._butler_command_run("native", { "native", "adopt-codex", "m1" }, { agent = "worker" })
+assert(type(denied) == "table" and denied.code == 1
+  and tostring(denied.text):find("native adoption is an owner action", 1, true),
+  "an agent caller is refused the owner action")
+local owner_help = remuda._butler_command_run("native", { "native", "--help" }, { agent = "butler" })
+assert(type(owner_help) == "string" and owner_help:find("remuda butler native", 1, true),
+  "the root Butler reaches the native verb")
+
 print("ok - Codex and OpenCode adoption are fenced, opt-in and reported without endpoints")
