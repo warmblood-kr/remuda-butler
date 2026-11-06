@@ -900,6 +900,8 @@ function relay.new(options)
   if not cfg then error(config_error, 0) end
   local state_path, ack_path = config_path .. ".since", config_path .. ".acks"
   local state, state_error, quarantine_pruned = load_state(state_path, cfg.rooms)
+  local receipts_module = remuda._butler_relay_receipts
+  if receipts_module then pcall(receipts_module.import_all, state.reply_results) end
   if state_error then
     warn_once("state", state_path .. "\0" .. state_error,
       "butler invalid Matrix relay state; starting from a fresh baseline: " .. tostring(state_error))
@@ -1325,6 +1327,10 @@ function relay.new(options)
           trim_map(state.reply_results, MAX_REPLY_RESULTS, "completed_at")
           state.reply_outbox[reply_id] = nil
           persist()
+          local receipts_module = remuda._butler_relay_receipts
+          if receipts_module then
+            pcall(receipts_module.record, reply_id, item.txn_id, state.reply_results[reply_id])
+          end
           if callback then callback(state.reply_results[reply_id]) end
           return
         end
@@ -1341,6 +1347,10 @@ function relay.new(options)
         schedule_reply_retry(reply_id, math.min(60, 2 ^ math.min(6, item.attempts - 1)))
       end
       persist()
+      local receipts_module = remuda._butler_relay_receipts
+      if receipts_module and state.reply_results[reply_id] then
+        pcall(receipts_module.record, reply_id, item.txn_id, state.reply_results[reply_id])
+      end
       if callback then callback({ error = item.last_error, attempts = item.attempts }) end
     end)
   end
