@@ -185,12 +185,42 @@ local function choose(candidates, opts, done)
       end
       if type(argv) == "table" and argv[1] == executable then argv[1] = found end
     end
-    local ok, name, instance_id = pcall(remuda.new, opts.name, argv, opts.cwd, opts.env(id, spec))
+    local ok, name, instance_id = pcall(remuda.new, opts.name, argv, opts.cwd,
+      opts.env(id, spec), { remote_input_disabled = opts.remote_input_disabled == true })
     if not ok then
       attempt.reason, attempt.detail = "spawn_error", one_line(name)
       start_next(); return
     end
     if type(instance_id) ~= "string" or instance_id == "" then instance_id = nil end
+    -- An old daemon ignores the launch field and still answers success. Check
+    -- the listing before claiming the new instance is protected.
+    if opts.remote_input_disabled == true and instance_id then
+      local function protected()
+        local rows = remuda.session and remuda.session.list and remuda.session.list() or remuda.ls()
+        for _, candidate in ipairs(rows or {}) do
+          if candidate.name == name then
+            return candidate.instance_id == instance_id and candidate.remote_input_disabled == true
+          end
+        end
+        return false
+      end
+      local checked = protected()
+      -- A hosted launch or an old daemon may not carry the flag in its listing.
+      -- One exact-instance setter retry recovers the supported path; if it still
+      -- fails, report degraded and keep the sender gate closed.
+      if not checked and type(remuda.session and remuda.session.remote_input) == "function" then
+        pcall(remuda.session.remote_input, name, instance_id, false)
+        checked = protected()
+      end
+      bus.remote_input_unprotected = bus.remote_input_unprotected or {}
+      if checked then
+        bus.remote_input_unprotected[name] = nil
+      else
+        bus.remote_input_unprotected[name] = true
+        local trace = remuda._butler_session_trace or _G._butler_session_trace
+        if trace then pcall(trace, "leader_protection", name .. ": launch flag not visible") end
+      end
+    end
     attempt.instance_id = instance_id
     state = { id = id, entry = entry, attempt = attempt, name = name,
       instance_id = instance_id,

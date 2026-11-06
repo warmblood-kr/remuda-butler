@@ -13,6 +13,7 @@ remuda.exec = function(name, ...)
   if name == "butler/agents_launch" then
     remuda._butler_chooser.choose = function(order, opts, done)
       remuda._qa_order = table.concat(order, ",")
+      remuda._qa_remote_disabled = opts.remote_input_disabled
       return {}
     end
   end
@@ -30,6 +31,8 @@ T.test("fresh explicit codex captures actual main chooser order", function()
       .. ' .. "|order=" .. remuda._qa_order')
   T.eq(result, "requested=codex|record=codex|order=codex",
     "explicit CLI must be a strict singleton")
+  T.eq(T.eval('return tostring(remuda._qa_remote_disabled)'), "true",
+    "root launch asks for atomic remote-input protection")
 end)
 
 -- Helper-level branches: the real-main capture above proves the explicit
