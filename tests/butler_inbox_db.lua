@@ -19,20 +19,31 @@ local function report(subsystem, outcome, reason)
 end
 
 local function fake_db(options)
-  local db = { calls = {}, fail_insert = options and options.fail_insert, offsets = {} }
+  local db = { calls = {}, offsets = {}, in_tx = false, pending = {},
+    fail = options and options.fail, reason = options and options.reason }
   function db:exec(sql, params)
     db.calls[#db.calls + 1] = { sql = sql, params = params }
-    if db.fail_insert and sql:find("INSERT", 1, true) then error("synthetic disk full") end
+    if db.fail and db.fail(sql, params) then return nil, db.reason or "synthetic failure" end
+    if sql == "BEGIN IMMEDIATE" then db.in_tx, db.pending = true, {} return 1 end
+    if sql == "COMMIT" then
+      for key, value in pairs(db.pending) do db.offsets[key] = value end
+      db.in_tx, db.pending = false, {}
+      return 1
+    end
+    if sql == "ROLLBACK" then db.in_tx, db.pending = false, {} return 1 end
     if sql:find("INSERT OR REPLACE INTO import_state", 1, true) then
-      db.offsets[params[1] .. ":" .. params[2]] = params[3]
+      local target = db.in_tx and db.pending or db.offsets
+      target[params[1] .. ":" .. params[2]] = { offset = params[3], head = params[4] }
     end
     return 1
   end
   function db:query(sql, params)
     db.calls[#db.calls + 1] = { sql = sql, params = params }
+    if db.fail and db.fail(sql, params) then return nil, db.reason or "synthetic failure" end
     if sql:find("FROM import_state", 1, true) then
-      local offset = db.offsets[params[1] .. ":" .. params[2]]
-      if offset then return { { offset = offset } } end
+      local key = params[1] .. ":" .. params[2]
+      local entry = db.in_tx and db.pending[key] or db.offsets[key]
+      if entry then return { { offset = entry.offset, head = entry.head } } end
       return {}
     end
     return { { n = 1 } }
@@ -87,7 +98,8 @@ assert(read and read.params[1] == "612f62" and read.params[2] == "m2", "read row
 
 -- A DB write failure is diagnosed and returns nil, never escaping into mail.
 events = {}
-local broken = fake_db({ fail_insert = true })
+local broken = fake_db({ reason = "disk full",
+  fail = function(sql) return sql:find("INSERT", 1, true) ~= nil end })
 local failing = load(function() return broken end, nil)
 local ok, err = failing.deliver("agent", "m3")
 assert(ok == nil and tostring(err):find("disk full", 1, true), "write failure is returned")
@@ -135,6 +147,54 @@ assert(append:close())
 assert(imported.import_all() == true, "completed tail import succeeds")
 assert(count_calls(import_db, "INSERT OR IGNORE INTO deliveries") == 3,
   "the completed line is imported once")
+
+-- A failed COMMIT keeps the offset back with the rows: the retry re-imports.
+local commit_db = fake_db({ reason = "full", fail = function(sql) return sql == "COMMIT" end })
+local retrying = load(function() return commit_db end, root)
+assert(retrying.import_all() == nil, "a failed commit is not success")
+assert(commit_db.offsets["612f62:inbox"] == nil, "a failed commit does not advance the offset")
+commit_db.fail = nil
+assert(retrying.import_all() == true, "the retry succeeds")
+assert(commit_db.offsets["612f62:inbox"] ~= nil, "the retry advances the offset")
+
+-- A same-size replacement with a different prefix is detected by the head
+-- fingerprint and rebuilt rather than trusted as an append.
+local replaced = fake_db()
+local replacing = load(function() return replaced end, root)
+assert(replacing.import_all() == true, "replacement import succeeds")
+local before_delete = count_calls(replaced, "DELETE FROM deliveries")
+local long_id = string.rep("x", 80)
+put(root .. "/inboxes/612f62.jsonl",
+  '{"message_id":"' .. long_id .. '"}\n{"message_id":"m3"}\n')
+assert(replacing.import_all() == true, "long log import succeeds")
+before_delete = count_calls(replaced, "DELETE FROM deliveries")
+put(root .. "/inboxes/612f62.jsonl",
+  '{"message_id":"' .. string.rep("y", 80) .. '"}\n{"message_id":"m3"}\n')
+assert(replacing.import_all() == true, "replacement rebuild succeeds")
+assert(count_calls(replaced, "DELETE FROM deliveries") == before_delete + 1,
+  "a changed head rebuilds the delivery rows")
+
+-- A BEGIN failure is reported, not treated as an empty import.
+local begin_db = fake_db({ reason = "busy", fail = function(sql) return sql == "BEGIN IMMEDIATE" end })
+local busy = load(function() return begin_db end, root)
+assert(busy.import_all() == nil, "a busy begin is not success")
+assert(busy.status().error ~= nil, "the import failure is observable")
+
+-- A failed offset query is not "start from zero"; the import must stop.
+local query_db = fake_db({ reason = "corrupt", fail = function(sql)
+  return sql:find("FROM import_state", 1, true) ~= nil
+end })
+local corrupted = load(function() return query_db end, root)
+assert(corrupted.import_all() == nil, "an unreadable offset is not a fresh import")
+
+-- A rollback failure disposes the handle instead of reusing a possibly dirty one.
+local rollback_db = fake_db({ reason = "busy", fail = function(sql)
+  return sql:find("INSERT OR IGNORE INTO deliveries", 1, true) ~= nil or sql == "ROLLBACK"
+end })
+local disposed = load(function() return rollback_db end, root)
+assert(disposed.import_all() == nil, "a failed insert aborts the import")
+assert(disposed.available() == false, "a failed rollback disposes the handle")
+assert(tostring(disposed.status().error):find("degraded", 1, true), "the disposal is observable")
 
 remuda.remove_dir_all(root)
 print("ok")

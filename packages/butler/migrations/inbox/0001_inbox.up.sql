@@ -17,5 +17,6 @@ CREATE TABLE import_state (
   recipient TEXT NOT NULL,
   kind TEXT NOT NULL,
   offset INTEGER NOT NULL,
+  head INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (recipient, kind)
 );
