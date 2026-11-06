@@ -5,7 +5,9 @@
 -- mail continues on the file path. There is no read switch yet. Import is a
 -- cooperative budget: it checks elapsed time between bounded DB calls, so a
 -- single busy SQLite call can still add its native timeout, but a slow import
--- stops at the next line and reports partial.
+-- stops at the next line and reports partial. Limits: the head fingerprint is
+-- 32-bit and assumes append-only logs, so a collision or a shortened/replaced
+-- tail can misclassify a rebuild; the next full log change repairs it.
 local config = assert(remuda._butler_inbox_db_config)
 
 local M = {}

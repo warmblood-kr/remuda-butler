@@ -458,12 +458,19 @@ remuda.exec("butler/mail")
 if remuda._butler_inbox_db then
   local imported_ok, imported, import_why = pcall(remuda._butler_inbox_db.import_all)
   local status = remuda._butler_inbox_db.status()
+  local diagnostics = remuda._butler_diagnostics
+  local record = diagnostics and type(diagnostics.record) == "function"
   if not imported_ok or not imported or status.partial then
-    local diagnostics = remuda._butler_diagnostics
-    if diagnostics and type(diagnostics.record) == "function" then
+    if record then
       pcall(diagnostics.record, "inbox_db", "degraded", "import_incomplete",
         tostring(not imported_ok and imported or import_why or status.error))
     end
+  end
+  -- A malformed complete line is skipped, not fatal; make the shadow's gap
+  -- visible instead of leaving it only in the status table.
+  if (status.skipped_lines or 0) > 0 and record then
+    pcall(diagnostics.record, "inbox_db", "degraded", "skipped_lines",
+      tostring(status.skipped_lines))
   end
 end
 -- ULIDs, identity records and caller identity live in identity.lua.
