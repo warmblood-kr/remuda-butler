@@ -198,10 +198,10 @@ check(hooked("bogus", 5, claude_idle), "idle", "unknown hook word is ignored")
 local function osc_status(state, age, screen)
   seq = seq + 1
   local name = "o" .. seq
-  bus.agents[name] = { kind = "codex", id = name }
+  bus.agents[name] = { kind = "codex", id = name, instance_binding = 1, instance_id = "i" .. seq }
   screens[name] = screen or "some other screen"
   captures = 0
-  local row = { name = name, program_status = { state = state, app = "codex" }, program_status_age = age }
+  local row = { name = name, instance_id = "i" .. seq, program_status = { state = state, app = "codex" }, program_status_age = age }
   return remuda.session_detail(row):match("^(.-) · "), captures
 end
 check((osc_status("working", 5)), "working", "fresh OSC working")
@@ -217,8 +217,8 @@ check(missing, "idle", "absent OSC falls back to the probe")
 check(missing_captures, 1, "absent OSC captures the screen")
 
 -- The decorator and roster use the same detail, so their ACTIVITY cannot disagree.
-local row = { name = "decor", program_status = { state = "blocked", app = "codex" }, program_status_age = 1 }
-bus.agents.decor = { kind = "codex", id = "decor" }
+local row = { name = "decor", instance_id = "decor-1", program_status = { state = "blocked", app = "codex" }, program_status_age = 1 }
+bus.agents.decor = { kind = "codex", id = "decor", instance_binding = 1, instance_id = "decor-1" }
 screens.decor = "some other screen"
 local decoration = remuda.session_list_decorate(row)
 check(decoration.activity, "needs you", "decorator uses the same OSC projection")
@@ -241,9 +241,28 @@ local real_session = remuda.session
 remuda.session = { list = function()
   return { { name = "reused", instance_id = "new", program_status = { state = "working" }, program_status_age = 1 } }
 end }
-bus.agents.reused = { kind = "codex", id = "reused-old" }
+bus.agents.reused = { kind = "codex", id = "reused-old", instance_binding = 1, instance_id = "old" }
 screens.reused = "some other screen"
 check(remuda.session_detail({ name = "reused", instance_id = "old" }):match("^(.-) · "), "other",
   "a reused name does not inherit another instance's OSC status")
+
+-- The same bound instance still accepts its own live row.
+remuda.session = { list = function()
+  return { { name = "same", instance_id = "same-1", program_status = { state = "working" }, program_status_age = 1 } }
+end }
+bus.agents.same = { kind = "codex", id = "same-old", instance_binding = 1, instance_id = "same-1" }
+screens.same = "some other screen"
+check(remuda.session_detail({ name = "same" }):match("^(.-) · "), "working",
+  "the bound instance keeps its own OSC status")
+
+-- An unavailable live row never lends status, even with a matching instance.
+remuda.session = { list = function()
+  return { { name = "gone", instance_id = "gone-1", unavailable = true,
+    program_status = { state = "working" }, program_status_age = 1 } }
+end }
+bus.agents.gone = { kind = "codex", id = "gone-old", instance_binding = 1, instance_id = "gone-1" }
+screens.gone = "some other screen"
+check(remuda.session_detail({ name = "gone" }):match("^(.-) · "), "other",
+  "an unavailable row does not lend OSC status")
 remuda.session = real_session
 print("ok")

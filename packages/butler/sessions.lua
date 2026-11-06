@@ -14,6 +14,17 @@ local json_field = assert(config.json_field)
 -- everything, so a root and its direct children share the margin and
 -- indentation starts at grandchildren.
 local MAX_TREE_INDENT_DEPTH = 20
+-- The marker `remuda.new` writes when the returned id is a proven launch
+-- identity. A listed row may only stand in for the agent when it is that exact
+-- instance: a bare name, a reused name, and an unavailable row are unknown.
+local BOUND_INSTANCE = 1
+local function instance_row(agent, session)
+  if type(agent) ~= "table" or agent.instance_binding ~= BOUND_INSTANCE then return nil end
+  if type(agent.instance_id) ~= "string" or agent.instance_id == "" then return nil end
+  if type(session) ~= "table" or session.unavailable == true then return nil end
+  if session.instance_id ~= agent.instance_id then return nil end
+  return session
+end
 local function display_name(id)
   local agent = bus.agents[id]
   return agent.alias or agent.session_name or id
@@ -101,7 +112,10 @@ function remuda._butler_sessions()
   local rows = {}
   for _, item in ipairs(team_order()) do
     local agent = bus.agents[item.id]
-    local session = live[item.id] or { name = item.id }
+    local row = live[item.id]
+    -- A row for another instance must not be merged with this member's
+    -- identity; the detail then falls back to the current-by-name probe.
+    local session = row and instance_row(agent, row) or { name = item.id }
     local activity = "other"
     if type(remuda.session_detail) == "function" then
       local ok, detail = pcall(remuda.session_detail, session)
@@ -302,34 +316,44 @@ local function osc_activity(session)
 end
 -- `remuda.session_detail` is also called with just {name=...}; find the live
 -- row then, but never invent a status for a missing session.
-local function session_with_status(session)
+local function status_row(agent, session)
   if type(session) ~= "table" then return nil end
-  if type(session.program_status) == "table" then return session end
-  -- Without an instance there is no safe way to distinguish a reused name, so
-  -- do not attach a listed status to a bare name.
-  if type(session.instance_id) ~= "string" or session.instance_id == "" then return session end
+  -- A caller-supplied row must prove the agent's bound instance before its
+  -- OSC status is trusted; program_status alone does not identify the process.
+  if type(session.program_status) == "table" then return instance_row(agent, session) end
+  if type(session.instance_id) ~= "string" or session.instance_id == "" then
+    -- A bare name has no instance, so resolve the live row first instead of
+    -- attaching a listed status directly.
+  else
+    return instance_row(agent, session)
+  end
   local listed = remuda.session and remuda.session.list
-  if type(listed) ~= "function" then return session end
+  if type(listed) ~= "function" then return nil end
   local ok, rows = pcall(listed)
-  if not ok or type(rows) ~= "table" then return session end
+  if not ok or type(rows) ~= "table" then return nil end
   for _, row in ipairs(rows) do
-    if row.name == session.name and row.instance_id == session.instance_id
-      and row.unavailable ~= true then
-      return row
+    if row.name == session.name and type(row.instance_id) == "string"
+      and row.instance_id ~= "" and row.unavailable ~= true then
+      return instance_row(agent, row)
     end
   end
-  return session
+  return nil
 end
 local function session_status(name, agent, telemetry, session)
   local now = (remuda._butler_status_now or os.time)()
+  local row = status_row(agent, session)
+  -- A closed session or a replaced instance is a new process: never reuse the
+  -- previous instance's cached status for the same name.
+  local resolved = type(row) == "table" and row.instance_id or nil
   local cached = status_cache[name]
-  -- A closed session whose name is reused is a new agent: never show its status.
-  if cached and cached.agent == agent and cached.id == agent.id and now - cached.at < STATUS_TTL_SECONDS then
+  if cached and cached.agent == agent and cached.id == agent.id
+    and cached.instance == agent.instance_id and cached.resolved == resolved
+    and now - cached.at < STATUS_TTL_SECONDS then
     return cached.status
   end
   local hook, hook_at = telemetry.hook_state, tonumber(telemetry.hook_at)
   local fresh = hook and hook_at and now >= hook_at and now - hook_at < (HOOK_MAX_AGE[hook] or 0)
-  local status = osc_activity(session_with_status(session))
+  local status = osc_activity(row)
   if not status then
     if fresh and hook == "working" then
       status = hook
@@ -342,7 +366,8 @@ local function session_status(name, agent, telemetry, session)
   for key, value in pairs(status_cache) do -- entries of closed sessions expire with the window
     if key ~= name and now - value.at >= STATUS_TTL_SECONDS then status_cache[key] = nil end
   end
-  status_cache[name] = { at = now, status = status, agent = agent, id = agent.id }
+  status_cache[name] = { at = now, status = status, agent = agent, id = agent.id,
+    instance = agent.instance_id, resolved = resolved }
   return status
 end
 
