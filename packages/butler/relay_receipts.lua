@@ -99,7 +99,6 @@ local function same(row, receipt)
     and (row.event_id or "") == (receipt.event_id or "")
     and row.status == receipt.status
     and row.completed_at == receipt.completed_at
-    and (row.result_json or "") == (receipt.result_json or "")
 end
 
 -- One idempotent insert. A conflicting existing row is degraded, never
@@ -133,7 +132,7 @@ local function write(reply_id, txn_id, source_mail_id, event_id, status, complet
     return nil, "query: " .. tostring(row_err)
   end
   if row then
-    rollback(db)
+    if not rollback(db) then return nil, "rollback" end
     if same(row, receipt) then return true end
     report("degraded", "receipt_conflict", reply_id)
     return nil, "conflict"
@@ -163,18 +162,27 @@ function M.import_all(results)
   local ids = {}
   for id in pairs(results) do ids[#ids + 1] = id end
   table.sort(ids, function(a, b) return tostring(a) < tostring(b) end)
-  stats.imported, stats.skipped, stats.partial = 0, 0, false
-  local clock = config.now or remuda.clock
-  local started = type(clock) == "function" and pcall(clock) and clock() or nil
+  stats.imported, stats.skipped, stats.partial, stats.error = 0, 0, false, nil
+  local clock
+  if type(config.now) == "function" then
+    clock = config.now
+  elseif type(remuda.clock) == "function" then
+    clock = remuda.clock
+  end
+  local started
+  if clock then
+    local ok, value = pcall(clock)
+    if ok and type(value) == "number" then started = value end
+  end
   for index, id in ipairs(ids) do
     if index > MAX_IMPORT_ROWS then
       stats.partial = true
       stats.error = "partial: row budget"
       break
     end
-    if started and type(clock) == "function" then
-      local now = clock()
-      if type(now) == "number" and now - started > MAX_IMPORT_MS then
+    if started then
+      local ok, now = pcall(clock)
+      if ok and type(now) == "number" and now - started > MAX_IMPORT_MS then
         stats.partial = true
         stats.error = "partial: time budget"
         break
@@ -200,6 +208,9 @@ function M.import_all(results)
       stats.skipped = stats.skipped + 1
       report("degraded", "receipt_shape", tostring(id))
     end
+  end
+  if stats.skipped > 0 and not stats.error then
+    stats.error = "degraded: " .. tostring(stats.skipped) .. " conflicting receipts"
   end
   local saved, save_err = checked(db.exec, db,
     "INSERT OR REPLACE INTO receipt_meta (key, value) VALUES ('import_committed', ?)",
