@@ -171,9 +171,9 @@ local function expired(state, screen)
   return os.time() - state.modal_since >= budget
 end
 
-local function skip_update(state, region, reason)
+local function skip_update(state, region, strict, reason)
   local c = chooser()
-  local option = c and c.skip_option_number and c.skip_option_number(region)
+  local option = strict and c and c.skip_option_number and c.skip_option_number(region)
   if option and may_act(state) then
     local pressed, result = pcall(remuda.key, state.name, option)
     if pressed and result ~= false then
@@ -202,19 +202,19 @@ local function update_version(state, region)
   return version
 end
 
-local function waiting_owner_tick(state, region, version)
+local function waiting_owner_tick(state, region, version, strict)
   local update = remuda._butler_bus.codex_update_state
   if update.done and update.done_version == version then
     if relaunch(state, version) then return true end
     if expired(state, region) then fail(state, "update completed while waiting") end
     return true
   end
-  if wait_deadline(state) then skip_update(state, region, "waiting for Codex update") end
+  if wait_deadline(state) then skip_update(state, region, strict, "waiting for Codex update") end
   if expired(state, region) then fail(state, "waiting for Codex update") end
   return true
 end
 
-local function join_waiting(state, region, version)
+local function join_waiting(state, region, version, strict)
   local update = remuda._butler_bus.codex_update_state
   update.waiting = update.waiting or {}
   update.waiting[state.name] = true
@@ -223,7 +223,7 @@ local function join_waiting(state, region, version)
     if expired(state, region) then fail(state, "update completed while waiting") end
     return
   end
-  if wait_deadline(state) then skip_update(state, region, "waiting for Codex update") end
+  if wait_deadline(state) then skip_update(state, region, strict, "waiting for Codex update") end
 end
 
 local function claim_update(state, region, version, strict)
@@ -249,12 +249,14 @@ local function claim_update(state, region, version, strict)
   return true
 end
 
-local function update_tick(state, region, strict)
+local function update_tick(state, screen, region, strict)
   local c = chooser()
   if not (c and c.option_number and c.skip_option_number) then return end
   local update = remuda._butler_bus.codex_update_state
   local name = state.name
-  local version = update_version(state, region)
+  -- Version metadata comes from the full captured screen; the current region
+  -- is only the key-authorization source.
+  local version = update_version(state, screen)
   if state.update_uncertain then
     if expired(state, region) then
       trace("codex_update_timeout", name .. " update key outcome uncertain")
@@ -263,7 +265,7 @@ local function update_tick(state, region, strict)
     return
   end
   if update.claimed and update.owner ~= name and update.waiting and update.waiting[name] then
-    if waiting_owner_tick(state, region, version) then return end
+    if waiting_owner_tick(state, region, version, strict) then return end
   end
   if update.done and update.restart_waiting and update.restart_waiting[name] then
     if relaunch(state, update.done_version) then return end
@@ -271,12 +273,12 @@ local function update_tick(state, region, strict)
     return
   end
   if update.claimed and update.owner ~= name then
-    join_waiting(state, region, version)
+    join_waiting(state, region, version, strict)
     return
   end
   if update.aborted_version == version or (update.done and update.done_version == version) then
     if strict then
-      skip_update(state, region, "update dialog did not clear")
+      skip_update(state, region, strict, "update dialog did not clear")
     elseif expired(state, region) then
       fail(state, "update dialog") -- unparseable menu: report, press nothing
     end
@@ -284,7 +286,7 @@ local function update_tick(state, region, strict)
   end
   if claim_update(state, region, version, strict) then return end
   if strict then
-    skip_update(state, region, "update dialog")
+    skip_update(state, region, strict, "update dialog")
   elseif expired(state, region) then
     fail(state, "update dialog") -- unparseable menu: report, press nothing
   end
@@ -382,7 +384,7 @@ local function tick(state)
     local region = dialogs and dialogs.live_update_region and dialogs.live_update_region(agent, screen)
     local strict = dialogs and dialogs.live_update_choice and dialogs.live_update_choice(agent, screen)
     state.modal_since = state.modal_since or os.time()
-    if region then update_tick(state, region, strict == true); return end
+    if region then update_tick(state, screen, region, strict == true); return end
     -- Broad marker without a current choice: report and expire, never press.
     if expired(state, screen) then fail(state, "update dialog") end
     return

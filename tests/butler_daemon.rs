@@ -4897,6 +4897,8 @@ fn butler_task_poke_answers_startup_modals_before_typing() {
         "failed launch omitted the unknown dialog's label: {launch_report}");
     assert!(!launch_report.contains("t-claude-launch-transient: claude: dialog"),
         "a changing partial screen was rejected as an unknown dialog: {launch_report}");
+    assert_eq!(eval(&path, "return tostring(remuda._butler_bus.codex_update_state.version)"),
+        "0.156.0->0.157.1", "version metadata was lost when keys moved to the current region");
     let codex_key_one = log.lines().find(|l| l.ends_with(" key 1")).unwrap();
     let update_owner = codex_key_one.split_whitespace().next().unwrap();
     assert_eq!(log.lines().filter(|l| l.ends_with(" key 1")).count(), 1, "more than one member upgraded: {log}");
