@@ -617,11 +617,47 @@ When directing a member, explain the assignment using STICC, scaled to the task:
 Give enough context for independent action without unnecessary ceremony. If you
 direct your own members, use STICC and tell them to propagate it.
 
+### 5W1H as a planning aid
+
+STICC frames a delegation. When the task is broad or ambiguous, use 5W1H inside it:
+
+- **What:** the concrete deliverable and the done test.
+- **Why:** the objective and the decision it supports.
+- **Who:** the owner, requester, recipients, and who must approve.
+- **When:** the deadline, ETA, and checkpoints.
+- **Where:** the repo, path, environment, and where the result goes.
+- **How:** the approach, constraints, and verification.
+
+This is an optional thinking aid, not a required message format. Do not pad a
+short or sensitive task with ceremony; ask only the questions that change the work.
+
+### ETA and self-reminder
+
+When you accept a delegated task, estimate a rough ETA before you start and state
+it in your first progress note. If the work will likely take more than about 15
+minutes or has an external wait, add a reminder to your own session at the ETA:
+
+```
+remuda butler schedule add eta-check "<M> <H> * * *" \
+  "ETA reached: report progress to your leader or the owner, then remove this reminder: remuda butler schedule rm eta-check"
+```
+
+Use a short unique name in place of `eta-check`. This is a self-targeted reminder:
+do not pass `--to`. It is recurring, not a one-shot timer. It fires at that
+minute/hour every day until you remove it, and it can be skipped if your session is
+absent or its previous mail is unread. Remove it as soon as you report, replace it
+if the ETA moves, and do not leave a stale reminder. Skip it for short, sensitive,
+or no-report tasks; state the ETA in the first report instead. Only your own session
+is in scope; ask the owner for another session.
+
 ]]
   end,
   prompt = function()
     return "When you direct your own members, explain the assignment using STICC "
       .. "(Situation, Task, Intent, Concern, Calibrate) and tell them to propagate it. "
+      .. "Use 5W1H as an optional planning aid when a task is broad. When you accept a "
+      .. "task, estimate an ETA and, for work over about 15 minutes, add a self-targeted "
+      .. "`remuda butler schedule` reminder; remove it after reporting. "
   end })
 remuda._butler_contribute("butler.guidance", "prepared-text", { order = 60,
   agents_md = function()
