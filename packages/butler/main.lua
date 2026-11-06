@@ -684,6 +684,7 @@ remuda._butler_launch_config = { bus = bus,
   next_token = next_token,
   mailbox = mailbox,
   queue_message = queue_message,
+  notify_delivery = notify_mail_delivery,
   migrate_legacy_mail = migrate_legacy_mail,
   startup_action_safe = function(...) return startup_action_safe(...) end }
 remuda.exec("butler/native_config")

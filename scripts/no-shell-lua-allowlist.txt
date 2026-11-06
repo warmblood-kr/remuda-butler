@@ -1,3 +1,6 @@
 # POSIX run_in keeps one shell call until core process.run accepts cwd; see https://github.com/warmblood-kr/remuda/issues/433.
 packages/butler/system.lua|1
 tests/butler_matrix_relay.lua|2
+# Focused storage-failure test: make the shared mail objects directory read-only,
+# then restore it after the launch failure is observed. Test-only, no product path.
+tests/lua/butler_task_mail_policy_test.lua|2

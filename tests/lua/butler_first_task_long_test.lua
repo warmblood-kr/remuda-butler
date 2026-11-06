@@ -10,8 +10,8 @@ T.wait_until(function()
 end, 5, "Butler root start")
 T.eval(string.format([[
   remuda.butler.project_home(%q)
-  remuda._butler_agent_builders.codex = function() return { "sleep", "100" } end
-  remuda._butler_agent_startup.codex = { ready = function() return true end }
+  remuda._butler_agent_builders.monocle = function() return { "sleep", "100" } end
+  remuda._butler_agent_startup.monocle = { ready = function() return true end }
   remuda._butler_notify_policy = function() return true end
   remuda._t = { typed = {} }
   remuda.session = function() return { is_busy = false } end
@@ -27,7 +27,7 @@ local function typed(name)
 end
 
 T.test("a_task_over_one_input_act_is_mailed_and_a_pointer_is_typed", function()
-  T.eval([[remuda._butler_topic_delegate('t-long', string.rep("x", 8192) .. "END", nil, 'codex', 'butler')]])
+  T.eval([[remuda._butler_topic_delegate('t-long', string.rep("x", 8192) .. "END", nil, 'monocle', 'butler')]])
   local line = typed("t-long")
   T.ok(#line < 300 and line:find("too long to type here", 1, true) and line:find("remuda butler inbox", 1, true),
     "a short pointer was typed: " .. line:sub(1, 200))
@@ -40,6 +40,6 @@ end)
 
 T.test("a_task_that_fits_is_typed_unchanged", function()
   local task = string.rep("y", 8192)
-  T.eval("remuda._butler_topic_delegate('t-fits', string.rep('y', 8192), nil, 'codex', 'butler')")
+  T.eval("remuda._butler_topic_delegate('t-fits', string.rep('y', 8192), nil, 'monocle', 'butler')")
   T.eq(typed("t-fits"), task, "an 8 KiB task is typed as is")
 end)

@@ -18,6 +18,7 @@ local mail_address = config.mail_address
 local next_token = config.next_token
 local mailbox = config.mailbox
 local queue_message = config.queue_message
+local notify_delivery = config.notify_delivery
 local migrate_legacy_mail = config.migrate_legacy_mail
 -- main.lua assigns startup_action_safe with the notice policy; read it late.
 local startup_action_safe = config.startup_action_safe
@@ -414,10 +415,35 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   -- binding publishes. A failed write is reported, never typed instead.
   local native_binding = bus.agents[actual].native
   local native_task = remuda.butler and remuda.butler.native_task
-  if task and task ~= "" and native_task and native_task.route(bus.agents[actual]) then
-    native_task.queue({ queue_message = queue_message, mail_address = mail_address,
-      send = remuda._butler_send, trace = _butler_session_trace },
-      actual, parent, task)
+  if task and task ~= "" and native_task and native_task.route(bus.agents[actual], kind) then
+    local saved_id, save_why, info = native_task.queue({
+      queue_message = queue_message, mail_address = mail_address,
+      send = remuda._butler_send, trace = _butler_session_trace,
+      notify = function(message, delivered)
+        if type(notify_delivery) ~= "function" then
+          return false, "notify_unavailable"
+        end
+        return notify_delivery(message, delivered, actual, "Task")
+      end }, actual, parent, task)
+    if type(_butler_session_trace) == "function" then
+      if saved_id then
+        _butler_session_trace("first_task_mail_routed", actual
+          .. " message=" .. tostring(saved_id)
+          .. " notice=" .. tostring(info and info.notice))
+      else
+        _butler_session_trace("first_task_mail_failed", actual
+          .. " reason=" .. tostring(save_why))
+      end
+    end
+    if not saved_id then
+      -- Existing launch-failure metadata stays the visible status owner; the
+      -- agent record and full brief remain for recovery, and no text is typed.
+      bus.launch_failures = bus.launch_failures or {}
+      bus.launch_failures[actual] = { attempts = attempts or {},
+        error = "initial task was not saved as durable mail: " .. tostring(save_why) }
+    end
+    -- Suppress the raw/PTY body path on both durable success and failure. The
+    -- agent record and saved mail keep the full brief; this only stops typing.
     task = ""
   end
   -- Launch completion is a real lifecycle point: if the wrapper/channel has
