@@ -115,6 +115,10 @@ function matrix.status(args, callback)
         if type(state) == "table" then
           result.sync_cursor = state.since
           result.fallback_cursor = state.messages_since
+          local relay = matrix.relay
+          if relay and type(relay.json_budget) == "function" then
+            result.relay_budget = relay.json_budget(state)
+          end
         end
       end
       result.whoami = nil

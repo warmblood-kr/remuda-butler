@@ -56,6 +56,12 @@ local MAX_THREAD_SUBSCRIPTIONS = 5000
 local MAX_UNFOLLOWED_THREADS = 5000
 local MAX_REPLY_OUTBOX = 1000
 local MAX_REPLY_RESULTS = 5000
+-- Local headroom bands. The core hard limit is 100,000 values / 8 MiB; these
+-- are warnings/stop bands, not a substitute for the encoder's own refusal.
+local RELAY_JSON_WARN_VALUES = 90000
+local RELAY_JSON_STOP_VALUES = 95000
+local RELAY_JSON_WARN_BYTES = 7 * 1024 * 1024
+local RELAY_JSON_STOP_BYTES = 7600 * 1024
 local MAX_MAIL_REPLY_BYTES = 64 * 1024
 local MAX_THREAD_CONTEXT_BYTES = 8 * 1024
 local MAX_THREAD_CONTEXT_MESSAGES = 20
@@ -643,6 +649,48 @@ local function subscribe(state, room_id, thread_id, mail_id)
   subscriptions[thread_id] = { mail_id = mail_id,
     created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
   return true
+end
+
+-- Read-only encoder budget for the whole relay state. The value count mirrors
+-- the core encoder (one per table pair plus the root); bytes come from the real
+-- encoder when it can produce them. No state is written and no body is shown.
+function relay.json_budget(state)
+  if type(state) ~= "table" then return nil, "state is not a table" end
+  local values = 1
+  local seen = {}
+  local cyclic = false
+  local function walk(table_value)
+    if seen[table_value] then cyclic = true; return end
+    seen[table_value] = true
+    for _, item in pairs(table_value) do
+      values = values + 1
+      if type(item) == "table" and item ~= json.null then walk(item) end
+    end
+    seen[table_value] = nil
+  end
+  walk(state)
+  local encoded_ok, encoded = pcall(json.encode, state)
+  local bytes = encoded_ok and type(encoded) == "string" and #encoded or nil
+  local level = "ok"
+  if values >= RELAY_JSON_STOP_VALUES
+      or (bytes and bytes >= RELAY_JSON_STOP_BYTES) then
+    level = "stop"
+  elseif values >= RELAY_JSON_WARN_VALUES
+      or (bytes and bytes >= RELAY_JSON_WARN_BYTES) then
+    level = "warn"
+  end
+  if not encoded_ok then level = values >= RELAY_JSON_STOP_VALUES and "stop" or "unknown" end
+  return {
+    values = values,
+    bytes = bytes,
+    level = level,
+    cyclic = cyclic,
+    warn_values = RELAY_JSON_WARN_VALUES,
+    stop_values = RELAY_JSON_STOP_VALUES,
+    warn_bytes = RELAY_JSON_WARN_BYTES,
+    stop_bytes = RELAY_JSON_STOP_BYTES,
+    encode_error = encoded_ok and nil or tostring(encoded),
+  }
 end
 
 local function empty_state()

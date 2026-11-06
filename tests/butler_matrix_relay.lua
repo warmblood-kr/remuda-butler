@@ -9117,7 +9117,7 @@ do
   assert(relay_module.instance == nil, "mismatch must not create an instance")
   remuda._butler_relay_receipts = previous
 end
-do
+local function check_relay_shadow_and_budget()
   -- Real remuda.json fixture for the receipt canonicalizer: no fake codec.
   local old_config = remuda._butler_relay_receipts_config
   local old_receipts = remuda._butler_relay_receipts
@@ -9142,7 +9142,21 @@ do
   end
   remuda._butler_relay_receipts_config = old_config
   remuda._butler_relay_receipts = old_receipts
+
+  -- Read-only budget counts the root plus every table pair and uses the real
+  -- encoder for bytes. No state is written.
+  local budget = relay_module.json_budget({ a = 1, b = { c = 2 } })
+  assert(budget.values == 4, "budget counts root plus every pair: " .. tostring(budget.values))
+  assert(type(budget.bytes) == "number" and budget.bytes > 0, "budget measures bytes")
+  assert(budget.level == "ok")
+  local warn = relay_module.json_budget({ many = (function()
+    local value = {}
+    for index = 1, 90000 do value[index] = index end
+    return value
+  end)() })
+  assert(warn.values >= 90001 and warn.level == "warn", "warn band")
 end
+check_relay_shadow_and_budget()
 
 print('ok: Matrix durable owner plaintext admission contract')
 
