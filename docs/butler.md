@@ -139,6 +139,14 @@ startup dialog is waiting for a person. `other` means Butler could not match a
 reliable state. These labels come from adapter status, not whether the child
 process is alive.
 
+When the terminal parser sees an OSC 7501 Program Status report, Butler
+prefers it for a fresh session (`working`, `idle`, `blocked` as `needs you`,
+`done` as `idle`, `error` as `other`). A stale report falls back to the hook
+or screen probe; the report itself is retained, and `clear` or a new session
+instance removes it. The labels are display hints: `blocked` does not grant or
+deny permission, and neither activity nor an OSC `app` name controls close,
+routing or approval.
+
 Claude Code status uses its configured `UserPromptSubmit`, `Stop`, and
 `Notification` hooks. A recent submit marks `working`; a stop or idle
 notification marks `idle`; permission and elicitation notifications mark
