@@ -5222,14 +5222,11 @@ function rx_policy_tests.human_reset_clears_the_turn_guard()
   end)
 end
 
--- Durable evidence through the production relay deliver -> real mail queue ->
--- inbox bridge. Mail ids here come from the fixture's deterministic
--- _butler_new_ulid stub, so they show queue identity, not runtime ULID
--- generation.
 -- Disk-authoritative durable evidence: production relay deliver -> real mail
--- root on disk, then a fresh mail reader after the relay restarts. The helper
--- loads the production ULID generator, so ids have the real 26-character shape;
--- this test proves disk durability and inbox state, not the generator itself.
+-- root on disk. The relay is stopped while a context fetch is still pending,
+-- restarted, and the new generation's context request is answered (the old
+-- callback is never reused). The helper loads the production ULID generator,
+-- so ids have the real 26-character shape.
 function rx_policy_tests.unfollow_durable_disk_mail_root()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
@@ -5243,6 +5240,27 @@ function rx_policy_tests.unfollow_durable_disk_mail_root()
       end
       local function envelope_count()
         return #(remuda.list_dir(mail_root .. "/messages") or {})
+      end
+      local function answer_new_context(from_index)
+        for _ = 1, 8 do
+          local completed = false
+          for index = from_index, #client.requests do
+            if client.callbacks[index] then
+              local target = tostring(client.requests[index].path)
+              if target:find("/relations/", 1, true) then
+                client:complete(index, { json = { chunk = {} } })
+                completed = true
+              elseif target:find("/event/", 1, true) then
+                client:complete(index, { json = { type = "m.room.message",
+                  event_id = "$scripted-root", sender = "@alice:example.org",
+                  origin_server_ts = 0,
+                  content = { msgtype = "m.text", body = "scripted thread root" } } })
+                completed = true
+              end
+            end
+          end
+          if not completed then break end
+        end
       end
 
       relay:subscribe_thread(NEW, "$dsk-root")
@@ -5265,51 +5283,93 @@ function rx_policy_tests.unfollow_durable_disk_mail_root()
       assert(not rx_followed(relay, NEW, "$dsk-root"), "the mention did not implicitly re-follow")
       assert(envelope_count() == 2, "the mention has one envelope")
 
+      -- Hold the context fetch, unfollow while it is pending, and stop the
+      -- relay before that context is answered.
       rx_sync(client, NEW, { rx_msg("$dsk-pending", OWNER, "@bot:example.org disk pending",
         rx_thread("$dsk-pending-root")) }, true)
       assert(relay:state().pending["$dsk-pending"], "the pending mention waits for context")
       relay:unsubscribe_thread(NEW, "$dsk-pending-root")
-      rx_context(client, true)
-      local pending_id = assert(mail_id_for("$dsk-pending"), "the pending mention has a mail id")
-      assert(envelope_count() == 3, "the pending mention has one envelope")
-
+      assert((((relay:state().unfollowed or {})[NEW] or {})["$dsk-pending-root"] ~= nil),
+        "the unfollow tombstone is persisted while the context is still pending")
+      assert(envelope_count() == 2, "the pending mention is not delivered before its context")
+      local old_context_index = #client.requests
       relay_module.stop()
+
+      -- Reconstruct: the pending event and tombstone come back from disk, and
+      -- only requests created by the new generation are answered.
+      local first_new = #client.requests + 1
       assert(relay_module.start({ config_path = path }), "the relay restarts")
-      client:sync({ json = { next_batch = "s-dsk-restart" } })
       relay = relay_module.instance
+      assert(relay:state().pending["$dsk-pending"], "the pending mail survives the relay restart")
+      assert((((relay:state().unfollowed or {})[NEW] or {})["$dsk-pending-root"] ~= nil),
+        "the unfollow tombstone survives the relay restart")
+      client:sync({ json = { next_batch = "s-dsk-restart" } })
+      answer_new_context(first_new)
+      assert(client.callbacks[old_context_index] ~= nil,
+        "the old generation's context callback was not answered")
+      local pending_id = assert(mail_id_for("$dsk-pending"),
+        "the pending mention is delivered after the new context completes")
+      assert(not relay:state().pending["$dsk-pending"], "the pending mail left the queue")
+      assert(not rx_followed(relay, NEW, "$dsk-pending-root"), "the delivery did not re-follow")
+      assert(envelope_count() == 3, "the pending mention has one envelope on disk")
+
+      -- Fresh mail reader from the same root: no read marks yet.
       local mail = fresh_mail()
-      assert(mail.is_unread("butler", before_id), "the earlier mail is still unread after restart")
-      assert(mail.is_unread("butler", mention_id) and mail.is_unread("butler", pending_id),
-        "the mention and pending mail are unread on disk")
+      -- `mailbox` is a raw accessor; `unread`/`is_unread` load the inbox from
+      -- disk first, so read state is checked before `inbox()` marks anything.
+      local unread_count = mail.unread("butler")
+      local ids = mail.mailbox("butler")
+      local function listed(id)
+        for _, item in ipairs(ids) do if item == id then return true end end
+        return false
+      end
+      assert(unread_count == 3, "the fresh reader counts three unread mails, got " .. tostring(unread_count))
+      assert(listed(before_id) and listed(mention_id) and listed(pending_id),
+        "the fresh reader finds the delivered mail on disk")
+      assert(mail.is_unread("butler", before_id) and mail.is_unread("butler", mention_id)
+        and mail.is_unread("butler", pending_id), "the delivered mail is unread before any inbox read")
       local before = assert(mail.find_message(before_id), "the envelope survives the reader reload")
       assert(before.matrix and before.matrix.event_id == "$dsk-before",
         "the reloaded envelope keeps the Matrix event id")
       assert(mail.find_message(mention_id).matrix.event_id == "$dsk-mention", "the mention envelope is intact")
+      assert(mail.find_message(pending_id).matrix.event_id == "$dsk-pending",
+        "the pending envelope is intact")
+
+      -- Replay after reconstruct: same event ids add no envelope and keep unread.
       local files = envelope_count()
-
       rx_sync(client, NEW, { rx_msg("$dsk-quiet", OWNER, "disk unmentioned after unfollow", rx_thread("$dsk-root")),
-        rx_msg("$dsk-mention", OWNER, "@bot:example.org disk mention", rx_thread("$dsk-root")) })
+        rx_msg("$dsk-mention", OWNER, "@bot:example.org disk mention", rx_thread("$dsk-root")),
+        rx_msg("$dsk-pending", OWNER, "@bot:example.org disk pending", rx_thread("$dsk-pending-root")) })
       assert(envelope_count() == files, "a replayed event does not write a second envelope")
-      assert(mail.is_unread("butler", before_id) and mail.is_unread("butler", mention_id),
-        "the replay leaves existing unread state unchanged")
+      assert(mail.is_unread("butler", before_id) and mail.is_unread("butler", mention_id)
+        and mail.is_unread("butler", pending_id), "the replay leaves existing unread state unchanged")
 
-      -- The latest mode applies after restart: all delivers the unfollowed
-      -- thread again without a follow, none suppresses even a mention.
+      -- The latest mode applies after reconstruct, without an implicit follow.
       relay:set_notification_mode(NEW, "all")
       rx_sync(client, NEW, { rx_msg("$dsk-all", OWNER, "disk all after restart", rx_thread("$dsk-root")) })
-      local all_id = assert(mail_id_for("$dsk-all"), "all mode delivers after restart")
+      local all_id = assert(mail_id_for("$dsk-all"), "all mode delivers the unfollowed thread (1)")
       assert(mail.find_message(all_id).matrix.event_id == "$dsk-all", "the new envelope is on disk")
       assert(not rx_followed(relay, NEW, "$dsk-root"), "all-mode delivery does not re-follow")
+
+      relay:set_notification_mode(NEW, "mentions-followed")
+      rx_sync(client, NEW, { rx_msg("$dsk-mf-quiet", OWNER, "disk mf unmentioned", rx_thread("$dsk-root")),
+        rx_msg("$dsk-mf-mention", OWNER, "@bot:example.org disk mf mention", rx_thread("$dsk-root")) })
+      assert(mail_id_for("$dsk-mf-quiet") == nil, "mentions-followed suppresses an unmentioned reply (0)")
+      local mf_id = assert(mail_id_for("$dsk-mf-mention"), "mentions-followed delivers a mention (1)")
+      assert(not rx_followed(relay, NEW, "$dsk-root"), "the mention does not re-follow after reconstruct")
+
       relay:set_notification_mode(NEW, "none")
-      rx_sync(client, NEW, { rx_msg("$dsk-none", OWNER, "@bot:example.org disk none",
-        rx_thread("$dsk-root")) })
-      assert(mail_id_for("$dsk-none") == nil, "none suppresses even a mention after restart")
+      rx_sync(client, NEW, { rx_msg("$dsk-none", OWNER, "@bot:example.org disk none", rx_thread("$dsk-root")) })
+      assert(mail_id_for("$dsk-none") == nil, "none suppresses even a mention (0)")
+      assert(envelope_count() == files + 2, "only the all-mode and mentions-followed envelopes were added")
 
       local text = mail.inbox("butler")
       assert(text:find("disk before unfollow", 1, true) and text:find("disk mention", 1, true)
-        and text:find("disk pending", 1, true) and text:find("disk all after restart", 1, true),
-        "the inbox shows exactly the delivered mails")
+        and text:find("disk pending", 1, true) and text:find("disk all after restart", 1, true)
+        and text:find("disk mf mention", 1, true), "the inbox shows exactly the delivered mails")
+      assert(mail.find_message(mf_id).matrix.event_id == "$dsk-mf-mention", "the mention envelope is intact")
       assert(not text:find("disk unmentioned after unfollow", 1, true)
+        and not text:find("disk mf unmentioned", 1, true)
         and not text:find("disk none", 1, true),
         "the filtered replies are absent from the real inbox")
     end)
