@@ -2655,7 +2655,7 @@ fn exhausted_recovery_sends_one_failure_alert() {
     // A concurrent poll may also emit a stuck report; capture every alert and
     // assert the exhaustion alert itself, exactly once.
     let alerts = eval(&path,
-        "return table.concat(remuda._notice_failure_alerts, '\n---\n')");
+        r#"return table.concat(remuda._notice_failure_alerts, "\n---\n")"#);
     let exhausted = alerts
         .split("\n---\n")
         .filter(|text| text.contains("Could not safely deliver queued Butler mail"))
