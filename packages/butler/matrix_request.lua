@@ -4,6 +4,10 @@ local butler = remuda.butler or {}
 remuda.butler = butler
 local matrix = butler.matrix or {}
 butler.matrix = matrix
+-- A new generation must retire the previous one before publishing its own
+-- functions: a dirty reexec (or a failed reload's staging pass) can otherwise
+-- leave queued callbacks on timers nobody owns any more.
+if type(matrix.request_retire) == "function" then pcall(matrix.request_retire) end
 local json = assert(remuda.json, "Matrix requires core remuda.json")
 matrix.json_null = json.null
 matrix.json_array = json.array
@@ -12,6 +16,8 @@ local MiB = 1024 * 1024
 local MAX_REQUEST_BYTES = 20 * MiB
 local DEFAULT_RESPONSE_BYTES = MiB
 local queue, timer, watchdog = {}, nil, nil
+local retired = false
+local RETIRED_ERROR = "Matrix request generation ended before the request was sent"
 local tokens, burst = 1, 1
 local interval = tonumber(os.getenv("REMUDA_BUTLER_MATRIX_RATE_INTERVAL")) or 0.25
 if interval < 0 then interval = 0 end
@@ -755,9 +761,10 @@ matrix.encode_json = function(value)
   return encoded
 end
 
+local request_same_generation
 function matrix.request_json(args, on_done)
   local done = once(on_done)
-  return matrix.request(args, function(result)
+  return request_same_generation(args, function(result)
     if result.error then return done(result) end
     local value, decode_error
     if not result.body or result.body == "" then value = json.object({})
@@ -865,6 +872,16 @@ end
 
 schedule_queue = function()
   if #queue == 0 then return end
+  if retired then
+    -- A retired generation must not start a network write. Settle anything
+    -- that somehow remained queued before the teardown.
+    while #queue > 0 do
+      local item = table.remove(queue, 1)
+      item.in_queue = false
+      finish(item, { error = RETIRED_ERROR, queue_retired = true, not_sent = true })
+    end
+    return
+  end
   if interval == 0 then
     while #queue > 0 do
       local item = table.remove(queue, 1)
@@ -947,6 +964,10 @@ local function enqueue(dispatch, done, uncertain_on_throw)
     end
   end }
   item.handle = handle
+  if retired then
+    finish(item, { error = RETIRED_ERROR, queue_retired = true, not_sent = true })
+    return handle
+  end
   if tokens > 0 then
     tokens = tokens - 1
     local now = now_ms()
@@ -967,6 +988,10 @@ end
 function matrix.request(args, on_done)
   args = args or {}
   local done = once(on_done)
+  if retired then
+    done({ error = RETIRED_ERROR, queue_retired = true, not_sent = true })
+    return { cancel = function() end }
+  end
   if type(args) ~= "table" then
     report_error(done, "Matrix request options must be a table")
     return { cancel = function() end }
@@ -1063,6 +1088,11 @@ function matrix.request(args, on_done)
   return enqueue(dispatch, done, method ~= "GET")
 end
 
+-- Pin the JSON wrapper to this generation's request function: a later exec or
+-- a failed activation that replaces the public helper must not redirect an
+-- already-captured wrapper into the new client.
+request_same_generation = matrix.request
+
 function matrix.same_room(room, event_id, on_done)
   local done = once(on_done)
   if type(room) ~= "string" or type(event_id) ~= "string" or event_id == "" then
@@ -1092,5 +1122,76 @@ function matrix.same_room(room, event_id, on_done)
       done(type(event) == "table" and event.room_id == room)
     end)
 end
+
+
+-- Lifecycle client handle. retire() is idempotent, cancels the exact timers
+-- this generation armed, drops only queued-not-dispatched work with a typed
+-- pre-dispatch result, and leaves dispatched/in-flight requests untouched.
+-- resume() republishes this generation's compiled API on the shared table (a
+-- failed activation may have overwritten it) and starts a fresh empty epoch
+-- without replaying anything retire() already settled.
+local generation_api
+local function retire_generation()
+  if retired then return end
+  retired = true
+  timer_generation = timer_generation + 1
+  watchdog_generation = watchdog_generation + 1
+  local refill, health = timer, watchdog
+  timer, watchdog = nil, nil
+  last_tick_ms = nil
+  if refill and type(remuda.cancel) == "function" then pcall(remuda.cancel, refill) end
+  if health and type(remuda.cancel) == "function" then pcall(remuda.cancel, health) end
+  local pending = queue
+  queue = {}
+  for _, item in ipairs(pending) do
+    if not item.completed then
+      item.in_queue = false
+      finish(item, { error = RETIRED_ERROR, queue_retired = true, not_sent = true })
+    end
+  end
+end
+
+local function resume_generation()
+  -- Republish on whatever table is public now: a failed activation may have
+  -- replaced the whole butler.matrix reference, not just its functions.
+  local target = (remuda.butler and remuda.butler.matrix) or matrix
+  target.request = generation_api.request
+  target.request_json = generation_api.request_json
+  target.request_retire = generation_api.retire
+  target.request_resume = generation_api.resume
+  -- A live generation is already usable: repeated resume must not drop the
+  -- handles of an active queue without cancelling them.
+  if not retired then return end
+  retired = false
+  timer_generation = timer_generation + 1
+  watchdog_generation = watchdog_generation + 1
+  local refill, health = timer, watchdog
+  timer, watchdog = nil, nil
+  if refill and type(remuda.cancel) == "function" then pcall(remuda.cancel, refill) end
+  if health and type(remuda.cancel) == "function" then pcall(remuda.cancel, health) end
+  next_refill_ms, last_tick_ms = nil, nil
+  tokens = burst
+  local leftover = queue
+  queue = {}
+  for _, item in ipairs(leftover) do
+    if not item.completed then
+      item.in_queue = false
+      finish(item, { error = RETIRED_ERROR, queue_retired = true, not_sent = true })
+    end
+  end
+end
+
+local function retire_public()
+  retire_generation()
+end
+
+local function resume_public()
+  resume_generation()
+end
+
+generation_api = { request = matrix.request, request_json = matrix.request_json,
+  retire = retire_public, resume = resume_public }
+matrix.request_retire = retire_public
+matrix.request_resume = resume_public
 
 return matrix

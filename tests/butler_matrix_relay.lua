@@ -5759,6 +5759,39 @@ end
 -- once; each waiting mail goes out when ITS fetch answers or fails.
 
 rx_tests = {
+  { "test_rx_outbox_retired_dispatch_stops_without_retry", function()
+    local dir, path = invite_fixture(OWNER)
+    rx_with_dir(dir, function()
+      local relay, client, delivered = rx_relay(path)
+      rx_sync(client, HOME, { rx_msg("$ret", OWNER, "question") })
+      local mail = rx_mail_id(delivered, "$ret")
+      assert(mail, "the owner mail is delivered")
+      local real_reply, puts = client.reply, 0
+      client.reply = function(opts, callback)
+        puts = puts + 1
+        callback({ error = "Matrix request generation ended before the request was sent",
+          queue_retired = true, not_sent = true })
+        return { cancel = function() end }
+      end
+      local result
+      local ok, err = relay:queue_mail_reply({ mail_id = mail, reply_mail_id = "RR",
+        text = "reply-r" }, function(value) result = value end)
+      assert(ok, "the reply is queued: " .. tostring(err))
+      for _ = 1, 4 do tick_timers(1) end
+      assert(relay:state().reply_outbox["RR"] == nil,
+        "the not-sent reply leaves the outbox terminally")
+      local record = relay:state().reply_results["RR"]
+      assert(record and record.not_sent == true and type(record.error) == "string"
+        and record.event_id == "", "the terminal result records the pre-dispatch retirement")
+      assert(puts == 1, "the retired write is attempted once")
+      for _ = 1, 10 do tick_timers(1) end
+      assert(puts == 1, "retry ticks add no second PUT")
+      assert(result and result.not_sent == true and type(result.error) == "string",
+        "the callback reports not_sent, not success or uncertainty")
+      client.reply = real_reply
+      relay:stop()
+    end)
+  end },
   { "test_rx_outbox_uncertain_dispatch_stops_without_retry", function()
   local dir, path = invite_fixture(OWNER)
   rx_with_dir(dir, function()
