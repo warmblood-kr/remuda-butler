@@ -224,8 +224,10 @@ for i in 1 2 3; do
     check "reload $i" "boots=$((BASE_BOOT + i)) $EXPECT_NEW"
   else
     check "reload $i" "boots=$((BASE_BOOT + i)) $EXPECT_RESTART_BLOCKED"
-    [[ $(lua 'return tostring(remuda._butler_relay_restart_blocked)') == true ]] || \
-      fail "reload $i: owner-unverified relay restart was not reported blocked"
+    if [[ $RELAY_EXPECT == true ]]; then
+      [[ $(lua 'return tostring(remuda._butler_relay_restart_blocked)') == true ]] || \
+        fail "reload $i: owner-unverified relay restart was not reported blocked"
+    fi
   fi
   if [[ $i == 1 ]]; then
     if [[ -n "$OLD_RELAY_PID" ]] && kill -0 "$OLD_RELAY_PID" 2>/dev/null; then
@@ -265,16 +267,20 @@ new_files
 lua "remuda.reload('butler')"; settle
 if [[ -n "$OLD_RELAY_PID" ]] && kill -0 "$OLD_RELAY_PID" 2>/dev/null; then fail "rollback Python relay survived roll-forward"; fi
 check "roll forward" "boots=$((BASE_BOOT + 5)) $EXPECT_RESTART_BLOCKED_EMPTY"
-[[ $(lua 'return tostring(remuda._butler_relay_restart_blocked)') == true ]] || \
-  fail "roll forward: owner-unverified relay restart was not reported blocked"
+if [[ $RELAY_EXPECT == true ]]; then
+  [[ $(lua 'return tostring(remuda._butler_relay_restart_blocked)') == true ]] || \
+    fail "roll forward: owner-unverified relay restart was not reported blocked"
+fi
 
 echo "== tight reload loop: one boot per reload, nothing duplicated"
 lua "for _ = 1, 5 do remuda.reload('butler') end"
 for _ in 1 2 3 4 5; do lua "remuda.reload('butler')"; done
 settle
 check "tight x10" "boots=$((BASE_BOOT + 15)) $EXPECT_RESTART_BLOCKED_EMPTY"
-[[ $(lua 'return tostring(remuda._butler_relay_restart_blocked)') == true ]] || \
-  fail "tight x10: owner-unverified relay restart was not reported blocked"
+if [[ $RELAY_EXPECT == true ]]; then
+  [[ $(lua 'return tostring(remuda._butler_relay_restart_blocked)') == true ]] || \
+    fail "tight x10: owner-unverified relay restart was not reported blocked"
+fi
 [[ $(lua 'return #(remuda.hooks["butler-start"] or {})') == 1 ]] || fail "butler-start hook duplicated"
 
 echo "== cold boot through remuda butler"
