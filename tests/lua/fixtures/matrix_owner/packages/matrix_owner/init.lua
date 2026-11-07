@@ -45,7 +45,12 @@ return {
   stop = function()
     local owner = host._mq_owner
     owner.stop_calls = (owner.stop_calls or 0) + 1
-    if client and type(client.retire) == "function" then pcall(client.retire) end
+    if client and type(client.retire) == "function" then
+      local ok, result = pcall(client.retire)
+      owner.retire_pcall_ok = ok
+      owner.retire_result = result
+      owner.stop_retire_calls = (owner.stop_retire_calls or 0) + 1
+    end
   end,
   resume = function()
     local owner = host._mq_owner

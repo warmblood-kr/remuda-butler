@@ -346,14 +346,22 @@ matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
 assert(refused_count == 1 and retired_answers[3].not_sent == true,
   "old enqueue is refused with the typed result")
 assert(dispatched == after_retire, "old enqueue sends nothing")
--- Resume republishes a fresh empty epoch; nothing retired is replayed.
+-- Resume republishes the same client: the queue is empty, but the rate state
+-- (tokens and the absolute due) is preserved, so a new request waits for it.
 matrix.request_resume()
 local resumed
 matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
   function(result) resumed = result end)
-assert(dispatched == after_retire + 1, "resume dispatches a fresh request immediately")
-assert(type(resumed) == "table" and resumed.status == 200 and not resumed.error,
-  "the resumed request answers with its 200 result")
+assert(dispatched == after_retire, "resume preserves the empty token bucket")
+local resumed_refill = find_schedule("matrix-request-refill")
+now_ms = now_ms + 249
+resumed_refill.run()
+assert(dispatched == after_retire, "the preserved deadline mints nothing at +249")
+now_ms = now_ms + 1
+resumed_refill.run()
+assert(dispatched == after_retire + 1 and type(resumed) == "table"
+  and resumed.status == 200 and not resumed.error,
+  "the preserved deadline mints one credit at +250")
 assert(#retired_answers == 3, "resume does not replay retired callbacks")
 
 -- The captured JSON wrapper stays on its own generation: replacing the public
@@ -369,11 +377,16 @@ assert(stray == 0, "the captured JSON wrapper does not call the replaced request
 assert(type(captured_result) == "table" and captured_result.not_sent == true,
   "the captured wrapper returns the typed retired result")
 matrix.request_resume()
+local wrapper_before = dispatched
 local fresh_result
 matrix.request_json({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
   function(result) fresh_result = result end)
+assert(dispatched == wrapper_before, "the resumed wrapper waits for the preserved due")
+local wrapper_refill = find_schedule("matrix-request-refill")
+now_ms = now_ms + 250
+wrapper_refill.run()
 assert(type(fresh_result) == "table" and fresh_result.status == 200 and not fresh_result.error,
-  "the resumed client JSON wrapper answers 200")
+  "the resumed client JSON wrapper answers 200 at the preserved due")
 
 -- Repeated resume on a live generation must not drop active handles.
 remuda.butler.matrix = {}
@@ -455,7 +468,136 @@ for _, run in ipairs(after_pending) do run() end
 assert(after_retire_puts == 1, "no replay or second transport call")
 remuda.http.request = real_request
 
--- 15. A missing scheduler settles the queue before dispatch; it never falls
+-- 15. Retire observes timer-cancel failures, retains the exact handles, and
+-- retries them without resettling queued work; resume fails closed until clean.
+remuda.butler.matrix = {}
+dofile("packages/butler/matrix_request.lua")
+matrix = assert(remuda.butler.matrix)
+now_ms = now_ms + 1000
+dispatched = 0
+request("/_matrix/client/versions")
+local observed_queue
+matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function(result) observed_queue = result end)
+local observed_state = remuda._butler_matrix_request_state()
+local observed_refill, observed_watchdog = observed_state.timer, observed_state.watchdog
+assert(observed_refill and observed_watchdog, "both timers armed before retirement")
+local real_cancel = remuda.cancel
+remuda.cancel = function(handle)
+  if handle == observed_refill then error("refill cancel boom") end
+  if handle == observed_watchdog then return false end
+  return real_cancel(handle)
+end
+local retired = matrix.request_retire()
+assert(retired.ok == false and retired.retired == true and retired.queued_settled == 1,
+  "retire reports cancel failures and settles queued work once")
+assert(type(retired.cancel_failed) == "table" and #retired.cancel_failed == 2,
+  "both failed roles are reported")
+assert(type(retired.detail) == "string" and #retired.detail > 0, "retire carries a detail")
+assert(type(observed_queue) == "table" and observed_queue.not_sent == true,
+  "queued work still settles typed despite cancel failures")
+local pending = remuda._butler_matrix_request_state().cancel_pending
+assert(type(pending) == "table" and #pending == 2, "failed exact handles are retained")
+local retried = matrix.request_retire()
+assert(retried.ok == false and retried.queued_settled == 0,
+  "a repeated retire retries but never resettles queued work")
+local refused = matrix.request_resume()
+assert(refused.ok == false and refused.resumed == false and refused.retired == true,
+  "resume refuses a degraded generation and stays fenced")
+assert(dispatched == 1, "a refused resume dispatches nothing")
+remuda.cancel = real_cancel
+local recovered = matrix.request_retire()
+assert(recovered.ok == true and #recovered.cancel_failed == 0,
+  "retire retries the exact pending handles once cancellation works")
+assert(remuda._butler_matrix_request_state().cancel_pending == nil,
+  "confirmed cancels clear the pending set")
+local resumed = matrix.request_resume()
+assert(resumed.ok == true and resumed.resumed == true and resumed.retired == false,
+  "resume succeeds only after cleanup is confirmed")
+
+-- 16. The same captured client keeps its rate state across retire/resume:
+-- EMPTY means the queue only. Repeated live resume is idempotent and mints no
+-- extra credit; a fresh new module client is the separate initial-burst case.
+remuda.butler.matrix = {}
+dofile("packages/butler/matrix_request.lua")
+matrix = assert(remuda.butler.matrix)
+now_ms = now_ms + 1000
+dispatched = 0
+request("/_matrix/client/versions")
+local settled_second
+matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function(result) settled_second = result end)
+local epoch_retire = matrix.request_retire()
+assert(epoch_retire.ok == true and epoch_retire.queued_settled == 1
+  and #epoch_retire.cancel_failed == 0 and settled_second.not_sent == true,
+  "retire settles the queued second once with a clean role array")
+local epoch_resume = matrix.request_resume()
+assert(epoch_resume.ok == true and epoch_resume.resumed == true
+  and epoch_resume.retired == false and #epoch_resume.cancel_failed == 0,
+  "resume republishes the same client")
+local fresh
+matrix.request({ method = "GET", path = "/_matrix/client/versions" },
+  function(result) fresh = result end)
+assert(dispatched == 1, "resume preserves the empty token bucket; the request queues")
+local live_handle = remuda._butler_matrix_request_state().timer
+local live_spec = find_schedule("matrix-request-refill")
+local live_resume = matrix.request_resume()
+assert(live_resume.ok == true and live_resume.resumed == false
+  and live_resume.retired == false, "repeated live resume is idempotent")
+assert(remuda._butler_matrix_request_state().timer == live_handle,
+  "repeated live resume keeps the active deadline handle")
+now_ms = now_ms + 249
+live_spec.run()
+assert(dispatched == 1 and fresh == nil, "the preserved deadline mints nothing at +249")
+now_ms = now_ms + 1
+live_spec.run()
+assert(dispatched == 2 and fresh.status == 200,
+  "the preserved deadline mints exactly one credit at +250")
+
+-- 17. A bare helper replacement validates the prior retirement strictly
+-- before publishing; a refusal keeps the old public API and sends nothing.
+local function load_request_module()
+  remuda.butler.matrix = {}
+  dofile("packages/butler/matrix_request.lua")
+  return assert(remuda.butler.matrix)
+end
+local function expect_refused(retire, label)
+  local current = load_request_module()
+  local old_request = current.request
+  local before = dispatched
+  current.request_retire = retire
+  local ok, err = pcall(dofile, "packages/butler/matrix_request.lua")
+  assert(not ok and tostring(err):find("helper replacement refused", 1, true),
+    label .. " refuses the replacement")
+  assert(current.request == old_request, label .. " keeps the old public API")
+  assert(dispatched == before, label .. " sends nothing")
+end
+dispatched = 0
+expect_refused(function() error("boom") end, "a throwing prior retire")
+expect_refused(function()
+  return { ok = false, retired = true, queued_settled = 0, cancel_failed = {} }
+end, "a failed prior retire")
+expect_refused(function() return {} end, "a malformed prior retire")
+expect_refused(function()
+  return { ok = true, retired = true, queued_settled = 0, cancel_failed = { "refill" } }
+end, "a non-empty cancel_failed on success")
+expect_refused(function()
+  return { ok = true, retired = true, queued_settled = -1, cancel_failed = {} }
+end, "a negative queued_settled")
+expect_refused(function()
+  return { ok = true, retired = true, queued_settled = 0, cancel_failed = {},
+    detail = string.rep("x", 300) }
+end, "an unbounded detail")
+local replaced = load_request_module()
+local old_request = replaced.request
+replaced.request_retire = function()
+  return { ok = true, retired = true, queued_settled = 0, cancel_failed = {}, detail = "clean" }
+end
+assert(dofile("packages/butler/matrix_request.lua"))
+assert(replaced.request ~= old_request, "a clean prior retirement allows replacement")
+assert(dispatched == 0, "a clean replacement sends nothing")
+
+-- 18. A missing scheduler settles the queue before dispatch; it never falls
 -- back to an unthrottled network send.
 remuda.butler.matrix = {}
 remuda.schedule = nil
