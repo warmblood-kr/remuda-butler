@@ -3697,6 +3697,47 @@ local function rx_production(path, run)
   if not ok then error(err, 0) end
 end
 
+-- Production relay deliver -> real mail store on disk, with a fresh reader the
+-- test can reload after delivery. The core generates the real 26-character mail
+-- ids here (no test stub override).
+function rx_production_disk(path, mail_root, run)
+  local client, emitted = invite_client(), {}
+  local saved = { matrix.request_json, remuda.emit_until_success, remuda._butler_new_ulid,
+    remuda._butler_mail_config, remuda._butler_identity_config, remuda._butler_identity }
+  -- Load the production ULID generator (identity.lua) so the mail store gets
+  -- real 26-character ids instead of the suite's deterministic fallback.
+  remuda._butler_identity_config = { bus = {}, current_agent = function() return nil end,
+    json_quote = function(value) return '"' .. tostring(value) .. '"' end, data_home = nil }
+  dofile("packages/butler/identity.lua")
+  local function config()
+    return { bus = { agents = {}, inboxes = {}, messages = {}, objects = {}, next = 0 },
+      root = mail_root, json_quote = function(value) return '"' .. tostring(value) .. '"' end }
+  end
+  local function fresh_mail()
+    remuda._butler_mail_config = config()
+    dofile("packages/butler/mail.lua")
+    return remuda._butler_mail
+  end
+  fresh_mail()
+  matrix.request_json = client.request_json
+  remuda.emit_until_success = function(name, message)
+    assert(name == "butler/deliver", "only the Butler delivery event may be emitted, got " .. tostring(name))
+    emitted[#emitted + 1] = message
+    return remuda._butler_mail.queue(message.from, { id = "butler", alias = "butler" }, message.text,
+      message.subject, message.in_reply_to, message.references, message.matrix)
+  end
+  local ok, err = pcall(function()
+    assert(relay_module.start({ config_path = path }), "relay did not start")
+    client:sync({ json = { next_batch = "s0" } })
+    run(client, emitted, fresh_mail, mail_root)
+  end)
+  relay_module.stop()
+  matrix.request_json, remuda.emit_until_success, remuda._butler_new_ulid, remuda._butler_mail_config,
+    remuda._butler_identity_config, remuda._butler_identity =
+    saved[1], saved[2], saved[3], saved[4], saved[5], saved[6]
+  if not ok then error(err, 0) end
+end
+
 local function rx_with_dir(dir, run)
   local ok, err = pcall(run)
   relay_module.instance = nil
@@ -5143,14 +5184,17 @@ function rx_policy_tests.alternating_with_agent_target_replies()
   local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
   rx_with_dir(dir, function()
     local relay, client, delivered = rx_relay(path)
+    -- Both inbound messages are the SAME agent, so only our agent-target reply
+    -- can create the boundary that reaches the limit.
     rx_sync(client, HOME, { rx_msg("$ar-1", RX_ALLY, "@bot:example.org a", rx_thread("$ar")) })
     local first = assert(rx_mail_id(delivered, "$ar-1"), "the first agent mail is delivered")
     local ok, err = relay:queue_mail_reply({ mail_id = first, reply_mail_id = "AR1", text = "reply to agent" })
     assert(ok, "a reply to an agent is queued: " .. tostring(err))
-    rx_sync(client, HOME, { rx_msg("$ar-2", RX_PREFIX, "@bot:example.org b", rx_thread("$ar")) })
+    assert(not relay:b2b_stopped(HOME, "$ar"), "our reply is a boundary but does not stop the thread")
+    rx_sync(client, HOME, { rx_msg("$ar-2", RX_ALLY, "@bot:example.org a again", rx_thread("$ar")) })
     assert(relay:b2b_stopped(HOME, "$ar"),
-      "an agent-target reply is a boundary, so the next different agent reaches the limit")
-    local second = assert(rx_mail_id(delivered, "$ar-2"), "the second agent mail is delivered")
+      "the same agent's next message is a new turn after an agent-target reply, so it reaches the limit")
+    local second = assert(rx_mail_id(delivered, "$ar-2"), "the second same-agent mail is delivered")
     ok, err = relay:queue_mail_reply({ mail_id = second, reply_mail_id = "AR2", text = "after stop" })
     assert(ok == nil and tostring(err):find("2 Butler-only turns", 1, true),
       "the stopped thread refuses the next agent reply, got: " .. tostring(err))
@@ -5182,77 +5226,92 @@ end
 -- inbox bridge. Mail ids here come from the fixture's deterministic
 -- _butler_new_ulid stub, so they show queue identity, not runtime ULID
 -- generation.
-function rx_policy_tests.unfollow_durable_mail_inbox()
+-- Disk-authoritative durable evidence: production relay deliver -> real mail
+-- root on disk, then a fresh mail reader after the relay restarts. The helper
+-- loads the production ULID generator, so ids have the real 26-character shape;
+-- this test proves disk durability and inbox state, not the generator itself.
+function rx_policy_tests.unfollow_durable_disk_mail_root()
   local dir, path = rx_fixture()
   rx_with_dir(dir, function()
-    rx_production(path, function(client, emitted, inbox)
+    local mail_root = dir .. "/mailroot"
+    rx_production_disk(path, mail_root, function(client, emitted, fresh_mail)
       local relay = relay_module.instance
-      local function count(event_id)
-        local n = 0
-        for _, message in ipairs(emitted) do
-          if message.matrix and message.matrix.event_id == event_id then n = n + 1 end
-        end
-        return n
-      end
       local function mail_id_for(event_id)
         for mail_id, route in pairs(relay:state().routes) do
           if route.event_id == event_id then return mail_id end
         end
       end
+      local function envelope_count()
+        return #(remuda.list_dir(mail_root .. "/messages") or {})
+      end
 
-      relay:subscribe_thread(NEW, "$dur-root")
-      rx_sync(client, NEW, { rx_msg("$dur-before", OWNER, "durable before unfollow", rx_thread("$dur-root")) })
-      assert(count("$dur-before") == 1, "the real mail queue receives the followed reply")
-      local before_mail = assert(mail_id_for("$dur-before"), "the real mail queue assigned an id")
-      assert(type(before_mail) == "string" and before_mail ~= "", "the queued mail id is present")
+      relay:subscribe_thread(NEW, "$dsk-root")
+      rx_sync(client, NEW, { rx_msg("$dsk-before", OWNER, "disk before unfollow", rx_thread("$dsk-root")) })
+      local before_id = assert(mail_id_for("$dsk-before"), "the relay records the mail id")
+      assert(#before_id == 26 and before_id:match("^[0123456789ABCDEFGHJKMNPQRSTVWXYZ]+$"),
+        "the production ULID generator produced a 26-character id, got " .. tostring(before_id))
+      assert(envelope_count() == 1, "the envelope is on disk under the real mail root")
+      local stored = assert(remuda._butler_mail.find_message(before_id), "the envelope reads back")
+      assert(stored.matrix and stored.matrix.event_id == "$dsk-before",
+        "the persisted envelope carries the Matrix event id")
 
-      relay:unsubscribe_thread(NEW, "$dur-root")
-      rx_sync(client, NEW, { rx_msg("$dur-quiet", OWNER, "durable unmentioned after unfollow",
-        rx_thread("$dur-root")) })
-      assert(count("$dur-quiet") == 0, "mentions-followed suppresses the unmentioned reply")
-      assert(relay:state().processed["$dur-quiet"], "the suppressed event is durably processed")
+      relay:unsubscribe_thread(NEW, "$dsk-root")
+      rx_sync(client, NEW, { rx_msg("$dsk-quiet", OWNER, "disk unmentioned after unfollow", rx_thread("$dsk-root")) })
+      assert(relay:state().processed["$dsk-quiet"], "the filtered event is durably processed")
+      assert(envelope_count() == 1, "the filtered reply wrote no envelope")
 
-      rx_sync(client, NEW, { rx_msg("$dur-mention", OWNER, "@bot:example.org durable mention",
-        rx_thread("$dur-root")) })
-      assert(count("$dur-mention") == 1, "the trusted mention reaches the real mail queue once")
-      assert(not rx_followed(relay, NEW, "$dur-root"), "the mention does not implicitly re-follow")
+      rx_sync(client, NEW, { rx_msg("$dsk-mention", OWNER, "@bot:example.org disk mention", rx_thread("$dsk-root")) })
+      local mention_id = assert(mail_id_for("$dsk-mention"), "the mention has a mail id")
+      assert(not rx_followed(relay, NEW, "$dsk-root"), "the mention did not implicitly re-follow")
+      assert(envelope_count() == 2, "the mention has one envelope")
 
-      -- A mention pending on context when the unfollow arrives is delivered.
-      rx_sync(client, NEW, { rx_msg("$dur-pending", OWNER, "@bot:example.org pending mention",
-        rx_thread("$dur-pending-root")) }, true)
-      assert(relay:state().pending["$dur-pending"], "the fresh thread mention waits for context")
-      relay:unsubscribe_thread(NEW, "$dur-pending-root")
+      rx_sync(client, NEW, { rx_msg("$dsk-pending", OWNER, "@bot:example.org disk pending",
+        rx_thread("$dsk-pending-root")) }, true)
+      assert(relay:state().pending["$dsk-pending"], "the pending mention waits for context")
+      relay:unsubscribe_thread(NEW, "$dsk-pending-root")
       rx_context(client, true)
-      assert(count("$dur-pending") == 1, "a pending mention is still delivered after the unfollow")
-      assert(not rx_followed(relay, NEW, "$dur-pending-root"),
-        "the pending delivery does not implicitly re-follow")
+      local pending_id = assert(mail_id_for("$dsk-pending"), "the pending mention has a mail id")
+      assert(envelope_count() == 3, "the pending mention has one envelope")
 
-      -- Restart before the first inbox read: tombstone and processed state
-      -- survive, the unread mail is still there, and a replay of the same event
-      -- id does not deliver again. (This is the first read of the real inbox.)
       relay_module.stop()
       assert(relay_module.start({ config_path = path }), "the relay restarts")
-      client:sync({ json = { next_batch = "s-dur-restart" } })
+      client:sync({ json = { next_batch = "s-dsk-restart" } })
       relay = relay_module.instance
-      assert((((relay:state().unfollowed or {})[NEW] or {})["$dur-root"] ~= nil),
-        "the unfollow tombstone survives restart")
-      assert(relay:state().processed["$dur-quiet"], "the filtered event stays processed")
-      local view = inbox()
-      assert(view:find("durable before unfollow", 1, true) and view:find("durable mention", 1, true)
-        and view:find("pending mention", 1, true), "unread mail is retained across restart")
-      assert(not view:find("durable unmentioned after unfollow", 1, true),
-        "the filtered reply is absent from the real inbox")
-      local before_count, mention_count = count("$dur-before"), count("$dur-mention")
-      rx_sync(client, NEW, { rx_msg("$dur-quiet", OWNER, "durable unmentioned after unfollow",
-        rx_thread("$dur-root")),
-        rx_msg("$dur-mention", OWNER, "@bot:example.org durable mention", rx_thread("$dur-root")) })
-      assert(count("$dur-quiet") == 0 and count("$dur-mention") == mention_count
-        and count("$dur-before") == before_count,
-        "a replayed event id is deduplicated after restart")
+      local mail = fresh_mail()
+      assert(mail.is_unread("butler", before_id), "the earlier mail is still unread after restart")
+      assert(mail.is_unread("butler", mention_id) and mail.is_unread("butler", pending_id),
+        "the mention and pending mail are unread on disk")
+      local before = assert(mail.find_message(before_id), "the envelope survives the reader reload")
+      assert(before.matrix and before.matrix.event_id == "$dsk-before",
+        "the reloaded envelope keeps the Matrix event id")
+      assert(mail.find_message(mention_id).matrix.event_id == "$dsk-mention", "the mention envelope is intact")
+      local files = envelope_count()
 
-      relay:subscribe_thread(NEW, "$dur-root")
-      assert((((relay:state().unfollowed or {})[NEW] or {})["$dur-root"] == nil),
-        "an explicit follow clears the tombstone")
+      rx_sync(client, NEW, { rx_msg("$dsk-quiet", OWNER, "disk unmentioned after unfollow", rx_thread("$dsk-root")),
+        rx_msg("$dsk-mention", OWNER, "@bot:example.org disk mention", rx_thread("$dsk-root")) })
+      assert(envelope_count() == files, "a replayed event does not write a second envelope")
+      assert(mail.is_unread("butler", before_id) and mail.is_unread("butler", mention_id),
+        "the replay leaves existing unread state unchanged")
+
+      -- The latest mode applies after restart: all delivers the unfollowed
+      -- thread again without a follow, none suppresses even a mention.
+      relay:set_notification_mode(NEW, "all")
+      rx_sync(client, NEW, { rx_msg("$dsk-all", OWNER, "disk all after restart", rx_thread("$dsk-root")) })
+      local all_id = assert(mail_id_for("$dsk-all"), "all mode delivers after restart")
+      assert(mail.find_message(all_id).matrix.event_id == "$dsk-all", "the new envelope is on disk")
+      assert(not rx_followed(relay, NEW, "$dsk-root"), "all-mode delivery does not re-follow")
+      relay:set_notification_mode(NEW, "none")
+      rx_sync(client, NEW, { rx_msg("$dsk-none", OWNER, "@bot:example.org disk none",
+        rx_thread("$dsk-root")) })
+      assert(mail_id_for("$dsk-none") == nil, "none suppresses even a mention after restart")
+
+      local text = mail.inbox("butler")
+      assert(text:find("disk before unfollow", 1, true) and text:find("disk mention", 1, true)
+        and text:find("disk pending", 1, true) and text:find("disk all after restart", 1, true),
+        "the inbox shows exactly the delivered mails")
+      assert(not text:find("disk unmentioned after unfollow", 1, true)
+        and not text:find("disk none", 1, true),
+        "the filtered replies are absent from the real inbox")
     end)
   end)
 end
@@ -6641,7 +6700,7 @@ rx_tests = {
   { "test_rx_two_agents_alternating_inbound", rx_policy_tests.two_agents_alternating_inbound },
   { "test_rx_alternating_with_agent_target_replies", rx_policy_tests.alternating_with_agent_target_replies },
   { "test_rx_human_reset_clears_the_turn_guard", rx_policy_tests.human_reset_clears_the_turn_guard },
-  { "test_rx_unfollow_durable_mail_inbox", rx_policy_tests.unfollow_durable_mail_inbox },
+  { "test_rx_unfollow_durable_disk_mail_root", rx_policy_tests.unfollow_durable_disk_mail_root },
   { "test_inbox_header_names_room_and_thread", ctx_tests.test_inbox_header_names_room_and_thread },
   { "test_matrix_thread_takes_room_from_route", ctx_tests.test_matrix_thread_takes_room_from_route },
   { "test_matrix_thread_takes_a_mail_id", ctx_tests.test_matrix_thread_takes_a_mail_id },
