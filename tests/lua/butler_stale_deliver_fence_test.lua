@@ -51,37 +51,6 @@ end, 10, "Butler root start")
 T.test("a stale compiled candidate is inert and the restored current delivers", function()
   local result = T.eval([==[
     local path = os.getenv("XDG_DATA_HOME") .. "/remuda/mods/butler/packages/butler/notice.lua"
-    local file = assert(io.open(path, "r"))
-    local source = file:read("*a")
-    file:close()
-    -- Fail a real load AFTER its notice binding published a full candidate
-    -- module. Capture that generation's compiled entries directly.
-    local modified, injected = source:gsub("\nbind_send_policy%s*%(%s*%)%s*$",
-      "\nbind_send_policy()\n"
-      .. "remuda._qa_stale_deliver=NOTICE_MODULE.deliver_notice\n"
-      .. "remuda._qa_stale_module=NOTICE_MODULE\n"
-      .. "remuda._qa_stale_deliver_notices=remuda._butler_deliver_notices\n"
-      .. "error('stale-deliver-barrier')")
-    assert(injected == 1, "bind barrier not injected")
-    file = assert(io.open(path, "w"))
-    file:write(modified)
-    file:close()
-    local ok, why = pcall(remuda._load_extension_command, "butler", "butler", true)
-    file = assert(io.open(path, "w"))
-    file:write(source)
-    file:close()
-    assert(not ok and tostring(why):find("stale%-deliver%-barrier", 1),
-      "candidate must fail after publishing its notice module")
-
-    local stale = assert(remuda._qa_stale_deliver, "actual compiled candidate fn")
-    local stale_module = assert(remuda._qa_stale_module, "actual candidate claim")
-    local stale_poll = assert(remuda._qa_stale_deliver_notices, "compiled candidate poll")
-    local live_marker = assert(remuda._butler_notice, "restored current module")
-    local current = live_marker.deliver_notice
-    assert(stale ~= current, "actual stale/current functions must differ")
-
-    local bus = remuda._butler_bus
-    local spies = remuda._t_spies
     local function bytes(target)
       local opened = io.open(target, "rb")
       if not opened then return "<absent>" end
@@ -89,21 +58,38 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
       opened:close()
       return text
     end
+    local function stable(value)
+      if type(value) ~= "table" then return tostring(value) end
+      local rows = {}
+      for key, item in pairs(value) do
+        rows[#rows + 1] = { key = tostring(key), value = stable(item) }
+      end
+      table.sort(rows, function(a, b) return a.key < b.key end)
+      local parts = {}
+      for _, row in ipairs(rows) do
+        parts[#parts + 1] = row.key .. "=" .. row.value
+      end
+      return "{" .. table.concat(parts, ",") .. "}"
+    end
     local function hex(value)
       return (value:gsub(".", function(byte)
         return string.format("%02x", string.byte(byte))
       end))
     end
-    -- Root instance must be snapshotted before remuda.ls is narrowed below.
+    local bus = remuda._butler_bus
+    local spies = remuda._t_spies
+    local journal = assert(remuda._butler_delivery_journal, "delivery journal missing")
+
+    -- Arrange everything the failed reload must preserve BEFORE creating the
+    -- barrier, so the immediate post-rollback parity is barrier evidence. The
+    -- pending task value can legitimately defer a source refresh; a direct
+    -- load-extension command is used here, and the value is asserted both
+    -- across the barrier and across the later stale/current callback phase.
     local root_instance
     for _, row in ipairs(remuda.ls()) do
       if row.name == "butler" and row.alive then root_instance = row.instance_id end
     end
     assert(root_instance, "root instance missing")
-
-    -- Seed an unrelated, valid uncertain delivery intent and a nonempty pending
-    -- VALUE so the protected parity compares real content, not only keys.
-    local journal = assert(remuda._butler_delivery_journal, "delivery journal missing")
     local uncertain = assert(journal.begin({
       protocol = "pty", recipient_id = "fixture_recipient",
       message_ids = { "fixture_message" }, instance = "fixture_instance",
@@ -112,10 +98,16 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
     }))
     assert(journal.mark(uncertain, "uncertain", "fixture_uncertain"),
       "journal uncertain seed failed")
-    assert(journal.status().uncertain >= 1, "uncertain seed missing")
-    bus.pending_tasks = bus.pending_tasks or {}
-    bus.pending_tasks["other_member"] = { text = "pending-value", at = 12345 }
-
+    local function record()
+      local entry = journal.find("fixture_recipient", "fixture_message")
+      if not entry then return "<absent>" end
+      return stable({ state = entry.state, protocol = entry.protocol,
+        recipient_id = entry.recipient_id, message_ids = entry.message_ids,
+        instance = entry.instance, row_id = entry.row_id, nonce = entry.nonce,
+        generation = entry.generation, reason = entry.reason, body = entry.body,
+        body_sha256 = entry.body_sha256, created = entry.created,
+        updated = entry.updated })
+    end
     bus.agents.m1 = { id = "m1-id", kind = "codex", instance_id = "inst-1",
       parent = "butler", alias = "m1",
       native = { mode = "native", kind = "codex",
@@ -127,14 +119,6 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
     end
     local mail = assert(remuda._butler_mail.queue("butler", "m1",
       "durable stale-first task", "Task"))
-    local text = live_marker.mail_notice_text(mail, "from butler", "codex")
-    bus.notices.m1 = { count = 1, text = text, kind = "codex",
-      message_ids = { [mail.id] = text }, message_order = { mail.id },
-      message_times = { [mail.id] = os.time() },
-      first_at = os.time(), last_at = os.time() }
-    local pending = bus.notices.m1
-    assert(pending, "pending seed missing")
-
     local mail_root = remuda._butler_paths.mail_root
     local recipient_id = assert(mail.to and mail.to[1] and mail.to[1].id,
       "seed recipient id")
@@ -154,19 +138,6 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
         if name ~= "m1" then copy[name] = value end
       end
       return copy
-    end
-    local function stable(value)
-      if type(value) ~= "table" then return tostring(value) end
-      local rows = {}
-      for key, item in pairs(value) do
-        rows[#rows + 1] = { key = tostring(key), value = stable(item) }
-      end
-      table.sort(rows, function(a, b) return a.key < b.key end)
-      local parts = {}
-      for _, row in ipairs(rows) do
-        parts[#parts + 1] = row.key .. "=" .. row.value
-      end
-      return "{" .. table.concat(parts, ",") .. "}"
     end
     local function protected_parts()
       local parts = { others = stable(others()),
@@ -191,15 +162,7 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
     local function throughout()
       return table.concat({ stable(others()),
         stable(bus.notice_uncertain or {}),
-        stable(bus.pending_tasks or {}), tostring(root_instance) }, "\n")
-    end
-    local function changed_parts(before)
-      local after, changed = protected_parts(), {}
-      for key, value in pairs(before) do
-        if after[key] ~= value then changed[#changed + 1] = key end
-      end
-      table.sort(changed)
-      return table.concat(changed, ",")
+        stable(bus.pending_tasks or {}), tostring(root_instance), record() }, "\n")
     end
     local function journal_image()
       local state = journal.status()
@@ -207,9 +170,63 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
         tostring(state.dispatching), tostring(state.uncertain),
         tostring(state.accepted_unread), tostring(state.usable) }, "\n")
     end
-    local guarded, guarded_parts, journal_before =
-      protected(), protected_parts(), journal_image()
-    local throughout_before = throughout()
+    local function barrier_view()
+      local parts = { stable(others()),
+        stable(bus.notice_uncertain or {}), tostring(root_instance) }
+      for _, target in ipairs(protected_paths) do parts[#parts + 1] = bytes(target) end
+      parts[#parts + 1] = journal_image()
+      return table.concat(parts, "\n")
+    end
+    local barrier_before = barrier_view()
+
+    local file = assert(io.open(path, "r"))
+    local source = file:read("*a")
+    file:close()
+    -- Fail a real load AFTER its notice binding published a full candidate
+    -- module. Capture that generation's compiled entries directly.
+    local modified, injected = source:gsub("\nbind_send_policy%s*%(%s*%)%s*$",
+      "\nbind_send_policy()\n"
+      .. "remuda._qa_stale_deliver=NOTICE_MODULE.deliver_notice\n"
+      .. "remuda._qa_stale_module=NOTICE_MODULE\n"
+      .. "remuda._qa_stale_deliver_notices=remuda._butler_deliver_notices\n"
+      .. "error('stale-deliver-barrier')")
+    assert(injected == 1, "bind barrier not injected")
+    file = assert(io.open(path, "w"))
+    file:write(modified)
+    file:close()
+    local ok, why = pcall(remuda._load_extension_command, "butler", "butler", true)
+    file = assert(io.open(path, "w"))
+    file:write(source)
+    file:close()
+    assert(not ok and tostring(why):find("stale%-deliver%-barrier", 1),
+      "candidate must fail after publishing its notice module")
+    -- The failed reload itself preserved the seeded durable values and bytes.
+    -- The pending task value is seeded only now: a nonempty bus.pending_tasks
+    -- legitimately defers a reload through the existing readiness guard, so it
+    -- is callback-phase evidence, not barrier evidence (the graph fixture owns
+    -- the mail/roster barrier facts).
+    assert(barrier_view() == barrier_before, "post-rollback barrier facts changed")
+    local live_marker = assert(remuda._butler_notice, "restored current module")
+    -- The durable journal file is shared, but a failed load may publish a new
+    -- production instance; the restored runtime uses the live one.
+    journal = assert(remuda._butler_delivery_journal, "live delivery journal missing")
+    bus.pending_tasks = bus.pending_tasks or {}
+    bus.pending_tasks["other_member"] = { text = "pending-value", at = 12345 }
+    local text = live_marker.mail_notice_text(mail, "from butler", "codex")
+    bus.notices.m1 = { count = 1, text = text, kind = "codex",
+      message_ids = { [mail.id] = text }, message_order = { mail.id },
+      message_times = { [mail.id] = os.time() },
+      first_at = os.time(), last_at = os.time() }
+    local pending = bus.notices.m1
+    assert(pending, "pending seed missing")
+    local guarded, guarded_parts = protected(), protected_parts()
+    local journal_before, throughout_before = journal_image(), throughout()
+
+    local stale = assert(remuda._qa_stale_deliver, "actual compiled candidate fn")
+    local stale_module = assert(remuda._qa_stale_module, "actual candidate claim")
+    local stale_poll = assert(remuda._qa_stale_deliver_notices, "compiled candidate poll")
+    local current = live_marker.deliver_notice
+    assert(stale ~= current, "actual stale/current functions must differ")
 
     local begin = journal.begin
     local begins = 0
@@ -217,7 +234,6 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
       begins = begins + 1
       return begin(...)
     end
-    local runs = #spies.runs
     local function inert(label, action)
       local before_runs, before_begins = #spies.runs, begins
       local before_pending = bus.notices.m1
@@ -231,8 +247,7 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
 
     -- STALE FIRST: the same real pending stays populated.
     inert("stale-deliver", function() stale("m1") end)
-    assert(protected() == guarded,
-      "stale deliver changed durable facts: " .. changed_parts(guarded_parts))
+    assert(protected() == guarded, "stale deliver changed durable facts")
     assert(journal_image() == journal_before, "stale deliver changed the journal")
     inert("stale-poll", function() stale_poll() end)
     inert("stale-remind", function() stale_module.remind_unread_notices("m1", agent, now) end)
@@ -240,11 +255,9 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
       stale_module.complete_notice_recovery("m1", { message_ids = { mail.id } })
     end)
     inert("stale-native", function() stale_module.native_publication("m1") end)
-    assert(protected() == guarded,
-      "stale entries changed durable facts: " .. changed_parts(guarded_parts))
+    assert(protected() == guarded, "stale entries changed durable facts")
     assert(journal_image() == journal_before, "stale entries changed the journal")
-    assert(#spies.runs == runs, "stale entries dispatched")
-    assert(spies.keys == 0 and spies.types == 0, "stale entries typed")
+    assert(throughout() == throughout_before, "stale entries changed protected values")
 
     -- Strict identity: a missing or foreign marker is inert too.
     remuda._butler_notice = nil
@@ -252,18 +265,23 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
     remuda._butler_notice = {}
     inert("foreign-marker", function() stale("m1") end)
     remuda._butler_notice = live_marker
-    assert(throughout() == throughout_before,
-      "marker probes changed protected facts")
+    assert(protected() == guarded, "marker probes changed durable facts")
     assert(journal_image() == journal_before, "marker probes changed the journal")
+    assert(throughout() == throughout_before, "marker probes changed protected values")
 
     -- The one chosen route: the restored current generation delivers the same
-    -- real pending once (one transport dispatch, one journal attempt-begin).
+    -- real pending once (one transport dispatch, one journal attempt-begin)
+    -- and records the meaningful final journal outcome for that exact mail.
     local r0, b0 = #spies.runs, begins
     current("m1")
     local current_runs, current_begins = #spies.runs - r0, begins - b0
     assert(current_runs == 1 and current_begins == 1,
-      "current same-pending route: " .. current_runs .. "/" .. current_begins)
+      "current same-pending route: " .. current_runs .. "/" .. current_begins
+      .. " state=" .. tostring(journal.state_of("m1-id", mail.id)))
     assert(bus.notices.m1 == nil, "current same-pending did not settle")
+    assert(journal.state_of("m1-id", mail.id) == "accepted_unread",
+      "current same-pending final journal state: "
+        .. tostring(journal.state_of("m1-id", mail.id)))
 
     -- A separate positive proves the restored path is not a global no-op.
     local positive = assert(remuda._butler_mail.queue("butler", "m1",
@@ -277,11 +295,15 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
     current("m1")
     assert(#spies.runs - r1 == 1 and begins - b1 == 1 and bus.notices.m1 == nil,
       "restored current new-task positive failed")
-    -- The unrelated uncertain intent, pending value and durable mail bytes
+    assert(journal.state_of("m1-id", positive.id) == "accepted_unread",
+      "current positive final journal state: "
+        .. tostring(journal.state_of("m1-id", positive.id)))
+    -- The exact unrelated uncertain record, pending value and root instance
     -- survive the whole sequence.
     assert(throughout() == throughout_before,
-      "current delivery changed protected facts")
-    assert(journal.status().uncertain >= 1, "uncertain intent lost")
+      "current delivery changed protected values")
+    assert(journal.find("fixture_recipient", "fixture_message").state == "uncertain",
+      "uncertain intent lost")
     assert(bus.pending_tasks["other_member"].text == "pending-value",
       "pending value lost")
 
