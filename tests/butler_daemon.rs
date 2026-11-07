@@ -3733,8 +3733,12 @@ fn butler_matrix_pending_mail_survives_five_fast_lifecycle_restarts() {
         lua_raw_string(&token), lua_raw_string(&config)));
     for _ in 0..5 { eval(&path, "remuda.reload('butler')"); }
     let result = eval(&path, r#"
-      local relay = remuda.butler.matrix.relay.instance
-      if not relay then return "relay-not-started" end
+      local matrix = remuda.butler.matrix
+      if matrix.relay.instance then return "unexpected-relay-before-verified-start" end
+      matrix.relay.start(remuda._butler_matrix_config)
+      remuda.http.tick()
+      local relay = matrix.relay.instance
+      if not relay then return "verified-restart-not-started" end
       local state = relay:state()
       if state.pending["$survives-restart"] then return "pending-not-acked" end
       if not state.processed["$survives-restart"] then return "pending-was-lost" end
@@ -4210,11 +4214,17 @@ fn butler_matrix_relay_reload_replaces_the_fake_http_loop_once() {
     assert_eq!(read_count(&path, "return #remuda.http.calls"), 1,
         "main and lifecycle startup must create only one active relay poll");
     eval(&path, "remuda.reload('butler')");
+    assert_eq!(read_count(&path, "return #remuda.http.calls"), 1,
+        "a reload must not start an owner-unverified relay");
+    eval(&path, "remuda.butler.matrix.relay.start(remuda._butler_matrix_config)");
     assert_eq!(read_count(&path, "return #remuda.http.calls"), 2,
-        "one reload must cancel and replace exactly one request loop");
+        "one explicit verified-owner start must create exactly one request loop");
     eval(&path, "remuda.reload('butler')");
-    assert_eq!(read_count(&path, "return #remuda.http.calls"), 3,
+    assert_eq!(read_count(&path, "return #remuda.http.calls"), 2,
         "repeated reloads must not duplicate relay loops");
+    eval(&path, "remuda.butler.matrix.relay.start(remuda._butler_matrix_config)");
+    assert_eq!(read_count(&path, "return #remuda.http.calls"), 3,
+        "each verified-owner start must replace exactly one request loop");
 }
 
 #[cfg(unix)]
@@ -9226,7 +9236,7 @@ fn butler_matrix_cancellation_completes_queued_inflight_and_held_once() {
       first:cancel()
       first:cancel()
       remuda.http.tick()
-       if not first_result or first_result.error ~= "request cancelled" then return "inflight-cancel-not-reported" end
+       if not first_result or first_result.error ~= "cancelled" then return "inflight-cancel-not-reported" end
       local count = 0
       local held_url = "https://matrix.example.org/_matrix/client/v3/sync?timeout=30000"
       remuda.http.hold("GET", held_url)

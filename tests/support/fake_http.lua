@@ -2,6 +2,12 @@
 -- Calls are recorded without touching the network; callbacks run on tick.
 remuda.http = { calls = {}, pending = {}, responses = {}, response_prefixes = {}, holds = {} }
 remuda._fake_http_timers = {}
+-- A synchronous fake tick does not advance real monotonic time. Give the
+-- request refill one 250 ms rate boundary per tick so the production cadence
+-- is exercised without an early-refill bypass; fixtures that need a different
+-- timeline override `remuda._butler_matrix_request_clock` after this file.
+local fake_request_now_ms = 0
+remuda._butler_matrix_request_clock = function() return fake_request_now_ms end
 
 local MAX_BYTES = 20 * 1024 * 1024
 local DEFAULT_MAX_BYTES = 1024 * 1024
@@ -111,6 +117,7 @@ function remuda.http.release(method, url, result)
 end
 
 function remuda.http.tick()
+  fake_request_now_ms = fake_request_now_ms + 250
   for _, timer in ipairs(remuda._fake_http_timers) do
     if not timer.cancelled then timer.spec.run() end
   end

@@ -6,7 +6,17 @@ host.exec = function(name)
   if name == 'butler/system' then host._butler_system = {} end
   if name == 'butler/main' then
     local id = #stopped + 1
+    local notice = { _policy_bound = true }
     host.butler.dialogs = { stop = function() stopped[#stopped + 1] = id end }
+    host.butler.send_policy = {
+      readiness = function()
+        return { owner = notice, bound = true, transport_acquired = true }
+      end,
+    }
+    host.butler.native_dispatch = { admit = function() return { outcome = "not_written" } end }
+    host.butler.matrix = {}
+    host._butler_notice = notice
+    host._butler_notice_config = { bus = host._butler_bus }
     host._butler_dialog_tick = function() ticks = ticks + 1 end
   end
 end
