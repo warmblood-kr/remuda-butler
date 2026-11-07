@@ -6,8 +6,28 @@ local matrix = butler.matrix or {}
 butler.matrix = matrix
 -- A new generation must retire the previous one before publishing its own
 -- functions: a dirty reexec (or a failed reload's staging pass) can otherwise
--- leave queued callbacks on timers nobody owns any more.
-if type(matrix.request_retire) == "function" then pcall(matrix.request_retire) end
+-- leave queued callbacks on timers nobody owns any more. A refusal must keep
+-- the old public API and its exact handles intact for a safe cleanup retry.
+local function valid_retirement(value)
+  if type(value) ~= "table" then return false end
+  if value.ok ~= true or value.retired ~= true then return false end
+  if type(value.queued_settled) ~= "number" or value.queued_settled < 0
+      or value.queued_settled % 1 ~= 0 then return false end
+  if type(value.cancel_failed) ~= "table" or next(value.cancel_failed) ~= nil then return false end
+  if value.detail ~= nil then
+    if type(value.detail) ~= "string" or #value.detail > 256 then return false end
+  end
+  return true
+end
+
+local previous_retire = type(matrix.request_retire) == "function" and matrix.request_retire or nil
+if previous_retire then
+  local ok, result = pcall(previous_retire)
+  if not ok or not valid_retirement(result) then
+    -- Constant, bounded message: never the raw thrown payload.
+    error("Matrix request helper replacement refused: previous generation did not retire cleanly", 0)
+  end
+end
 local json = assert(remuda.json, "Matrix requires core remuda.json")
 matrix.json_null = json.null
 matrix.json_array = json.array
@@ -1126,24 +1146,99 @@ end
 -- failed activation may have overwritten it) and starts a fresh empty epoch
 -- without replaying anything retire() already settled.
 local generation_api
+-- role -> { handle = exact handle, reason = bounded category }. A failed cancel
+-- keeps the exact handle for a safe idempotent retry; never claim it is gone.
+local cancel_pending = {}
+
+local function cancel_failed_roles()
+  local roles = {}
+  for role in pairs(cancel_pending) do roles[#roles + 1] = role end
+  table.sort(roles)
+  return roles
+end
+
+-- Detail is a bounded, constant vocabulary: never the raw thrown payload, which
+-- could be unbounded or carry secrets from a transport/core error.
+local CANCEL_REASON = {
+  raised = "cancel raised",
+  refused = "cancel refused",
+  unavailable = "cancel unavailable",
+}
+
+local function cancel_detail(prefix)
+  local parts = {}
+  for role, state in pairs(cancel_pending) do
+    parts[#parts + 1] = role .. " " .. tostring(CANCEL_REASON[state.reason] or "cancel failed")
+  end
+  table.sort(parts)
+  if #parts == 0 then return prefix end
+  return prefix .. "; " .. table.concat(parts, "; ")
+end
+
+local function cancel_exact(role, handle)
+  if not handle then return true end
+  if type(remuda.cancel) ~= "function" then
+    cancel_pending[role] = { handle = handle, reason = "unavailable" }
+    return false
+  end
+  local ok, value = pcall(remuda.cancel, handle)
+  if not ok then
+    cancel_pending[role] = { handle = handle, reason = "raised" }
+    return false
+  end
+  -- nil is accepted success; an explicit false means the core refused.
+  if value == false then
+    cancel_pending[role] = { handle = handle, reason = "refused" }
+    return false
+  end
+  cancel_pending[role] = nil
+  return true
+end
+
+local function retry_pending_cancels()
+  for role, state in pairs(cancel_pending) do
+    cancel_exact(role, state.handle)
+  end
+  return cancel_failed_roles()
+end
+
+local function retirement_result(settled)
+  local failed = cancel_failed_roles()
+  return {
+    ok = #failed == 0,
+    retired = true,
+    queued_settled = settled or 0,
+    cancel_failed = failed,
+    detail = cancel_detail("generation retired"),
+  }
+end
+
 local function retire_generation()
-  if retired then return end
+  if retired then
+    -- Idempotent: retry only the exact handles a previous cancel failed to
+    -- release. Never resettle queued work and never move the epoch again.
+    retry_pending_cancels()
+    return retirement_result(0)
+  end
   retired = true
   timer_generation = timer_generation + 1
   watchdog_generation = watchdog_generation + 1
   local refill, health = timer, watchdog
   timer, watchdog = nil, nil
   last_tick_ms = nil
-  if refill and type(remuda.cancel) == "function" then pcall(remuda.cancel, refill) end
-  if health and type(remuda.cancel) == "function" then pcall(remuda.cancel, health) end
+  if refill then cancel_exact("refill", refill) end
+  if health then cancel_exact("watchdog", health) end
+  local settled = 0
   local pending = queue
   queue = {}
   for _, item in ipairs(pending) do
     if not item.completed then
       item.in_queue = false
       finish(item, { error = RETIRED_ERROR, queue_retired = true, not_sent = true })
+      settled = settled + 1
     end
   end
+  return retirement_result(settled)
 end
 
 local function resume_generation()
@@ -1156,32 +1251,54 @@ local function resume_generation()
   target.request_resume = generation_api.resume
   -- A live generation is already usable: repeated resume must not drop the
   -- handles of an active queue without cancelling them.
-  if not retired then return end
+  if not retired then
+    return { ok = true, retired = false, resumed = false, queued_settled = 0,
+      cancel_failed = {}, detail = "generation is live; request API republished" }
+  end
+  local failed = retry_pending_cancels()
+  if #failed > 0 then
+    -- Fail closed: stay retired/fenced until every exact handle is confirmed.
+    return { ok = false, retired = true, resumed = false, queued_settled = 0,
+      cancel_failed = failed,
+      detail = cancel_detail("resume refused: timer cancellation is unconfirmed") }
+  end
   retired = false
   timer_generation = timer_generation + 1
   watchdog_generation = watchdog_generation + 1
   local refill, health = timer, watchdog
   timer, watchdog = nil, nil
-  if refill and type(remuda.cancel) == "function" then pcall(remuda.cancel, refill) end
-  if health and type(remuda.cancel) == "function" then pcall(remuda.cancel, health) end
-  next_refill_ms, last_tick_ms = nil, nil
-  tokens = burst
+  if refill then cancel_exact("refill", refill) end
+  if health then cancel_exact("watchdog", health) end
+  failed = cancel_failed_roles()
+  if #failed > 0 then
+    retired = true
+    return { ok = false, retired = true, resumed = false, queued_settled = 0,
+      cancel_failed = failed,
+      detail = cancel_detail("resume refused: timer cancellation is unconfirmed") }
+  end
+  -- The same captured client keeps its rate state: EMPTY means the queue only.
+  -- Tokens and the absolute next_refill_ms survive retire/resume; a fresh new
+  -- module client is the separate initial-burst case.
+  local settled = 0
   local leftover = queue
   queue = {}
   for _, item in ipairs(leftover) do
     if not item.completed then
       item.in_queue = false
       finish(item, { error = RETIRED_ERROR, queue_retired = true, not_sent = true })
+      settled = settled + 1
     end
   end
+  return { ok = true, retired = false, resumed = true, queued_settled = settled,
+    cancel_failed = {}, detail = "request queue emptied; rate state preserved" }
 end
 
 local function retire_public()
-  retire_generation()
+  return retire_generation()
 end
 
 local function resume_public()
-  resume_generation()
+  return resume_generation()
 end
 
 generation_api = { request = matrix.request, request_json = matrix.request_json,
@@ -1191,7 +1308,11 @@ matrix.request_resume = resume_public
 -- Test seam: the exact handles this generation returned. A real core may not
 -- key remuda.schedules by handle, so fixtures must not guess from the table.
 remuda._butler_matrix_request_state = function()
-  return { timer = timer, watchdog = watchdog, queued = #queue, retired = retired }
+  local pending = {}
+  for role in pairs(cancel_pending) do pending[#pending + 1] = role end
+  table.sort(pending)
+  return { timer = timer, watchdog = watchdog, queued = #queue, retired = retired,
+    cancel_pending = #pending > 0 and pending or nil }
 end
 
 return matrix
