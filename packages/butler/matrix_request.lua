@@ -15,6 +15,13 @@ local queue, timer = {}, nil
 local tokens, burst = 1, 1
 local interval = tonumber(os.getenv("REMUDA_BUTLER_MATRIX_RATE_INTERVAL")) or 0.25
 if interval < 0 then interval = 0 end
+-- A refill timer belongs to the module generation that armed it. A stored
+-- handle is not proof that it still ticks: after a partial reload or a failed
+-- resume the old closure can stop while `timer` stays set, and the queue then
+-- waits forever. Every tick stamps a heartbeat; a handle that stops stamping
+-- is replaced instead of trusted.
+local timer_heartbeat = 0
+local STALE_AFTER = math.max(2, interval * 8)
 
 local function trim(value)
   return (value:gsub("^%s+", ""):gsub("%s+$", ""))
@@ -763,35 +770,55 @@ function matrix.request_json(args, on_done)
   end)
 end
 
+local function clear_timer()
+  local handle = timer
+  timer, timer_heartbeat = nil, 0
+  if handle and type(remuda.cancel) == "function" then pcall(remuda.cancel, handle) end
+end
+
+local function timer_is_stale()
+  return timer ~= nil and (os.clock() - timer_heartbeat) > STALE_AFTER
+end
+
+-- A dispatch that throws must not lose the item silently: the caller's `done`
+-- is once-only, so answering it with the error is the only honest outcome.
+local function run_item(item)
+  if item.cancelled then return end
+  local ok, err = pcall(item.dispatch, item)
+  if not ok and item.done then
+    item.completed = true
+    item.done({ error = "Matrix request dispatch failed: " .. tostring(err) })
+  end
+end
+
 local function schedule_queue()
-  if timer or #queue == 0 then return end
-  if interval == 0 then
+  if #queue == 0 then return end
+  if timer_is_stale() then clear_timer() end
+  if interval == 0 or type(remuda.schedule) ~= "function" then
     while #queue > 0 do
       local item = table.remove(queue, 1)
       item.in_queue = false
-      if not item.cancelled then item.dispatch(item) end
+      run_item(item)
     end
     return
   end
+  if timer then return end
   timer = remuda.schedule({ every = interval, run = function()
+    timer_heartbeat = os.clock()
     tokens = math.min(burst, tokens + 1)
     if #queue > 0 and tokens > 0 then
       local item = table.remove(queue, 1)
       item.in_queue = false
       tokens = tokens - 1
-      if not item.cancelled then item.dispatch(item) end
+      run_item(item)
     end
-    if #queue == 0 then
-      local current = timer
-      timer = nil
-      if current then remuda.cancel(current) end
-      return
-    end
+    if #queue == 0 then clear_timer() end
   end })
+  timer_heartbeat = os.clock()
 end
 
 local function enqueue(dispatch, done)
-  local item = { dispatch = dispatch, cancelled = false }
+  local item = { dispatch = dispatch, done = done, cancelled = false }
   local handle = { cancel = function()
     if item.cancelled or item.completed then return end
     item.cancelled = true
@@ -809,7 +836,7 @@ local function enqueue(dispatch, done)
   item.handle = handle
   if tokens > 0 then
     tokens = tokens - 1
-    dispatch(item)
+    run_item(item)
   else
     item.in_queue = true
     queue[#queue + 1] = item
