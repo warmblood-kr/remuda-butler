@@ -189,6 +189,9 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
       .. "remuda._qa_stale_deliver=NOTICE_MODULE.deliver_notice\n"
       .. "remuda._qa_stale_module=NOTICE_MODULE\n"
       .. "remuda._qa_stale_deliver_notices=remuda._butler_deliver_notices\n"
+      .. "remuda._qa_stale_notify=remuda._butler_notify\n"
+      .. "remuda._qa_stale_open_stuck=remuda._butler_notice_open_stuck\n"
+      .. "remuda._qa_stale_compacted=remuda._butler_notice_compacted\n"
       .. "error('stale-deliver-barrier')")
     assert(injected == 1, "bind barrier not injected")
     file = assert(io.open(path, "w"))
@@ -225,6 +228,9 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
     local stale = assert(remuda._qa_stale_deliver, "actual compiled candidate fn")
     local stale_module = assert(remuda._qa_stale_module, "actual candidate claim")
     local stale_poll = assert(remuda._qa_stale_deliver_notices, "compiled candidate poll")
+    local stale_notify = assert(remuda._qa_stale_notify, "compiled candidate notify")
+    local stale_open = assert(remuda._qa_stale_open_stuck, "compiled candidate open_stuck")
+    local stale_compacted = assert(remuda._qa_stale_compacted, "compiled candidate compacted")
     local current = live_marker.deliver_notice
     assert(stale ~= current, "actual stale/current functions must differ")
 
@@ -255,6 +261,20 @@ T.test("a stale compiled candidate is inert and the restored current delivers", 
       stale_module.complete_notice_recovery("m1", { message_ids = { mail.id } })
     end)
     inert("stale-native", function() stale_module.native_publication("m1") end)
+    inert("stale-notify", function()
+      stale_notify("m1", "stale notice text", mail.id, false, false)
+    end)
+    local stuck_before = bus.notice_stuck and bus.notice_stuck.m1
+    local seeded_before = bus.unread_seeded and bus.unread_seeded.m1
+    inert("stale-open-stuck", function() stale_open("m1", { mail.id }, "stale") end)
+    inert("stale-compacted", function() stale_compacted("m1") end)
+    assert((bus.notice_stuck and bus.notice_stuck.m1) == stuck_before,
+      "stale open_stuck mutated stuck state")
+    assert((bus.unread_seeded and bus.unread_seeded.m1) == seeded_before,
+      "stale compacted mutated seed state")
+    -- deliver_native_now, the debounce callback and notice_recovery_error are
+    -- module locals; a stale image cannot expose them except through the
+    -- fenced entries above, so their entry checks are defence in depth.
     assert(protected() == guarded, "stale entries changed durable facts")
     assert(journal_image() == journal_before, "stale entries changed the journal")
     assert(throughout() == throughout_before, "stale entries changed protected values")
