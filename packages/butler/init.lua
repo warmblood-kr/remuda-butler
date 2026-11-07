@@ -156,6 +156,10 @@ local function load_main()
   if main_loaded then return end
   if main_loading then return end
   main_loading = true
+  -- The refusal signal is a per-load outcome, never a sticky bypass: clear it
+  -- before this load and let main.lua set it only for its own guard decision.
+  host._butler_runtime_refusal = nil
+  runtime_refusal_only = false
   local ok, err = pcall(function()
     host.exec("butler/system")
     system = assert(host._butler_system)
@@ -202,6 +206,21 @@ end
 local function start_matrix_relay()
   local matrix = host.butler and host.butler.matrix
   local relay = matrix and matrix.relay
+  -- The marker is an admission barrier, not just a diagnostic: a relay that
+  -- was running when the previous activation stopped may have a hidden writer.
+  -- Only a positive owner proof may start again; a clean cold start has no
+  -- marker and is unaffected.
+  if host._butler_relay_owner_unverified then
+    if relay_owner_fenced() then
+      host._butler_relay_owner_unverified = nil
+      host._butler_relay_restart_blocked = nil
+      report_relay("ok", "owner_proven")
+    else
+      host._butler_relay_restart_blocked = true
+      report_relay("degraded", "owner_unknown")
+      return
+    end
+  end
   if host._butler_matrix_config and relay and not relay.instance and not host._butler_skip_relay
     and not host._butler_standby
     and type(host.http) == "table" and type(host.http.request) == "function" then
@@ -221,9 +240,15 @@ local function boot()
     main_loading = false
   end
   load_main()
-  if host._butler_standby then
+  if runtime_refusal_only or host._butler_standby then
+    -- A refusal/test-mode catalog is commands-only: never run bootstrap,
+    -- emit a start notification or start a resource from it.
     main_loaded = false
-    error(host.butler.guard.refusal(host._butler_standby), 0)
+    local guard = host.butler and host.butler.guard
+    local reason = guard and type(guard.refusal) == "function"
+      and guard.refusal(host._butler_standby or "home already owned")
+      or "Butler is not the active owner; commands only"
+    error(reason, 0)
   end
   if boot_stage < 1 then boot_stage = 1 end
   if boot_stage < 2 then
@@ -385,25 +410,14 @@ return {
       -- Validate the restored graph before any resource can poll or send.
       validate_runtime()
       -- A stopped handle is not proof the old writer is gone. Never restart a
-      -- stopped snapshot without a positive owner/resource fence: a hidden
-      -- writer would become a second owner. Mark the resource unavailable and
-      -- leave it stopped for explicit owner maintenance.
+      -- stopped snapshot without a positive owner/resource fence; the shared
+      -- start path makes that an admission barrier and reports owner_unknown.
       if boot_stage >= 4 and last_good and last_good.relay_running then
         local matrix = host.butler and host.butler.matrix
         local relay = matrix and matrix.relay
         if relay and not relay.instance then
-          if relay_owner_fenced() then
-            host._butler_relay_restart_blocked = nil
-            host._butler_relay_owner_unverified = nil
-            start_matrix_relay()
-            report_relay("ok", "owner_proven")
-          else
-            host._butler_relay_restart_blocked = true
-            host._butler_relay_owner_unverified = true
-            report_relay("degraded", "owner_unknown")
-            local trace = host._butler_session_trace or _G._butler_session_trace
-            if trace then pcall(trace, "relay_owner_unknown", "resume left Matrix relay stopped") end
-          end
+          host._butler_relay_owner_unverified = true
+          start_matrix_relay()
         end
       end
     end)

@@ -15,6 +15,25 @@ local function declaration(host)
   return chunk()
 end
 
+local function publish_graph(host, options)
+  options = options or {}
+  local notice = { _policy_bound = true }
+  local policy = {}
+  if options.readiness ~= false then
+    policy.readiness = function()
+      return { owner = notice, bound = true, transport_acquired = true }
+    end
+  end
+  host.butler = {
+    dialogs = { install = function() end, stop = function() end },
+    native_dispatch = { admit = function() return { outcome = "not_written" } end },
+    send_policy = policy,
+    matrix = options.matrix or {},
+  }
+  host._butler_notice = notice
+  host._butler_notice_config = { bus = host._butler_bus }
+end
+
 local function fixture(options)
   options = options or {}
   local host = {
@@ -45,21 +64,7 @@ local function fixture(options)
       host._butler_runtime_refusal = true
       return
     end
-    local notice = { _policy_bound = true }
-    local policy = {}
-    if options.readiness ~= false then
-      policy.readiness = function()
-        return { owner = notice, bound = true, transport_acquired = true }
-      end
-    end
-    host.butler = {
-      dialogs = { install = function() end, stop = function() end },
-      native_dispatch = { admit = function() return { outcome = "not_written" } end },
-      send_policy = policy,
-      matrix = options.matrix or {},
-    }
-    host._butler_notice = notice
-    host._butler_notice_config = { bus = host._butler_bus }
+    publish_graph(host, options)
   end
   return host,
     function(value) failing = value end,
@@ -251,6 +256,58 @@ test("resume does not rewind durable bus state", function()
   module.resume(state)
   assert(host._butler_bus.durable.marker == 2,
     "runtime graph rollback must not restore durable state")
+end)
+
+test("a stale refusal marker cannot bypass a later malformed load", function()
+  local host = fixture({ refusal = true })
+  local first = declaration(host)
+  first.commands({})
+  assert(host._butler_runtime_refusal == true, "refusal marker set")
+  -- Same host, malformed active graph: the stale refusal marker must not be
+  -- accepted as this load's guard decision.
+  host.exec = function(name)
+    if name == "butler/system" then host._butler_system = {}; return end
+    assert(name == "butler/main")
+    host.butler = { dialogs = { install = function() end, stop = function() end },
+      native_dispatch = { admit = function() end }, matrix = {} }
+    host._butler_notice = {}
+  end
+  local malformed = declaration(host)
+  assert(not pcall(malformed.commands, {}), "stale refusal bypassed readiness")
+  -- Corrected active graph on the same host still validates.
+  host.exec = function(name)
+    if name == "butler/system" then host._butler_system = {}; return end
+    assert(name == "butler/main")
+    publish_graph(host)
+  end
+  local corrected = declaration(host)
+  corrected.commands({})
+end)
+
+test("refusal-only graph cannot bootstrap or start a resource", function()
+  local host = fixture({ refusal = true })
+  local attempts = 0
+  host._butler_bootstrap = function() attempts = attempts + 1 end
+  local module = declaration(host)
+  module.commands({})
+  assert(not pcall(module.start, {}), "refusal graph booted")
+  assert(attempts == 0, "refusal graph ran bootstrap")
+end)
+
+test("an unverified relay owner blocks a candidate start", function()
+  local host, relay, counters = relay_fixture(false)
+  host._butler_matrix_config = { config_path = "/tmp/butler-test-config" }
+  local first = declaration(host)
+  local state = {}
+  first.commands(state)
+  first.start(state)
+  first.stop(state)
+  assert(host._butler_relay_owner_unverified == true, "stop did not mark unverified")
+  local second = declaration(host)
+  second.commands(state)
+  second.start(state)
+  assert(counters.starts() == 0, "candidate started an unverified second writer")
+  assert(host._butler_relay_restart_blocked == true, "blocked state missing")
 end)
 
 os.exit(failures == 0 and 0 or 1)
