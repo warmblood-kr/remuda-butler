@@ -53,6 +53,10 @@ if [[ $mode == policy ]]; then
   # that never executes it would report green without testing it.
   run butler_inbox_db.lua luajit "tests/butler_inbox_db.lua"
   run relay_receipts_db.lua luajit "tests/relay_receipts_db.lua"
+  run matrix_request_queue.lua luajit "tests/matrix_request_queue.lua"
+  # Lifecycle reload rollback is pure Lua; keep it on PRs so a policy run
+  # cannot report green without exercising the recovery contract.
+  run butler_lifecycle_reload.lua luajit "tests/butler_lifecycle_reload.lua"
 fi
 if [[ $mode == all ]]; then
 for lua in "$REPO"/tests/*.lua; do

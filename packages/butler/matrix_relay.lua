@@ -1438,6 +1438,37 @@ function relay.new(options)
       thread_root = item.thread_root, txn_id = item.txn_id, from_outbox = true }, function(result)
       if reply_in_flight[reply_id] ~= token or generation ~= send_generation then return end
       reply_in_flight[reply_id] = nil
+      if type(result) == "table" and (result.queue_retired == true or result.not_sent == true) then
+        -- A known pre-dispatch retirement was never sent. Stop the outbox item
+        -- terminally (same shape as the existing attempts-exhausted path) and
+        -- never enter the generic retry loop.
+        item.status = "failed"
+        item.last_error = tostring(result.error or "Matrix reply was retired before it was sent")
+        state.reply_results[reply_id] = { source_mail_id = item.source_mail_id,
+          reply_mail_id = reply_id, room_id = item.room_id, thread_root = item.thread_root,
+          event_id = "", error = item.last_error, not_sent = true, txn_id = item.txn_id,
+          completed_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
+        state.reply_outbox[reply_id] = nil
+        trim_map(state.reply_results, MAX_REPLY_RESULTS, "completed_at")
+        diagnostic("error", "reply_not_sent", tostring(reply_id))
+        pcall(persist)
+        local retired_receipts = remuda._butler_relay_receipts
+        if retired_receipts then
+          pcall(retired_receipts.record, reply_id, item.txn_id, state.reply_results[reply_id])
+        end
+        if callback then callback({ error = item.last_error, not_sent = true }) end
+        return
+      end
+      if type(result) == "table" and result.uncertain then
+        -- The write may have reached the homeserver. Stop this outbox item in
+        -- the existing uncertain state; never enter the generic retry path.
+        item.status = "uncertain"
+        item.last_error = tostring(result.error or "Matrix reply dispatch outcome unknown")
+        diagnostic("error", "reply_uncertain", tostring(reply_id))
+        pcall(persist)
+        if callback then callback({ error = item.last_error, uncertain = true }) end
+        return
+      end
       if type(result) == "table" and not result.error then
         local ids = result.event_ids or {}
         local sent_id = result.event_id or ids[#ids]

@@ -25,6 +25,16 @@ local startup_action_safe
 -- remuda._butler_notice when deciding whether an attempt is still current.
 local NOTICE_MODULE = {}
 
+-- Strict image ownership for mutating entries. A failed reload restores the
+-- previous notice module into remuda._butler_notice; a compiled callback left
+-- over from the discarded generation must not then refresh pending state,
+-- begin a journal attempt, arm a watcher, dequeue or send. Only the exact
+-- published table may act; a nil or foreign marker is inert. The check is per
+-- invocation: a captured generation can outlive a promote/rollback.
+local function notice_image_current()
+  return remuda._butler_notice == NOTICE_MODULE
+end
+
 -- #201: the Codex sandbox blocks the CLI, so a Codex member is pointed at the MCP tool first.
 local function inbox_hint(kind)
   return kind == "codex" and "MCP butler_inbox (or remuda butler inbox)" or "remuda butler inbox"
@@ -604,7 +614,7 @@ local function pending_notice_text(pending)
   return pending.count .. " new Butler messages arrived. Read them: " .. inbox_hint(pending.kind)
 end
 -- Automatic mailbox wakeups: one atomic core send; see deliver_notice below.
-local notice_recovery_error, notice_delivery_uncertain
+local notice_recovery_error, notice_delivery_uncertain, complete_notice_recovery
 local function refresh_pending_notice(session, pending)
   if not pending.message_order then return pending end
   local agent = bus.agents[session]
@@ -733,6 +743,7 @@ local function clear_notice_fallbacks(session, ids)
 end
 -- Open or merge into the session's stuck record (IDs union, since and report throttle kept).
 function remuda._butler_notice_open_stuck(session, ids, reason)
+  if not notice_image_current() then return end
   local stuck = bus.notice_stuck[session]
   local agent_id = bus.agents[session] and bus.agents[session].id
   if not stuck or stuck.agent_id ~= agent_id then
@@ -810,6 +821,7 @@ end
 -- An explicit refusal that wrote nothing: bounded retry through the existing
 -- 20s/60s/300s/900s schedule, then one failure alert with the exact action.
 notice_recovery_error = function(session, state, reason)
+  if not notice_image_current() then return false, "generation_changed" end
   state = type(state) == "table" and state or {}
   cancel_native_watcher(session)
   state.failed = true
@@ -963,6 +975,7 @@ end
 -- acceptance, never receipt: mail stays unread until its inbox is read, and
 -- the reminder/stuck machinery keeps running for it.
 complete_notice_recovery = function(session, state)
+  if not notice_image_current() then return false, "generation_changed" end
   state = type(state) == "table" and state or {}
   cancel_native_watcher(session)
   diagnostic("submitted", "transport_accepted", session)
@@ -1623,6 +1636,7 @@ end
 -- no modal prediction, no Return retry: the live-session/bound-instance
 -- preflight, the generation fence and the core's in-flight write guard decide.
 local function deliver_notice(session)
+  if not notice_image_current() then return false, "generation_changed" end
   local pending = bus.notices[session]
   if not pending then return true end
   pending = refresh_pending_notice(session, pending)
@@ -1641,6 +1655,7 @@ local function deliver_notice(session)
 end
 -- The poll and the debounce timers share this check.
 local function deliver_due_notice(session, now)
+  if not notice_image_current() then return false, "generation_changed" end
   local pending = bus.notices[session]
   if not bus.agents[session] then
     cancel_notice_timers(session)
@@ -1675,6 +1690,7 @@ end
 -- is queued while this guard is held; the completion keeps that remainder, so
 -- drain it now instead of waiting for a poll or quiet window.
 local function deliver_native_now(session)
+  if not notice_image_current() then return false, "generation_changed" end
   local sent = false
   for _ = 1, 8 do
     if bus.notice_native_dispatching[session] then break end
@@ -1697,6 +1713,7 @@ end
 -- explicit event entrypoint; the bounded notice tick remains the fallback when
 -- a publication happens outside any Butler-visible lifecycle step.
 local function native_publication(alias)
+  if not notice_image_current() then return false, "generation_changed" end
   if not native_immediate(alias) then return false end
   return deliver_native_now(alias)
 end
@@ -1777,6 +1794,7 @@ local function arm_notice_timer(session, slot, seconds)
   if pair[slot] then pcall(function() pair[slot]:cancel() end) end
   local handle
   local ok, armed = pcall(after, seconds, function()
+    if not notice_image_current() then return end
     local current = bus.notice_timers[session]
     -- A cancelled or replaced handle may still fire: it does nothing.
     if not current or current[slot] ~= handle then return end
@@ -1813,6 +1831,7 @@ local function notice_id_stuck(alias, message_id)
   return false
 end
 function remuda._butler_notify(alias, notice, message_id, reshow, reminder)
+  if not notice_image_current() then return false, "generation_changed" end
   local _, recipient = mail_id(alias, false)
   if notice_id_stuck(alias, message_id) then return false end
   if message_id and not reshow and not mail.is_unread(recipient.id, message_id) then return true end
@@ -1937,6 +1956,7 @@ local function prune_accepted_entries(agent)
   end)
 end
 local function remind_unread_notices(alias, agent, now)
+  if not notice_image_current() then return false, "generation_changed" end
   if not agent.id then return end
   if bus.pending_tasks[alias] and not native_immediate(alias) then return end
   prune_accepted_entries(agent)
@@ -2016,6 +2036,7 @@ end
 -- The one hook for any compaction (Butler's own, or the half-drop heuristic
 -- below for the agent's auto-compact): the next tick re-seeds this member.
 function remuda._butler_notice_compacted(alias)
+  if not notice_image_current() then return end
   if bus.agents[alias] then bus.unread_seeded[alias] = "compacted" end
 end
 -- Half-drop heuristic for an agent's own compaction. A missing sample, the
@@ -2043,6 +2064,7 @@ local function note_context_drop(alias, agent, instance)
   end
 end
 function remuda._butler_deliver_notices()
+  if not notice_image_current() then return false, "generation_changed" end
   local now = notice_now()
   local session_instances = {}
   local live_sessions = {}

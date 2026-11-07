@@ -71,6 +71,13 @@ local old_matrix = remuda.butler and remuda.butler.matrix
 local old_relay = old_matrix and old_matrix.relay
 if old_relay and old_relay.stop then pcall(old_relay.stop)
 end
+-- Stage the candidate away from the last-good matrix table: matrix.lua and
+-- matrix_relay.lua extend an existing table in place, which would otherwise
+-- corrupt the graph a failed candidate's rollback must restore. Keep the exact
+-- staged reference local so candidate cleanup never reinterprets the public
+-- table after a failed exec.
+local staged_matrix = {}
+if remuda.butler then remuda.butler.matrix = staged_matrix end
 
 -- Replace handles created imperatively by the previous Butler version. The
 -- lifecycle declaration owns these schedules from this activation onward.
@@ -102,7 +109,12 @@ local paths = remuda._butler_paths
 -- One daemon owns a Butler home (#195). A second daemon stops here, before any
 -- shared state (the registry, the MCP config, the root Butler, the relay).
 remuda.exec("butler/guard")
-if not remuda.butler.guard.boot(paths) then return end
+if not remuda.butler.guard.boot(paths) then
+  -- A refusal-only graph keeps the command/help/refusal contract; it is not an
+  -- active notification graph and must not be validated as one.
+  remuda._butler_runtime_refusal = true
+  return
+end
 remuda.exec("butler/launch_failure")
 local launch_failure_lines = assert(remuda.butler.launch_failure_lines)
 local topic_config = paths.topic_config
@@ -135,6 +147,15 @@ if remuda._butler_relay_receipts then
   end
 end
 remuda.exec("butler/matrix_request")
+-- Report the exact staged matrix and request pair at creation time. The init
+-- hook is scoped by this load's nonce and is one-shot; a failure before here
+-- leaves no candidate, a later failure cleans only this exact pair.
+local candidate_capture = remuda._butler_request_candidate_capture
+if type(candidate_capture) == "function" then
+  candidate_capture(remuda._butler_request_candidate_nonce, staged_matrix,
+    staged_matrix.request_retire, staged_matrix.request_resume,
+    staged_matrix.request, staged_matrix.request_json)
+end
 remuda.exec("butler/matrix")
 -- The root Butler's permission rule and the write-only-when-changed helper
 -- live in permissions.lua; these are the file helpers it is handed.
@@ -723,6 +744,13 @@ remuda._butler_launch_config = { bus = bus,
   migrate_legacy_mail = migrate_legacy_mail,
   startup_action_safe = function(...) return startup_action_safe(...) end }
 remuda.exec("butler/native_config")
+-- Never let a failing candidate reach the last-good one-shot factory. The
+-- policy consumes only the fresh dispatch built by this activation; rollback
+-- restores the previous pair by identity.
+if remuda.butler then
+  remuda.butler.native_dispatch = nil
+  remuda.butler.send_policy = nil
+end
 remuda.exec("butler/native_dispatch")
 remuda.exec("butler/send_policy")
 remuda.exec("butler/native_launch")

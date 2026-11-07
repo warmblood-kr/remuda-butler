@@ -10,39 +10,583 @@ local host = getmetatable(_G).__index.remuda
 local cli_parse = assert(host.cli and host.cli.parse,
   "Butler CLI requires remuda.cli.parse (Remuda core #465 or later); upgrade Remuda")
 local system, dialogs, input_originals
-local booted, main_loaded = false, false
+-- `main_loading` is the reentry guard; `main_loaded` is the success flag. A
+-- failed main must leave the latter false so a corrected activation retries.
+local main_loading, main_loaded = false, false
+-- 0 not booted; 1 main; 2 bootstrap; 3 butler-start emitted; 4 relay started.
+local boot_stage, booted = 0, false
+local boot_emit_incomplete, runtime_failed = false, false
+local runtime_refusal_only = false
+local last_good
+
+local function shallow_copy(value)
+  if type(value) ~= "table" then return nil end
+  local copy = {}
+  for key, item in pairs(value) do copy[key] = item end
+  return copy
+end
+
+-- Transitive notification/lifecycle helpers published as globals. A failed
+-- notice load can leave candidate functions here that close over the old
+-- policy owner/journal, so restore every key, including one absent before.
+local RUNTIME_HELPERS = {
+  "_butler_notify", "_butler_deliver_notices", "_butler_schedule_tick",
+  "_butler_inbox_message", "_butler_send", "_butler_notice_compacted",
+  "_butler_notice_open_stuck", "_butler_inbox_delivery", "_butler_dialog_tick",
+  "_butler_reconcile", "_butler_reconcile_retry", "_butler_done_tick",
+  "_butler_compaction_tick", "_butler_session_exited", "_butler_compaction_submit",
+  "_butler_cancel_active_choosers",
+  -- Dynamic deps read by restored notice closures. Durable bus/mail/journal
+  -- modules stay live and are deliberately absent.
+  "_butler_notify_policy", "_butler_composer_decision", "_butler_approved_text_policy",
+  "_butler_task_retry_policy", "_butler_human_active", "_butler_prompt_is_empty",
+  "_butler_notice_after", "_butler_notice_clock", "_butler_notice_human_idle",
+  "_butler_schedule_env", "_butler_telemetry_for", "_butler_agent_startup",
+}
+
+local function restore_entries(target, snapshot)
+  if type(target) ~= "table" or type(snapshot) ~= "table" then return end
+  for key in pairs(target) do
+    if snapshot[key] == nil then target[key] = nil end
+  end
+  for key, value in pairs(snapshot) do target[key] = value end
+end
+
+local function runtime_graph_complete()
+  return main_loaded and type(host.butler) == "table"
+    and type(host.butler.send_policy) == "table"
+    and type(host.butler.native_dispatch) == "table"
+    and type(host.butler.matrix) == "table"
+    and type(host._butler_notice) == "table"
+end
+
+-- Capture only runtime exports and resource intent. The durable bus, mail,
+-- journal, pending and uncertain facts are deliberately excluded: a reload
+-- must not rewind delivery facts to an older snapshot.
+local function capture_runtime()
+  if not runtime_graph_complete() then return last_good end
+  local butler, matrix = host.butler, host.butler.matrix
+  local relay = matrix.relay
+  local helpers = {}
+  for _, key in ipairs(RUNTIME_HELPERS) do helpers[key] = { value = host[key] } end
+  last_good = {
+    butler = butler,
+    butler_entries = shallow_copy(butler),
+    matrix = matrix,
+    matrix_entries = shallow_copy(matrix),
+    send_policy = butler.send_policy,
+    send_policy_entries = shallow_copy(butler.send_policy),
+    native_dispatch = butler.native_dispatch,
+    native_dispatch_entries = shallow_copy(butler.native_dispatch),
+    notice = host._butler_notice,
+    notice_entries = shallow_copy(host._butler_notice),
+    notice_config = host._butler_notice_config,
+    dialogs = dialogs,
+    input_originals = input_originals,
+    helpers = helpers,
+    -- Resource intent, not the handle: a pre-stop stopped instance must not be
+    -- restored as if it were still running.
+    relay_running = type(relay) == "table" and relay.instance ~= nil or false,
+    relay_config = host._butler_matrix_config,
+  }
+  return last_good
+end
+
+local function restore_runtime()
+  local snapshot = last_good
+  if not snapshot then return end
+  host.butler = snapshot.butler
+  restore_entries(host.butler, snapshot.butler_entries)
+  host.butler.matrix = snapshot.matrix
+  restore_entries(host.butler.matrix, snapshot.matrix_entries)
+  host.butler.send_policy = snapshot.send_policy
+  restore_entries(host.butler.send_policy, snapshot.send_policy_entries)
+  host.butler.native_dispatch = snapshot.native_dispatch
+  restore_entries(host.butler.native_dispatch, snapshot.native_dispatch_entries)
+  host._butler_notice = snapshot.notice
+  restore_entries(host._butler_notice, snapshot.notice_entries)
+  host._butler_notice_config = snapshot.notice_config
+  host._butler_matrix_config = snapshot.relay_config
+  dialogs, input_originals = snapshot.dialogs, snapshot.input_originals
+  host._butler_dialog_originals = snapshot.input_originals
+  for _, key in ipairs(RUNTIME_HELPERS) do
+    local saved = snapshot.helpers[key]
+    host[key] = saved and saved.value or nil
+  end
+end
+
+-- Read-only identity and ownership checks. They never reopen the consumed
+-- factory or rebind a policy; an unverifiable graph fails closed.
+local function validate_runtime()
+  local butler = host.butler
+  if type(butler) ~= "table" then
+    error("Butler runtime graph is unavailable; reload Butler when idle", 0)
+  end
+  local policy, notice = butler.send_policy, host._butler_notice
+  if type(policy) ~= "table" then
+    error("Butler notification policy is unavailable; reload Butler when idle", 0)
+  end
+  -- A missing, throwing or partial checker is unverifiable, not ready.
+  if type(policy.readiness) ~= "function" then
+    error("Butler notification policy has no readiness check; reload Butler when idle", 0)
+  end
+  local checked, ready = pcall(policy.readiness)
+  if not checked or type(ready) ~= "table" or ready.bound ~= true
+      or ready.transport_acquired ~= true or ready.owner ~= notice then
+    error("Butler notification policy is not ready; reload Butler when idle", 0)
+  end
+  if type(notice) ~= "table" or notice._policy_bound ~= true then
+    error("Butler notice owner is not policy-bound; reload Butler when idle", 0)
+  end
+  if type(butler.native_dispatch) ~= "table"
+      or type(butler.native_dispatch.admit) ~= "function" then
+    error("Butler native dispatch is unavailable; reload Butler when idle", 0)
+  end
+  if type(butler.matrix) ~= "table" then
+    error("Butler Matrix exports are unavailable; reload Butler when idle", 0)
+  end
+  local config = host._butler_notice_config
+  if type(config) == "table" and config.bus ~= nil and host._butler_bus ~= nil
+      and config.bus ~= host._butler_bus then
+    error("Butler notice bus identity changed; reload Butler when idle", 0)
+  end
+end
+
+-- The exact compiled Matrix request-client pair from this activation. A failed
+-- candidate may replace the shared butler.matrix table, so resume must use
+-- this pair, never a late lookup. A half-pair is a hard degraded state.
+local request_client_api, request_client_incomplete, candidate_request_api
+
+local function capture_request_client()
+  local matrix = host.butler and host.butler.matrix
+  local retire = matrix and matrix.request_retire
+  local resume = matrix and matrix.request_resume
+  local request = matrix and matrix.request
+  local request_json = matrix and matrix.request_json
+  if type(retire) == "function" and type(resume) == "function"
+      and type(request) == "function" and type(request_json) == "function" then
+    request_client_api = { retire = retire, resume = resume,
+      request = request, request_json = request_json }
+    request_client_incomplete = nil
+    host._butler_request_retire_failed = nil
+    host._butler_request_retire_blocked = nil
+    return true
+  end
+  request_client_api = nil
+  request_client_incomplete = (type(retire) == "function" or type(resume) == "function"
+    or type(request) == "function" or type(request_json) == "function")
+    and "request lifecycle API is incomplete" or nil
+  return false
+end
+
+local function request_client_present()
+  local matrix = host.butler and host.butler.matrix
+  return type(matrix) == "table" and type(matrix.request) == "function"
+end
+
+local retire_candidate_request_client, promote_candidate_request_client
+
+-- One-shot, nonce-scoped candidate capture. main.lua reports the exact staged
+-- matrix and request pair immediately after the provider fills it; a late
+-- public-table lookup is never ownership proof. The closure carries its own
+-- `capture_active` so a saved reference cannot capture after finally.
+local function install_candidate_capture(preload_matrix, preload_pair)
+  local previous_hook = host._butler_request_candidate_capture
+  local previous_nonce = host._butler_request_candidate_nonce
+  local nonce = {}
+  local capture_active = true
+  local boundary_reached = false
+  host._butler_request_candidate_nonce = nonce
+  host._butler_request_candidate_capture = function(candidate_nonce, matrix,
+      retire, resume, request, request_json)
+    if not capture_active then return false end
+    if candidate_nonce ~= nonce then return false end
+    -- The provider boundary was crossed for this load even if the reported
+    -- pair is rejected; promotion must not silently fall back to public.
+    boundary_reached = true
+    if candidate_request_api then return false end
+    if type(matrix) ~= "table" or type(retire) ~= "function"
+        or type(resume) ~= "function" or type(request) ~= "function"
+        or type(request_json) ~= "function" then return false end
+    -- The matrix must actually carry this exact pair, not a mixed generation.
+    if matrix.request_retire ~= retire or matrix.request_resume ~= resume
+        or matrix.request ~= request or matrix.request_json ~= request_json then
+      return false
+    end
+    -- The pre-load graph/pair is never a candidate, even when a new activation
+    -- has no retained local pair yet.
+    if matrix == preload_matrix then return false end
+    if preload_pair and (retire == preload_pair.retire
+        or resume == preload_pair.resume or request == preload_pair.request
+        or request_json == preload_pair.request_json) then
+      return false
+    end
+    candidate_request_api = { matrix = matrix, retire = retire, resume = resume,
+      request = request, request_json = request_json, nonce = nonce }
+    host._butler_request_candidate_capture = nil
+    return true
+  end
+  return function()
+    capture_active = false
+    host._butler_request_candidate_capture = previous_hook
+    host._butler_request_candidate_nonce = previous_nonce
+  end, function() return boundary_reached end
+end
+
+local function preload_request_pair(matrix)
+  if type(matrix) ~= "table" then return nil end
+  local retire, resume = matrix.request_retire, matrix.request_resume
+  local request, request_json = matrix.request, matrix.request_json
+  if type(retire) ~= "function" or type(resume) ~= "function"
+      or type(request) ~= "function" or type(request_json) ~= "function" then
+    return nil
+  end
+  return { retire = retire, resume = resume, request = request,
+    request_json = request_json }
+end
+
 local function load_main()
   if main_loaded then return end
+  if main_loading then return end
+  -- A failed candidate cleanup is a hard pending state: retry the exact
+  -- capability before any new load, and refuse while it remains unresolved.
+  if candidate_request_api then
+    local cleaned, clean_why = retire_candidate_request_client()
+    if not cleaned then
+      error("Matrix request candidate cleanup pending: " .. tostring(clean_why), 0)
+    end
+  end
+  main_loading = true
+  -- The refusal signal is a per-load outcome, never a sticky bypass: clear it
+  -- before this load and let main.lua set it only for its own guard decision.
+  host._butler_runtime_refusal = nil
+  runtime_refusal_only = false
+  local preload_matrix = host.butler and host.butler.matrix
+  local restore_capture, candidate_boundary = install_candidate_capture(preload_matrix,
+    preload_request_pair(preload_matrix))
+  local ok, err = pcall(function()
+    host.exec("butler/system")
+    system = assert(host._butler_system)
+    host.exec("butler/main")
+    dialogs = host.butler and host.butler.dialogs
+    input_originals = host._butler_dialog_originals
+  end)
+  restore_capture()
+  main_loading = false
+  if not ok then
+    -- Only the exact pair reported by this load's hook is a candidate; a
+    -- failure before the hook leaves the retained old pair untouched.
+    retire_candidate_request_client()
+    error(err, 0)
+  end
+  -- guard.boot refusal and the test-mode early return publish a commands-only
+  -- graph. Keep its command/help/refusal contract, but never call it an active
+  -- runtime or validate it as one.
+  if host._butler_standby or host._butler_runtime_refusal then
+    retire_candidate_request_client()
+    runtime_refusal_only = true
+    main_loaded = true
+    return
+  end
+  -- A cold successful load must satisfy the same graph/ownership readiness
+  -- contract as a resume; an unverifiable graph is not loaded.
+  local valid, validation_err = pcall(validate_runtime)
+  if not valid then
+    retire_candidate_request_client()
+    error(validation_err, 0)
+  end
+  local promoted, promote_why = promote_candidate_request_client(candidate_boundary())
+  if not promoted then
+    retire_candidate_request_client()
+    error("Matrix request pair is not coherent: " .. tostring(promote_why), 0)
+  end
+  runtime_refusal_only = false
   main_loaded = true
-  host.exec("butler/system")
-  system = assert(host._butler_system)
-  host.exec("butler/main")
-  dialogs = host.butler and host.butler.dialogs
-  input_originals = host._butler_dialog_originals
 end
+
+-- A stopped handle does not prove the old writer is gone. A future resource
+-- registry/owner epoch may expose a read-only proof; until then the answer is
+-- no and resume must not start a second writer.
+local function relay_owner_fenced()
+  local matrix = host.butler and host.butler.matrix
+  local relay = matrix and matrix.relay
+  if type(relay) ~= "table" or type(relay.owner_proven) ~= "function" then return false end
+  local ok, proven = pcall(relay.owner_proven)
+  return ok and proven == true
+end
+
+local function report_relay(outcome, reason)
+  local diagnostics = host._butler_diagnostics
+  if diagnostics and type(diagnostics.record) == "function" then
+    pcall(diagnostics.record, "relay", outcome, reason, nil)
+  end
+end
+
+-- Final typed API: {ok, retired, queued_settled, cancel_failed, detail}.
+-- `cancel_failed` is a required dense array of unique roles, not a boolean:
+-- an empty array is clean; any role is a named, observable cancellation
+-- failure. pcall alone is not success.
+local REQUEST_CANCEL_ROLES = { refill = true, watchdog = true }
+
+local function request_cancel_roles(value)
+  if type(value) ~= "table" then return false, "cancel_failed is not an array" end
+  local seen, count = {}, 0
+  for key, role in pairs(value) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      return false, "cancel_failed is not a dense array"
+    end
+    if type(role) ~= "string" or not REQUEST_CANCEL_ROLES[role] then
+      return false, "unknown cancel role"
+    end
+    if seen[role] then return false, "duplicate cancel role" end
+    seen[role] = true
+    count = count + 1
+  end
+  if count ~= #value then return false, "cancel_failed is sparse" end
+  for index = 1, count do
+    if value[index] == nil then return false, "cancel_failed is sparse" end
+  end
+  return true, count
+end
+
+local function request_result_ok(result, phase)
+  if type(result) ~= "table" then return false, "request result missing" end
+  if result.ok ~= true then return false, "request operation failed" end
+  local clean, roles = request_cancel_roles(result.cancel_failed)
+  if not clean then return false, "request cancellation state invalid" end
+  if roles ~= 0 then return false, "request timers not confirmed gone" end
+  if type(result.queued_settled) ~= "number" or result.queued_settled < 0
+      or result.queued_settled % 1 ~= 0 then
+    return false, "request queue count invalid"
+  end
+  if result.detail ~= nil and (type(result.detail) ~= "string" or #result.detail > 512) then
+    return false, "request detail invalid"
+  end
+  if phase == "retire" and result.retired ~= true then
+    return false, "request retire did not commit"
+  end
+  if phase == "resume" and result.retired ~= false then
+    return false, "request resume stayed retired"
+  end
+  return true
+end
+
+-- Bounded constants only: never echo a plugin result/detail or an exception
+-- into the diagnostic/doctor surface.
+local function request_fail(phase)
+  local why = phase == "retire" and "request retire failed" or "request resume failed"
+  host._butler_request_retire_failed = why
+  host._butler_request_retire_blocked = true
+  report_relay("degraded",
+    phase == "retire" and "request_retire_failed" or "request_resume_failed")
+  return false, why
+end
+
+local function request_pair_coherent()
+  if not request_client_api then return true end
+  local matrix = host.butler and host.butler.matrix
+  if type(matrix) ~= "table" then return false, "request matrix missing" end
+  if matrix.request ~= request_client_api.request
+      or matrix.request_json ~= request_client_api.request_json
+      or matrix.request_retire ~= request_client_api.retire
+      or matrix.request_resume ~= request_client_api.resume then
+    return false, "request pair changed"
+  end
+  return true
+end
+
+promote_candidate_request_client = function(boundary_reached)
+  local candidate = candidate_request_api
+  if not candidate then
+    -- Once this load's provider boundary was crossed, a rejected capture is a
+    -- hard failure: never adopt the public table as a fallback.
+    if boundary_reached then
+      return false, "request candidate capture missing"
+    end
+    local captured = capture_request_client()
+    if not captured and request_client_incomplete then
+      return false, "request lifecycle API is incomplete"
+    end
+    return true
+  end
+  -- Promotion is ownership proof only when the public matrix carries the exact
+  -- captured generation, not merely the same nonce.
+  local matrix = host.butler and host.butler.matrix
+  if type(matrix) ~= "table" or matrix ~= candidate.matrix
+      or matrix.request ~= candidate.request
+      or matrix.request_json ~= candidate.request_json
+      or matrix.request_retire ~= candidate.retire
+      or matrix.request_resume ~= candidate.resume then
+    return false, "request pair changed"
+  end
+  candidate_request_api = nil
+  request_client_api = { retire = candidate.retire, resume = candidate.resume,
+    request = candidate.request, request_json = candidate.request_json }
+  request_client_incomplete = nil
+  host._butler_request_retire_failed = nil
+  host._butler_request_retire_blocked = nil
+  return true
+end
+
+retire_candidate_request_client = function()
+  local candidate = candidate_request_api
+  if not candidate then return true end
+  -- Only the exact pair reported at this load's creation point is a candidate.
+  if request_client_api and candidate.retire == request_client_api.retire then
+    candidate_request_api = nil
+    return true
+  end
+  local called, result = pcall(candidate.retire)
+  local ok, why
+  if not called then
+    ok, why = false, "request retire failed"
+  else
+    ok, why = request_result_ok(result, "retire")
+  end
+  if not ok then
+    -- Keep the exact candidate capability for a bounded retry. A failed
+    -- cancel can return retired=true with ok=false/roles; that is not success.
+    host._butler_request_retire_failed = why or "request retire failed"
+    host._butler_request_retire_blocked = true
+    report_relay("degraded", "request_candidate_retire_failed")
+    return false, host._butler_request_retire_failed
+  end
+  candidate_request_api = nil
+  host._butler_request_retire_failed = nil
+  host._butler_request_retire_blocked = nil
+  return true
+end
+
+local function request_retire()
+  if not request_client_api then
+    if request_client_incomplete or request_client_present() then
+      return request_fail("retire")
+    end
+    return true
+  end
+  local called, result = pcall(request_client_api.retire)
+  if not called then return request_fail("retire") end
+  local ok, why = request_result_ok(result, "retire")
+  if not ok then
+    host._butler_request_retire_failed = why or "request retire failed"
+    host._butler_request_retire_blocked = true
+    report_relay("degraded", "request_retire_failed")
+    return false, host._butler_request_retire_failed
+  end
+  host._butler_request_retire_failed = nil
+  host._butler_request_retire_blocked = nil
+  return true
+end
+
+local function request_resume()
+  if not request_client_api then
+    if request_client_incomplete or request_client_present() then
+      return request_fail("resume")
+    end
+    return true
+  end
+  if host._butler_request_retire_blocked then
+    report_relay("degraded", "request_resume_failed")
+    return false, "request generation teardown incomplete"
+  end
+  local called, result = pcall(request_client_api.resume)
+  if not called then return request_fail("resume") end
+  local ok, why = request_result_ok(result, "resume")
+  if not ok then
+    host._butler_request_retire_failed = why or "request resume failed"
+    host._butler_request_retire_blocked = true
+    report_relay("degraded", "request_resume_failed")
+    return false, host._butler_request_retire_failed
+  end
+  local coherent, coherence_why = request_pair_coherent()
+  if not coherent then
+    host._butler_request_retire_failed = coherence_why or "request pair changed"
+    host._butler_request_retire_blocked = true
+    report_relay("degraded", "request_resume_failed")
+    return false, host._butler_request_retire_failed
+  end
+  host._butler_request_retire_failed = nil
+  host._butler_request_retire_blocked = nil
+  return true
+end
+
 local function start_matrix_relay()
   local matrix = host.butler and host.butler.matrix
-  if host._butler_matrix_config and matrix and matrix.relay and not host._butler_skip_relay
+  local relay = matrix and matrix.relay
+  -- A request generation that could not confirm both timer cancellations is
+  -- not a safe base for a new relay. Keep the admission barrier explicit.
+  if host._butler_request_retire_blocked then
+    host._butler_relay_restart_blocked = true
+    report_relay("degraded", "request_generation_incomplete")
+    return
+  end
+  -- The marker is an admission barrier, not just a diagnostic: a relay that
+  -- was running when the previous activation stopped may have a hidden writer.
+  -- Only a positive owner proof may start again; a clean cold start has no
+  -- marker and is unaffected.
+  if host._butler_relay_owner_unverified then
+    if relay_owner_fenced() then
+      host._butler_relay_owner_unverified = nil
+      host._butler_relay_restart_blocked = nil
+      report_relay("ok", "owner_proven")
+    else
+      host._butler_relay_restart_blocked = true
+      report_relay("degraded", "owner_unknown")
+      return
+    end
+  end
+  if host._butler_matrix_config and relay and not relay.instance and not host._butler_skip_relay
     and not host._butler_standby
     and type(host.http) == "table" and type(host.http.request) == "function" then
-    matrix.relay.start(host._butler_matrix_config)
+    relay.start(host._butler_matrix_config)
   end
 end
 
 local function boot()
-  if booted then return end
+  if runtime_failed then
+    error("Butler runtime recovery failed; reload Butler when idle", 0)
+  end
+  if boot_stage >= 4 then return end
   -- A commands-only standby loaded only the refusal verbs. Explicit start
   -- must re-ask the home locks inside this lifecycle transaction.
-  if host._butler_standby then main_loaded = false end
-  load_main()
   if host._butler_standby then
     main_loaded = false
-    error(host.butler.guard.refusal(host._butler_standby), 0)
+    main_loading = false
+  end
+  load_main()
+  if runtime_refusal_only or host._butler_standby then
+    -- A refusal/test-mode catalog is commands-only: never run bootstrap,
+    -- emit a start notification or start a resource from it.
+    main_loaded = false
+    local guard = host.butler and host.butler.guard
+    local reason = guard and type(guard.refusal) == "function"
+      and guard.refusal(host._butler_standby or "home already owned")
+      or "Butler is not the active owner; commands only"
+    error(reason, 0)
+  end
+  if boot_stage < 1 then boot_stage = 1 end
+  if boot_stage < 2 then
+    if host._butler_bootstrap and host._butler_test_mode ~= "lifecycle" then host._butler_bootstrap() end
+    boot_stage = 2
+  end
+  if boot_stage < 3 then
+    -- Partial hook emission is not idempotent: after a failure, only a fresh
+    -- activation may emit again. This activation fails closed.
+    if boot_emit_incomplete then
+      error("Butler startup notification is incomplete; reload Butler when idle", 0)
+    end
+    local emitted, emit_err = pcall(host.emit, "butler-start")
+    if not emitted then
+      boot_emit_incomplete = true
+      error(emit_err, 0)
+    end
+    boot_stage = 3
+  end
+  if boot_stage < 4 then
+    start_matrix_relay()
+    boot_stage = 4
   end
   booted = true
-  if host._butler_bootstrap and host._butler_test_mode ~= "lifecycle" then host._butler_bootstrap() end
-  host.emit("butler-start")
-  start_matrix_relay()
 end
 
 -- Retire only the process handle recorded by the legacy Matrix relay. The
@@ -151,7 +695,12 @@ return {
     if host._butler_standby then
       -- A refused start rolls back. Rediscovery preserves its refusal even
       -- if the owner has since gone; only an explicit start may take over.
-      host.butler.guard.standby(host._butler_standby, host._butler_paths)
+      -- A refusal-only graph may not publish the standby helper; the command
+      -- catalog and refusal verb still have to load.
+      local guard = host.butler and host.butler.guard
+      if guard and type(guard.standby) == "function" then
+        guard.standby(host._butler_standby, host._butler_paths)
+      end
     else
       load_main()
     end
@@ -159,6 +708,7 @@ return {
   start = function(state)
     host._butler_state = state
     boot()
+    capture_request_client()
     stop_legacy_matrix_relay()
   end,
   -- Rollback restores this activation's registrations. Reinstall only resources
@@ -166,16 +716,44 @@ return {
   resume = function(state)
     local ok, err = pcall(function()
       host._butler_state = state
+      restore_runtime()
       if dialogs then
         host.butler.dialogs = dialogs
         host._butler_dialog_originals = input_originals
         dialogs.install()
       end
-      if booted then start_matrix_relay() end
+      -- Validate the restored graph before activating the captured client:
+      -- an invalid bus/owner must not cause a request_resume side effect.
+      validate_runtime()
+      local resumed, resume_why = request_resume()
+      if not resumed then
+        error("Matrix request resume failed: " .. tostring(resume_why), 0)
+      end
+      local coherent, coherence_why = request_pair_coherent()
+      if not coherent then
+        error("Matrix request pair is not coherent: " .. tostring(coherence_why), 0)
+      end
+      -- A stopped handle is not proof the old writer is gone. Never restart a
+      -- stopped snapshot without a positive owner/resource fence; the shared
+      -- start path makes that an admission barrier and reports owner_unknown.
+      if boot_stage >= 4 and last_good and last_good.relay_running then
+        local matrix = host.butler and host.butler.matrix
+        local relay = matrix and matrix.relay
+        if relay and not relay.instance then
+          host._butler_relay_owner_unverified = true
+          start_matrix_relay()
+        end
+      end
     end)
     if not ok then
       -- Never leave raw input exposed if the old activation cannot resume.
       -- Keep the originals for a later explicit, corrected activation.
+      runtime_failed = true
+      booted, boot_stage = false, 0
+      local matrix = host.butler and host.butler.matrix
+      if matrix and matrix.relay and type(matrix.relay.stop) == "function" then
+        pcall(matrix.relay.stop)
+      end
       host._butler_dialog_originals = input_originals
       local function refuse() error("Butler input gate recovery failed; reload Butler when idle", 0) end
       host.key, host.type_text = refuse, refuse
@@ -184,13 +762,33 @@ return {
     end
   end,
   stop = function(state)
+    -- Capture before stop unwraps resources: identities, nested entries and
+    -- whether the relay was running, but never the active handle itself.
+    capture_runtime()
+    local matrix = host.butler and host.butler.matrix
+    if matrix and matrix.relay and matrix.relay.instance then
+      -- A successful candidate may start a new relay while a hidden writer
+      -- survives the stop. Without an owner registry this remains unverified;
+      -- it is reported, never claimed healthy.
+      host._butler_relay_owner_unverified = true
+    end
     if dialogs then dialogs.stop() end
     local controls = host.butler and host.butler.startup_controls
     if controls and type(controls.stop_all) == "function" then pcall(controls.stop_all) end
     if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
     local matrix = host.butler and host.butler.matrix
-    if matrix and matrix.relay then pcall(matrix.relay.stop)
+    if matrix and matrix.relay and type(matrix.relay.stop) == "function" then
+      local stopped, stop_err = pcall(matrix.relay.stop)
+      if not stopped then
+        -- A relay stop that threw is not a verified stop; keep it visible.
+        report_relay("degraded", "relay_stop_failed")
+      end
     end
+    -- Stop the relay first, then retire the captured request generation: queued
+    -- pre-dispatch work settles once with the typed queue_retired/not_sent
+    -- result, dispatched requests stay untouched and nothing is replayed.
+    local retired, retire_why = request_retire()
+    host._butler_request_retire_failed = retired and nil or retire_why
     stop_legacy_matrix_relay()
     cancel_start_fallback()
   end,
