@@ -217,6 +217,14 @@ function M.bind(owner, make_seam)
   return true
 end
 
+-- Read-only lifecycle readiness. The private factory and its seam stay closed;
+-- callers learn only whether the current notice owner is bound and a factory is
+-- held. A consumed `native_dispatch.install` is the normal handoff state and is
+-- deliberately not consulted here.
+function M.readiness()
+  return { owner = bound_owner, bound = bound_make_seam ~= nil }
+end
+
 -- Classify the existing notice outcome for the transient typed result only;
 -- the journal/retry decisions remain the sealed notice seam's.
 local function status_of(sent, why)
