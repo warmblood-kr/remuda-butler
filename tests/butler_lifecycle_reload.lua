@@ -652,4 +652,19 @@ test("a stale partial outcome cannot bypass a fresh full load", function()
   assert(host.butler.send_policy ~= nil, "full load skipped construction")
 end)
 
+test("a direct start constructs only the restricted partial image", function()
+  local host, _, _, emits = fixture({ test_mode = true })
+  host.exec = function(name)
+    if name == "butler/system" then host._butler_system = {}; return end
+    assert(name == "butler/main")
+    host.butler = host.butler or {}
+  end
+  local module = declaration(host)
+  local state = {}
+  assert(pcall(module.start, state), "direct restricted start must succeed")
+  assert(host._butler_partial_image == "test_mode", "partial outcome missing")
+  assert(emits() == 0, "direct partial start emitted active-service startup")
+  assert(host.butler.matrix == nil, "direct partial start touched Matrix/relay")
+end)
+
 os.exit(failures == 0 and 0 or 1)

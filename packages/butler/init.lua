@@ -575,6 +575,10 @@ local function boot()
     main_loading = false
   end
   load_main()
+  -- A direct start/fallback path can reach load_main before any commands
+  -- call; the restricted helper image must stop here too, never bootstrap,
+  -- emit or report booted.
+  if runtime_partial_image then return end
   if runtime_refusal_only or host._butler_standby then
     -- A refusal catalog is commands-only: never run bootstrap, emit a start
     -- notification or start a resource from it.
