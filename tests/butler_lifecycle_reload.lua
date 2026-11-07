@@ -152,11 +152,13 @@ local function relay_fixture(fenced)
   end
   if fenced then relay.owner_proven = function() return true end end
   local host = fixture({ relay = true, matrix = { relay = relay } })
-  host.http = { request = function() end }
+  local http_calls = 0
+  host.http = { request = function() http_calls = http_calls + 1 end }
   return host, relay, {
     starts = function() return starts end,
     stops = function() return stops end,
     seen = function() return seen end,
+    http = function() return http_calls end,
   }
 end
 
@@ -308,6 +310,43 @@ test("an unverified relay owner blocks a candidate start", function()
   second.start(state)
   assert(counters.starts() == 0, "candidate started an unverified second writer")
   assert(host._butler_relay_restart_blocked == true, "blocked state missing")
+end)
+
+test("throwing readiness starts no resource and issues no transport", function()
+  local host, relay, counters = relay_fixture(true)
+  host._butler_matrix_config = { config_path = "/tmp/butler-test-config" }
+  local module = declaration(host)
+  local state = {}
+  local throwing = false
+  module.commands(state)
+  local readiness = host.butler.send_policy.readiness
+  host.butler.send_policy.readiness = function()
+    if throwing then error("throwing readiness") end
+    return readiness()
+  end
+  module.start(state)
+  module.stop(state)
+  throwing = true
+  assert(not pcall(module.resume, state), "throwing readiness resumed")
+  assert(counters.starts() == 0, "throwing readiness started the relay")
+  assert(counters.http() == 0, "throwing readiness issued transport")
+  assert(relay.instance == nil, "throwing readiness left a resource")
+  -- A second resume must not silently start a resource either.
+  throwing = false
+  local ok2, err2 = pcall(module.resume, state)
+  assert(ok2, "second resume: " .. tostring(err2))
+  assert(counters.starts() == 0 and relay.instance == nil,
+    "resume after a failed resume started a resource")
+  assert(counters.http() == 0, "failed resume issued transport")
+  -- A fresh corrected load is the recovery path and starts exactly one.
+  local corrected = declaration(host)
+  local ok3, err3 = pcall(corrected.commands, state)
+  assert(ok3, "corrected commands: " .. tostring(err3))
+  local ok4, err4 = pcall(corrected.start, state)
+  assert(ok4, "corrected start: " .. tostring(err4))
+  assert(counters.starts() == 1 and relay.instance ~= nil,
+    "corrected reload did not recover the resource")
+  assert(counters.http() == 0, "recovery issued transport before a send")
 end)
 
 os.exit(failures == 0 and 0 or 1)
