@@ -5313,6 +5313,11 @@ function rx_policy_tests.unfollow_durable_disk_mail_root()
       assert(not rx_followed(relay, NEW, "$dsk-pending-root"), "the delivery did not re-follow")
       assert(envelope_count() == 3, "the pending mention has one envelope on disk")
 
+      -- The old generation's callback is stale: answering it now must not
+      -- deliver again or write a second envelope.
+      pcall(client.complete, client, old_context_index, { json = { chunk = {} } })
+      assert(envelope_count() == 3, "the stale old-generation callback delivered nothing")
+
       -- Fresh mail reader from the same root: no read marks yet.
       local mail = fresh_mail()
       -- `mailbox` is a raw accessor; `unread`/`is_unread` load the inbox from
