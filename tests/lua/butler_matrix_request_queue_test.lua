@@ -32,12 +32,12 @@ T.test("a lone Matrix request recovers when only the refill timer is retired", f
       function(result) remuda._mq.first = result and not result.error or false end)
     matrix.request_json({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
       function(result) remuda._mq.second = result and not result.error or false end)
-    local refill
-    for handle, spec in pairs(remuda.schedules or {}) do
-      if type(spec) == "table" and spec.name == "matrix-request-refill" then refill = handle end
-    end
-    assert(refill, "real core armed a refill timer")
-    remuda.cancel(refill)
+    -- The returned handle is not a registry key on real cores; the test seam
+    -- exposes the exact handle this generation armed.
+    local state = assert(remuda._butler_matrix_request_state(),
+      "real core lacks the Matrix request test seam")
+    assert(state.timer, "real core armed a refill timer")
+    remuda.cancel(state.timer)
     return table.concat({ config_path, token_path }, "\n")
   ]])
   T.ok(type(paths) == "string" and paths ~= "", "fixture paths")
@@ -47,15 +47,13 @@ T.test("a lone Matrix request recovers when only the refill timer is retired", f
     ]]):match("^%s*true%s*$") ~= nil
   end, 10, "watchdog recovers the lone queued request")
   local result = T.eval([[
-    local refills, watchdogs = 0, 0
-    for _, spec in pairs(remuda.schedules or {}) do
-      if type(spec) == "table" and spec.name == "matrix-request-refill" then refills = refills + 1 end
-      if type(spec) == "table" and spec.name == "matrix-request-watchdog" then watchdogs = watchdogs + 1 end
-    end
+    local state = assert(remuda._butler_matrix_request_state())
     return table.concat({ tostring(remuda._mq.first), tostring(remuda._mq.second),
-      tostring(remuda._mq.dispatched), tostring(refills), tostring(watchdogs) }, "|")
+      tostring(remuda._mq.dispatched), tostring(state.timer == nil),
+      tostring(state.watchdog == nil), tostring(state.queued == 0) }, "|")
   ]])
-  T.eq(result, "true|true|2|0|0", "one dispatch each, timers retire after the queue drains")
+  T.eq(result, "true|true|2|true|true|true",
+    "one dispatch each, timers retire after the queue drains")
   T.eval([[
     if remuda._mq and remuda._mq.real_http then remuda.http.request = remuda._mq.real_http end
     for _, path in ipairs({ remuda._mq and remuda._mq.config_path,

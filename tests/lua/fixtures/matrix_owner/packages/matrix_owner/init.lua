@@ -30,12 +30,14 @@ return {
     if generation == 1 then
       matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
         function(result) owner.old = result end)
-      owner.refill, owner.watchdog, owner.ticks = nil, nil, {}
-      for handle, spec in pairs(host.schedules or {}) do
+      local state = assert(host._butler_matrix_request_state(),
+        "the request client must expose its exact handles to this fixture")
+      owner.refill, owner.watchdog, owner.ticks = state.timer, state.watchdog, {}
+      for _, spec in pairs(host.schedules or {}) do
         if spec.name == "matrix-request-refill" then
-          owner.refill = handle; owner.ticks[#owner.ticks + 1] = spec.run
+          owner.ticks[#owner.ticks + 1] = spec.run
         elseif spec.name == "matrix-request-watchdog" then
-          owner.watchdog = handle; owner.ticks[#owner.ticks + 1] = spec.run
+          owner.ticks[#owner.ticks + 1] = spec.run
         end
       end
     end

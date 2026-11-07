@@ -32,16 +32,20 @@ remuda = {
       return { cancel = function() end }
     end,
   },
-  schedules = schedules,
+  schedules = {},
   clock = function() return now_ms end,
+  -- Opaque, non-key registry: a real core does not key remuda.schedules by
+  -- the returned handle, so the fixture must not rely on direct indexing.
   schedule = function(spec)
     local handle = { run = spec.run, every = spec.every, name = spec.name }
-    schedules[handle] = handle
+    schedules[#schedules + 1] = handle
     return handle
   end,
   cancel = function(handle)
     cancelled[#cancelled + 1] = handle
-    schedules[handle] = nil
+    for index = #schedules, 1, -1 do
+      if schedules[index] == handle then table.remove(schedules, index) end
+    end
   end,
   log = function() end,
 }
@@ -58,9 +62,16 @@ local function request(path)
 end
 
 local function find_schedule(name)
-  for handle, spec in pairs(schedules) do
-    if spec.name == name then return handle, spec end
+  for _, spec in ipairs(schedules) do
+    if spec.name == name then return spec, spec end
   end
+end
+
+local function has_schedule(handle)
+  for _, current in ipairs(schedules) do
+    if current == handle then return true end
+  end
+  return false
 end
 
 -- 1. The first request uses the initial token and dispatches at once.
@@ -74,19 +85,21 @@ local refill_handle, refill_spec = find_schedule("matrix-request-refill")
 local watchdog_handle, watchdog_spec = find_schedule("matrix-request-watchdog")
 assert(refill_handle and refill_spec, "a refill timer is armed")
 assert(watchdog_handle and watchdog_spec, "a watchdog timer is armed")
+assert(remuda.schedules[refill_handle] == nil,
+  "the public registry is not keyed by the returned handle")
 
--- 3. The refill handle disappears (partial reload/failed resume) but the
--- watchdog survives. It must replace the timer and drain the lone item without
--- a third request.
-now_ms = 300
-schedules[refill_handle] = nil
+-- 3. The refill closure stops ticking while its handle remains. Registry
+-- membership is not liveness evidence; only elapsed monotonic time may declare
+-- it stale, then the watchdog replaces it and keeps the original due.
+now_ms = 2500
+local stale_cancels = #cancelled
 watchdog_spec.run()
 local new_refill_handle, new_refill_spec = find_schedule("matrix-request-refill")
 assert(new_refill_handle ~= refill_handle, "the stale refill handle is replaced")
-assert(schedules[refill_handle] == nil, "the stale refill is not trusted")
--- The original due time (250) survives replacement: at 300 the replacement
--- must grant immediately rather than wait for a fresh 0.25 s phase.
-now_ms = 300
+assert(#cancelled == stale_cancels + 1 and cancelled[#cancelled] == refill_handle,
+  "the stale handle itself is cancelled")
+-- The original due time (250) survives replacement.
+now_ms = 2500
 new_refill_spec.run()
 assert(dispatched == 2, "the lone queued item drains after the watchdog replaces the timer")
 local recovered = answer_b()
@@ -105,19 +118,19 @@ assert(#cancelled == cancels_before, "a late old refill tick cancels nothing")
 
 -- 5. A late old watchdog tick cannot mutate the current pump.
 local late_watchdog = watchdog_spec
-now_ms = 700
+now_ms = 2600
 late_watchdog.run()
 assert(dispatched == dispatches_before, "a late old watchdog tick dispatches nothing")
 
 -- 6. A dispatch that throws answers the caller conservatively, once.
-now_ms = 800
 local real_request = remuda.http.request
+now_ms = 3000
 remuda.http.request = function() error("boom") end
 local answer_c = request("/_matrix/client/v3/joined_rooms")
 assert(dispatched == dispatches_before, "the throwing request queues behind the empty bucket")
 local throw_handle, throw_spec = find_schedule("matrix-request-refill")
 assert(throw_handle and throw_spec, "a refill timer is armed for the throwing request")
-now_ms = 1100
+now_ms = 3400
 throw_spec.run()
 local thrown = answer_c()
 assert(tostring(thrown.error):find("outcome unknown", 1, true),
@@ -126,7 +139,7 @@ remuda.http.request = real_request
 
 -- 7. Cancelling a queued request resolves it once and never dispatches it,
 -- even if a callback from the replaced pumps ticks afterwards.
-now_ms = 1400
+now_ms = 4000
 local before = dispatched
 local cancel_callbacks = 0
 local cancelling
@@ -146,12 +159,12 @@ assert(dispatched == before, "a cancelled request is never dispatched")
 
 -- 8. Continuous inflow: a healthy refill handle is retained, one credit per
 -- 0.25 s tick, and no duplicate timer is armed.
-for handle in pairs(schedules) do remuda.cancel(handle) end
+for index = #schedules, 1, -1 do remuda.cancel(schedules[index]) end
 remuda.butler.matrix = {}
 dofile("packages/butler/matrix_request.lua")
 matrix = assert(remuda.butler.matrix)
 dispatched = 0
-now_ms = 4000
+now_ms = 8000
 local first = request("/_matrix/client/versions")
 assert(dispatched == 1, "fairness first request dispatches immediately")
 local first_result = first()
@@ -176,7 +189,9 @@ assert(same_refill == fair_refill, "a healthy refill handle is retained across e
 -- A new arrival between ticks joins the same queue and the same healthy pump.
 local late_answer = request("/_matrix/client/v3/joined_rooms")
 assert(dispatched == before_first + 1, "a mid-interval arrival waits for the next due tick")
+local healthy_cancels = #cancelled
 for _ = 1, 4 do
+  assert(#cancelled == healthy_cancels, "a healthy pump adds no cancel before it drains")
   now_ms = now_ms + 249
   local handle, spec = find_schedule("matrix-request-refill")
   assert(handle == fair_refill, "the healthy refill handle is not replaced")
@@ -313,7 +328,7 @@ assert(retire_refill and retire_watchdog, "both timers are armed before retireme
 local cancel_before = #cancelled
 matrix.request_retire()
 assert(#cancelled == cancel_before + 2, "retire cancels exactly both timers")
-assert(schedules[retire_refill] == nil and schedules[retire_watchdog] == nil,
+assert(not has_schedule(retire_refill) and not has_schedule(retire_watchdog),
   "both retired handles are gone")
 for index = 1, 2 do
   local value = retired_answers[index]
@@ -375,7 +390,7 @@ local live_watchdog = find_schedule("matrix-request-watchdog")
 assert(live_refill and live_watchdog, "the live queue has both timers")
 matrix.request_resume()
 matrix.request_resume()
-assert(schedules[live_refill] ~= nil and schedules[live_watchdog] ~= nil,
+assert(has_schedule(live_refill) and has_schedule(live_watchdog),
   "repeated resume keeps both live handles")
 now_ms = now_ms + 250
 live_refill_spec.run()
@@ -397,7 +412,50 @@ matrix.request({ method = "GET", path = "/_matrix/client/v3/joined_rooms" },
 matrix.request_retire()
 assert(settled == 2, "both queued callbacks settle despite the first throwing")
 
--- 14. A missing scheduler settles the queue before dispatch; it never falls
+-- 14. Cancelling a dispatched write after its generation retired still settles
+-- once as uncertain; there is no replay or second transport call.
+remuda.butler.matrix = {}
+dofile("packages/butler/matrix_request.lua")
+matrix = assert(remuda.butler.matrix)
+now_ms = now_ms + 1000
+local after_retire_puts, after_retire_cancel_calls, after_retire_callbacks = 0, 0, 0
+local after_retire_callback, late_cancel
+remuda.http.request = function(spec)
+  after_retire_puts = after_retire_puts + 1
+  late_cancel = spec.callback
+  return { cancel = function()
+    after_retire_cancel_calls = after_retire_cancel_calls + 1
+    if type(late_cancel) == "function" then
+      late_cancel({ status = 200, headers = {}, body = "{}" })
+    end
+  end }
+end
+local write = matrix.request_json({ method = "PUT",
+  path = "/_matrix/client/v3/rooms/!room:example.org/send/m.room.message/tx3",
+  body = "{}" }, function(result)
+    after_retire_callbacks = after_retire_callbacks + 1
+    after_retire_callback = result
+  end)
+assert(after_retire_puts == 1, "the write dispatches before retirement")
+matrix.request_retire()
+write.cancel()
+assert(after_retire_callbacks == 1, "the cancelled write settles exactly once")
+assert(after_retire_cancel_calls == 1, "the dispatched transport is cancelled once")
+assert(type(after_retire_callback) == "table" and after_retire_callback.uncertain == true
+  and tostring(after_retire_callback.error) == "cancelled",
+  "a cancel after retirement settles once as uncertain")
+late_cancel({ status = 200, headers = {}, body = "{}" })
+assert(after_retire_callbacks == 1, "a late success cannot call the callback again")
+assert(type(after_retire_callback) == "table" and after_retire_callback.uncertain == true,
+  "a late success cannot replace the uncertain cancellation")
+now_ms = now_ms + 1000
+local after_pending = {}
+for _, spec in pairs(schedules) do after_pending[#after_pending + 1] = spec.run end
+for _, run in ipairs(after_pending) do run() end
+assert(after_retire_puts == 1, "no replay or second transport call")
+remuda.http.request = real_request
+
+-- 15. A missing scheduler settles the queue before dispatch; it never falls
 -- back to an unthrottled network send.
 remuda.butler.matrix = {}
 remuda.schedule = nil
