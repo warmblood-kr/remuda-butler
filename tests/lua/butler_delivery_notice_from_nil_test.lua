@@ -138,6 +138,11 @@ T.test("a Matrix parent reply saves one outbox send and no native notice", funct
       { method = "PUT", prefix = "http://matrix.invalid/_matrix/client/v3/rooms/",
         result = { body = '{"event_id":"$butler-sent"}' } },
     }
+    -- The request pump mints at most one credit per real interval boundary.
+    -- A synchronous fake tick does not advance monotonic time, so drive the
+    -- request clock seam between ticks instead of expecting early refills.
+    local fake_now = 0
+    remuda._butler_matrix_request_clock = function() return fake_now end
     assert(remuda.butler.matrix.relay.start(remuda._butler_matrix_config),
       "the real Matrix relay starts on the fake homeserver")
 
@@ -156,7 +161,9 @@ T.test("a Matrix parent reply saves one outbox send and no native notice", funct
     assert(config.take_delivery_notice_result({ id = reply_id }, "butler") == nil,
       "a genuine Matrix reply never enters the notice cache")
 
+    fake_now = fake_now + 250
     remuda.http.tick()
+    fake_now = fake_now + 250
     remuda.http.tick()
     local sends, txn = 0, nil
     for _, call in ipairs(remuda.http.calls) do
@@ -176,6 +183,7 @@ T.test("a Matrix parent reply saves one outbox send and no native notice", funct
     assert(status.event_id == "$butler-sent", "the relay recorded the sent event")
     assert(counters.runs == 0, "a Matrix reply starts no native helper")
     remuda.butler.matrix.relay.stop()
+    remuda._butler_matrix_request_clock = nil
     return summary
   ]==])
   T.eq(out:sub(1, 19), "queued Matrix reply", "Matrix reply marker")

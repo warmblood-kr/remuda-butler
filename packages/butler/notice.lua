@@ -743,6 +743,7 @@ local function clear_notice_fallbacks(session, ids)
 end
 -- Open or merge into the session's stuck record (IDs union, since and report throttle kept).
 function remuda._butler_notice_open_stuck(session, ids, reason)
+  if not notice_image_current() then return end
   local stuck = bus.notice_stuck[session]
   local agent_id = bus.agents[session] and bus.agents[session].id
   if not stuck or stuck.agent_id ~= agent_id then
@@ -820,6 +821,7 @@ end
 -- An explicit refusal that wrote nothing: bounded retry through the existing
 -- 20s/60s/300s/900s schedule, then one failure alert with the exact action.
 notice_recovery_error = function(session, state, reason)
+  if not notice_image_current() then return false, "generation_changed" end
   state = type(state) == "table" and state or {}
   cancel_native_watcher(session)
   state.failed = true
@@ -1688,6 +1690,7 @@ end
 -- is queued while this guard is held; the completion keeps that remainder, so
 -- drain it now instead of waiting for a poll or quiet window.
 local function deliver_native_now(session)
+  if not notice_image_current() then return false, "generation_changed" end
   local sent = false
   for _ = 1, 8 do
     if bus.notice_native_dispatching[session] then break end
@@ -1791,6 +1794,7 @@ local function arm_notice_timer(session, slot, seconds)
   if pair[slot] then pcall(function() pair[slot]:cancel() end) end
   local handle
   local ok, armed = pcall(after, seconds, function()
+    if not notice_image_current() then return end
     local current = bus.notice_timers[session]
     -- A cancelled or replaced handle may still fire: it does nothing.
     if not current or current[slot] ~= handle then return end
@@ -1827,6 +1831,7 @@ local function notice_id_stuck(alias, message_id)
   return false
 end
 function remuda._butler_notify(alias, notice, message_id, reshow, reminder)
+  if not notice_image_current() then return false, "generation_changed" end
   local _, recipient = mail_id(alias, false)
   if notice_id_stuck(alias, message_id) then return false end
   if message_id and not reshow and not mail.is_unread(recipient.id, message_id) then return true end
@@ -2031,6 +2036,7 @@ end
 -- The one hook for any compaction (Butler's own, or the half-drop heuristic
 -- below for the agent's auto-compact): the next tick re-seeds this member.
 function remuda._butler_notice_compacted(alias)
+  if not notice_image_current() then return end
   if bus.agents[alias] then bus.unread_seeded[alias] = "compacted" end
 end
 -- Half-drop heuristic for an agent's own compaction. A missing sample, the
