@@ -195,11 +195,15 @@ local function install_candidate_capture(preload_matrix, preload_pair)
   local previous_nonce = host._butler_request_candidate_nonce
   local nonce = {}
   local capture_active = true
+  local boundary_reached = false
   host._butler_request_candidate_nonce = nonce
   host._butler_request_candidate_capture = function(candidate_nonce, matrix,
       retire, resume, request, request_json)
     if not capture_active then return false end
     if candidate_nonce ~= nonce then return false end
+    -- The provider boundary was crossed for this load even if the reported
+    -- pair is rejected; promotion must not silently fall back to public.
+    boundary_reached = true
     if candidate_request_api then return false end
     if type(matrix) ~= "table" or type(retire) ~= "function"
         or type(resume) ~= "function" or type(request) ~= "function"
@@ -226,7 +230,7 @@ local function install_candidate_capture(preload_matrix, preload_pair)
     capture_active = false
     host._butler_request_candidate_capture = previous_hook
     host._butler_request_candidate_nonce = previous_nonce
-  end
+  end, function() return boundary_reached end
 end
 
 local function preload_request_pair(matrix)
@@ -258,7 +262,7 @@ local function load_main()
   host._butler_runtime_refusal = nil
   runtime_refusal_only = false
   local preload_matrix = host.butler and host.butler.matrix
-  local restore_capture = install_candidate_capture(preload_matrix,
+  local restore_capture, candidate_boundary = install_candidate_capture(preload_matrix,
     preload_request_pair(preload_matrix))
   local ok, err = pcall(function()
     host.exec("butler/system")
@@ -291,7 +295,7 @@ local function load_main()
     retire_candidate_request_client()
     error(validation_err, 0)
   end
-  local promoted, promote_why = promote_candidate_request_client()
+  local promoted, promote_why = promote_candidate_request_client(candidate_boundary())
   if not promoted then
     retire_candidate_request_client()
     error("Matrix request pair is not coherent: " .. tostring(promote_why), 0)
@@ -391,9 +395,14 @@ local function request_pair_coherent()
   return true
 end
 
-promote_candidate_request_client = function()
+promote_candidate_request_client = function(boundary_reached)
   local candidate = candidate_request_api
   if not candidate then
+    -- Once this load's provider boundary was crossed, a rejected capture is a
+    -- hard failure: never adopt the public table as a fallback.
+    if boundary_reached then
+      return false, "request candidate capture missing"
+    end
     local captured = capture_request_client()
     if not captured and request_client_incomplete then
       return false, "request lifecycle API is incomplete"

@@ -555,7 +555,8 @@ test("the pre-load old pair is never a candidate", function()
     publish_graph(host)
   end
   local fresh = declaration(host)
-  fresh.commands({})
+  assert(not pcall(fresh.commands, {}),
+    "a rejected pre-load pair still booted from the public fallback")
   assert(accepted == false, "pre-load old pair was accepted as a candidate")
   assert(counters.retire == 0, "old pair was retired as a candidate")
 end)
@@ -599,6 +600,27 @@ test("a failed candidate retire stays pending and retries the exact pair", funct
   module.commands({})
   assert(calls == 2, "candidate retry count: " .. tostring(calls))
   assert(host._butler_request_retire_blocked == nil, "pending not cleared after clean retry")
+end)
+
+test("a crossed provider boundary without a candidate fails the load", function()
+  local host, _, counters = request_fixture()
+  local old_module = declaration(host)
+  old_module.commands({})
+  local old_matrix = assert(host.butler.matrix, "old matrix missing")
+  host.exec = function(name)
+    if name == "butler/system" then host._butler_system = {}; return end
+    if name ~= "butler/main" then return end
+    local capture = assert(host._butler_request_candidate_capture)
+    -- The provider boundary was crossed, but the reported pair is the old one.
+    capture(host._butler_request_candidate_nonce, old_matrix,
+      old_matrix.request_retire, old_matrix.request_resume,
+      old_matrix.request, old_matrix.request_json)
+    publish_graph(host)
+  end
+  local fresh = declaration(host)
+  assert(not pcall(fresh.commands, {}),
+    "a rejected capture allowed a public fallback to boot")
+  assert(counters.retire == 0, "old pair was retired as a candidate")
 end)
 
 os.exit(failures == 0 and 0 or 1)
