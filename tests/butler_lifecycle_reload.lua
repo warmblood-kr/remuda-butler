@@ -621,6 +621,7 @@ test("a crossed provider boundary without a candidate fails the load", function(
   assert(not pcall(fresh.commands, {}),
     "a rejected capture allowed a public fallback to boot")
   assert(counters.retire == 0, "old pair was retired as a candidate")
+  assert(counters.starts == 0, "relay started after a rejected boundary")
 end)
 
 os.exit(failures == 0 and 0 or 1)
