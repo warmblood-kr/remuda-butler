@@ -472,6 +472,23 @@ remuda._butler_compaction_tick = function()
 end
 local prior_mt = getmetatable(_G)
 setmetatable(_G, { __index = { remuda = remuda } })
+-- The earlier main load is a partial image used only for its exported helpers.
+-- The lifecycle must boot a full graph (and never a partial image), so publish
+-- the validated mock graph and clear the helper test mode before start().
+remuda._butler_test_mode = nil
+local lifecycle_mock_notice = { _policy_bound = true }
+assert(type(remuda.butler) == "table", "main exports missing")
+remuda.butler.send_policy = {
+  readiness = function()
+    return { owner = lifecycle_mock_notice, bound = true, transport_acquired = true }
+  end,
+}
+remuda.butler.native_dispatch = {
+  admit = function() return { outcome = "not_written" } end,
+}
+remuda.butler.matrix = {}
+remuda._butler_notice = lifecycle_mock_notice
+remuda._butler_notice_config = { bus = remuda._butler_bus }
 local lifecycle = dofile("packages/butler/init.lua")
 setmetatable(_G, prior_mt)
 local schedule_state = { compaction_enabled = true }
