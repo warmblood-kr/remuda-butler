@@ -37,6 +37,14 @@ local function fixture(options)
     assert(name == "butler/main")
     loads = loads + 1
     if failing then error("injected main failure") end
+    if options.refusal then
+      host.butler = { guard = {
+        refusal = function() return "standby refusal" end,
+        standby = function() end,
+      } }
+      host._butler_runtime_refusal = true
+      return
+    end
     local notice = { _policy_bound = true }
     local policy = {}
     if options.readiness ~= false then
@@ -210,6 +218,14 @@ test("missing readiness fails closed at load and resume", function()
   local host = fixture({ readiness = false })
   local module = declaration(host)
   assert(not pcall(module.commands, {}), "unverifiable policy was loaded")
+end)
+
+test("guard refusal-only graph keeps commands without full readiness", function()
+  local host = fixture({ refusal = true })
+  local module = declaration(host)
+  module.commands({})
+  assert(host.butler and host.butler.guard, "guard graph was not published")
+  assert(host._butler_notice == nil, "refusal graph claimed an active notice")
 end)
 
 test("rollback clears a candidate export absent from the old graph", function()

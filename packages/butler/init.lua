@@ -16,6 +16,7 @@ local main_loading, main_loaded = false, false
 -- 0 not booted; 1 main; 2 bootstrap; 3 butler-start emitted; 4 relay started.
 local boot_stage, booted = 0, false
 local boot_emit_incomplete, runtime_failed = false, false
+local runtime_refusal_only = false
 local last_good
 
 local function shallow_copy(value)
@@ -35,6 +36,12 @@ local RUNTIME_HELPERS = {
   "_butler_reconcile", "_butler_reconcile_retry", "_butler_done_tick",
   "_butler_compaction_tick", "_butler_session_exited", "_butler_compaction_submit",
   "_butler_cancel_active_choosers",
+  -- Dynamic deps read by restored notice closures. Durable bus/mail/journal
+  -- modules stay live and are deliberately absent.
+  "_butler_notify_policy", "_butler_composer_decision", "_butler_approved_text_policy",
+  "_butler_task_retry_policy", "_butler_human_active", "_butler_prompt_is_empty",
+  "_butler_notice_after", "_butler_notice_clock", "_butler_notice_human_idle",
+  "_butler_schedule_env", "_butler_telemetry_for", "_butler_agent_startup",
 }
 
 local function restore_entries(target, snapshot)
@@ -158,10 +165,19 @@ local function load_main()
   end)
   main_loading = false
   if not ok then error(err, 0) end
+  -- guard.boot refusal and the test-mode early return publish a commands-only
+  -- graph. Keep its command/help/refusal contract, but never call it an active
+  -- runtime or validate it as one.
+  if host._butler_standby or host._butler_runtime_refusal then
+    runtime_refusal_only = true
+    main_loaded = true
+    return
+  end
   -- A cold successful load must satisfy the same graph/ownership readiness
   -- contract as a resume; an unverifiable graph is not loaded.
   local valid, validation_err = pcall(validate_runtime)
   if not valid then error(validation_err, 0) end
+  runtime_refusal_only = false
   main_loaded = true
 end
 
@@ -174,6 +190,13 @@ local function relay_owner_fenced()
   if type(relay) ~= "table" or type(relay.owner_proven) ~= "function" then return false end
   local ok, proven = pcall(relay.owner_proven)
   return ok and proven == true
+end
+
+local function report_relay(outcome, reason)
+  local diagnostics = host._butler_diagnostics
+  if diagnostics and type(diagnostics.record) == "function" then
+    pcall(diagnostics.record, "relay", outcome, reason, nil)
+  end
 end
 
 local function start_matrix_relay()
@@ -333,7 +356,12 @@ return {
     if host._butler_standby then
       -- A refused start rolls back. Rediscovery preserves its refusal even
       -- if the owner has since gone; only an explicit start may take over.
-      host.butler.guard.standby(host._butler_standby, host._butler_paths)
+      -- A refusal-only graph may not publish the standby helper; the command
+      -- catalog and refusal verb still have to load.
+      local guard = host.butler and host.butler.guard
+      if guard and type(guard.standby) == "function" then
+        guard.standby(host._butler_standby, host._butler_paths)
+      end
     else
       load_main()
     end
@@ -365,9 +393,14 @@ return {
         local relay = matrix and matrix.relay
         if relay and not relay.instance then
           if relay_owner_fenced() then
+            host._butler_relay_restart_blocked = nil
+            host._butler_relay_owner_unverified = nil
             start_matrix_relay()
+            report_relay("ok", "owner_proven")
           else
             host._butler_relay_restart_blocked = true
+            host._butler_relay_owner_unverified = true
+            report_relay("degraded", "owner_unknown")
             local trace = host._butler_session_trace or _G._butler_session_trace
             if trace then pcall(trace, "relay_owner_unknown", "resume left Matrix relay stopped") end
           end
@@ -394,6 +427,13 @@ return {
     -- Capture before stop unwraps resources: identities, nested entries and
     -- whether the relay was running, but never the active handle itself.
     capture_runtime()
+    local matrix = host.butler and host.butler.matrix
+    if matrix and matrix.relay and matrix.relay.instance then
+      -- A successful candidate may start a new relay while a hidden writer
+      -- survives the stop. Without an owner registry this remains unverified;
+      -- it is reported, never claimed healthy.
+      host._butler_relay_owner_unverified = true
+    end
     if dialogs then dialogs.stop() end
     local controls = host.butler and host.butler.startup_controls
     if controls and type(controls.stop_all) == "function" then pcall(controls.stop_all) end
