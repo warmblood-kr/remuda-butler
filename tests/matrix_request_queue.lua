@@ -1,10 +1,8 @@
 -- The Matrix request word must not latch on a refill timer from a previous
 -- module generation, and a dispatch error must not leave the caller waiting.
 -- No daemon, no network: the HTTP primitive and the scheduler are injected.
-local tmp = "/tmp/matrix-request-queue-" .. tostring(os.time())
-os.execute("rm -rf " .. tmp .. " && mkdir -p " .. tmp)
-local config_path = tmp .. "/config"
-local token_path = tmp .. "/token"
+local config_path = os.tmpname()
+local token_path = os.tmpname()
 local file = assert(io.open(config_path, "w"))
 file:write("http://matrix.invalid\n!room:example.org\n@bot:example.org\n")
 file:close()
@@ -110,5 +108,6 @@ end
 assert(dispatched == before, "a cancelled request is never dispatched")
 
 os.clock = base_clock
-os.execute("rm -rf " .. tmp)
+os.remove(config_path)
+os.remove(token_path)
 print("ok: Matrix request queue replaces stale refill timers")
