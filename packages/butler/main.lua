@@ -106,7 +106,12 @@ local paths = remuda._butler_paths
 -- One daemon owns a Butler home (#195). A second daemon stops here, before any
 -- shared state (the registry, the MCP config, the root Butler, the relay).
 remuda.exec("butler/guard")
-if not remuda.butler.guard.boot(paths) then return end
+if not remuda.butler.guard.boot(paths) then
+  -- A refusal-only graph keeps the command/help/refusal contract; it is not an
+  -- active notification graph and must not be validated as one.
+  remuda._butler_runtime_refusal = true
+  return
+end
 remuda.exec("butler/launch_failure")
 local launch_failure_lines = assert(remuda.butler.launch_failure_lines)
 local topic_config = paths.topic_config
