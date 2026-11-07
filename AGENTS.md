@@ -17,8 +17,11 @@ remuda butler schedule add milestone "<M> <H> * * *" \
 Use 20-30 minutes for fast work and one hour for normal work. When it fires,
 remind yourself of the task and its definition of done, re-check whether the
 current approach is still the shortest safe path, confirm your members are
-aligned, and set the next reminder if the work continues. The reminder is for
-that self-check, not a duty to report to a human every time; if a risky path
-goes beyond your remit, use your judgment and escalate to your leader or the
-team. Report to your leader or the owner when you have new evidence, a decision,
-a change, or a specific blocker; never send repetitive empty reports.
+aligned, and set the next reminder if the work continues. A finished `--once`
+item stays listed until removed and its name must be unique, so remove it with
+`remuda butler schedule rm milestone` before adding the next slot, or use a
+different name. The reminder is for that self-check, not a duty to report to a
+human every time; if a risky path goes beyond your remit, use your judgment and
+escalate to your leader or the team. Report to your leader or the owner when you
+have new evidence, a decision, a change, or a specific blocker; never send
+repetitive empty reports.
