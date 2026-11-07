@@ -17,6 +17,10 @@ local main_loading, main_loaded = false, false
 local boot_stage, booted = 0, false
 local boot_emit_incomplete, runtime_failed = false, false
 local runtime_refusal_only = false
+-- Set only when THIS successful load deliberately returned the boolean
+-- test-mode helper image (commands/help only, no policy/notice/native/matrix).
+-- Distinct from a guard refusal/standby and from a full activation.
+local runtime_partial_image
 local last_good
 
 local function shallow_copy(value)
@@ -261,6 +265,8 @@ local function load_main()
   -- before this load and let main.lua set it only for its own guard decision.
   host._butler_runtime_refusal = nil
   runtime_refusal_only = false
+  runtime_partial_image = nil
+  host._butler_partial_image = nil
   local preload_matrix = host.butler and host.butler.matrix
   local restore_capture, candidate_boundary = install_candidate_capture(preload_matrix,
     preload_request_pair(preload_matrix))
@@ -285,6 +291,18 @@ local function load_main()
   if host._butler_standby or host._butler_runtime_refusal then
     retire_candidate_request_client()
     runtime_refusal_only = true
+    main_loaded = true
+    return
+  end
+  -- The boolean test-mode branch in main.lua returns before policy, notice,
+  -- native dispatch and Matrix. Accept that exact partial result for helper
+  -- callers only: never validate/promote it, bootstrap, emit active-service
+  -- startup, start a relay or claim production readiness. A later full
+  -- activation still needs a fresh load with the test mode cleared.
+  if host._butler_test_mode == true then
+    retire_candidate_request_client()
+    runtime_partial_image = "test_mode"
+    host._butler_partial_image = runtime_partial_image
     main_loaded = true
     return
   end
@@ -538,7 +556,7 @@ local function start_matrix_relay()
   if host._butler_matrix_config and relay and not relay.instance and not host._butler_skip_relay
     and not host._butler_standby
     and type(host.http) == "table" and type(host.http.request) == "function" then
-    relay.start(host._butler_matrix_config)
+    matrix.relay.start(host._butler_matrix_config)
   end
 end
 
@@ -546,6 +564,9 @@ local function boot()
   if runtime_failed then
     error("Butler runtime recovery failed; reload Butler when idle", 0)
   end
+  -- A restricted test-mode image is accepted for helper callers but is never
+  -- booted: no bootstrap, active-service notification, relay or resources.
+  if runtime_partial_image then return end
   if boot_stage >= 4 then return end
   -- A commands-only standby loaded only the refusal verbs. Explicit start
   -- must re-ask the home locks inside this lifecycle transaction.
@@ -554,9 +575,13 @@ local function boot()
     main_loading = false
   end
   load_main()
+  -- A direct start/fallback path can reach load_main before any commands
+  -- call; the restricted helper image must stop here too, never bootstrap,
+  -- emit or report booted.
+  if runtime_partial_image then return end
   if runtime_refusal_only or host._butler_standby then
-    -- A refusal/test-mode catalog is commands-only: never run bootstrap,
-    -- emit a start notification or start a resource from it.
+    -- A refusal catalog is commands-only: never run bootstrap, emit a start
+    -- notification or start a resource from it.
     main_loaded = false
     local guard = host.butler and host.butler.guard
     local reason = guard and type(guard.refusal) == "function"

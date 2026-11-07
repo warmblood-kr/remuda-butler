@@ -2634,9 +2634,11 @@ fn exhausted_recovery_sends_one_failure_alert() {
         &path,
         r#"
         local send = remuda._butler_send
+        remuda._notice_failure_alerts = {}
         remuda._butler_send = function(from, to, text)
           if from == 'butler' then
             remuda._notice_failure_alert = text
+            table.insert(remuda._notice_failure_alerts, text)
             return 'alerted'
           end
           return send(from, to, text)
@@ -2650,10 +2652,19 @@ fn exhausted_recovery_sends_one_failure_alert() {
         }, 'verification failed')
         "#,
     );
-    let alert = eval(&path, "return tostring(remuda._notice_failure_alert)");
+    // A concurrent poll may also emit a stuck report; capture every alert and
+    // assert the exhaustion alert itself, exactly once.
+    let alerts = eval(&path,
+        r#"return table.concat(remuda._notice_failure_alerts, "\n---\n")"#);
+    let exhausted = alerts
+        .split("\n---\n")
+        .filter(|text| text.contains("Could not safely deliver queued Butler mail"))
+        .collect::<Vec<_>>();
+    assert_eq!(exhausted.len(), 1, "exhaustion alert count: {alerts}");
+    let alert = exhausted[0];
     assert!(alert.contains("after 5 attempts"), "exhaustion summary omitted its attempts: {alert}");
     assert!(alert.contains("remuda butler send"), "failure alert omitted the next action: {alert}");
-    assert!(!alert.contains("private draft"), "failure alert leaked the composer draft: {alert}");
+    assert!(!alerts.contains("private draft"), "failure alert leaked the composer draft: {alerts}");
     assert_eq!(eval(&path, "return tostring(remuda._butler_bus.notices.m1)"), "nil");
 }
 

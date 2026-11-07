@@ -624,4 +624,47 @@ test("a crossed provider boundary without a candidate fails the load", function(
   assert(counters.starts == 0, "relay started after a rejected boundary")
 end)
 
+test("boolean test-mode load is an explicit partial image", function()
+  local host, _, _, emits = fixture({ test_mode = true })
+  host.exec = function(name)
+    if name == "butler/system" then host._butler_system = {}; return end
+    assert(name == "butler/main")
+    -- main.lua returns before policy/native/notice/matrix in boolean mode.
+    host.butler = host.butler or {}
+  end
+  local module = declaration(host)
+  local state = {}
+  module.commands(state)
+  assert(host._butler_partial_image == "test_mode", "partial outcome not recorded")
+  assert(host._butler_runtime_refusal == nil, "test mode must not be a guard refusal")
+  assert(host.butler.send_policy == nil, "policy must not be fabricated")
+  assert(pcall(module.start, state), "restricted helper start must succeed")
+  assert(emits() == 0, "partial image emitted active-service startup")
+  assert(host.butler.matrix == nil, "partial image started Matrix/relay")
+end)
+
+test("a stale partial outcome cannot bypass a fresh full load", function()
+  local host = fixture()
+  host._butler_partial_image = "test_mode"
+  local module = declaration(host)
+  module.commands({})
+  assert(host._butler_partial_image == nil, "stale partial flag survived the load")
+  assert(host.butler.send_policy ~= nil, "full load skipped construction")
+end)
+
+test("a direct start constructs only the restricted partial image", function()
+  local host, _, _, emits = fixture({ test_mode = true })
+  host.exec = function(name)
+    if name == "butler/system" then host._butler_system = {}; return end
+    assert(name == "butler/main")
+    host.butler = host.butler or {}
+  end
+  local module = declaration(host)
+  local state = {}
+  assert(pcall(module.start, state), "direct restricted start must succeed")
+  assert(host._butler_partial_image == "test_mode", "partial outcome missing")
+  assert(emits() == 0, "direct partial start emitted active-service startup")
+  assert(host.butler.matrix == nil, "direct partial start touched Matrix/relay")
+end)
+
 os.exit(failures == 0 and 0 or 1)

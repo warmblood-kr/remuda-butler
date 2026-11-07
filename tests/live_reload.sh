@@ -186,6 +186,9 @@ BASE_BOOT=$(lua 'return remuda.event_counts()["butler-start"] or 0')
 EXPECT_NEW="hooks=1,1,1 legacy_matrix_hooks=0,0 schedules=3 sessions=butler,m1 member=true mail=2 relay=$RELAY_EXPECT bus=$BASE pids=$SESSION_PID_COUNT"
 EXPECT_OLD="hooks=1,1,1 legacy_matrix_hooks=1,1 schedules=2 sessions=butler,m1 member=true mail=0 relay=false bus=$BASE pids=$SESSION_PID_COUNT"
 EXPECT_NEW_EMPTY="hooks=1,1,1 legacy_matrix_hooks=0,0 schedules=3 sessions=butler,m1 member=true mail=0 relay=$RELAY_EXPECT bus=$BASE pids=$SESSION_PID_COUNT"
+# A stopped relay is owner-unverified: the lifecycle must not restart it. The
+# next explicit positive owner proof is a fresh cold boot, exercised below.
+EXPECT_RESTART_BLOCKED_EMPTY=${EXPECT_NEW_EMPTY/relay=$RELAY_EXPECT/relay=false}
 
 echo "== swap in lifecycle files, reload x3"
 new_files
@@ -217,7 +220,13 @@ for i in 1 2 3; do
     lua "remuda.reload('butler')"
   fi
   settle
-  check "reload $i" "boots=$((BASE_BOOT + i)) $EXPECT_NEW"
+  if [[ $i == 1 ]]; then
+    check "reload $i" "boots=$((BASE_BOOT + i)) $EXPECT_NEW"
+  else
+    check "reload $i" "boots=$((BASE_BOOT + i)) $EXPECT_RESTART_BLOCKED"
+    [[ $(lua 'return tostring(remuda._butler_relay_restart_blocked)') == true ]] || \
+      fail "reload $i: owner-unverified relay restart was not reported blocked"
+  fi
   if [[ $i == 1 ]]; then
     if [[ -n "$OLD_RELAY_PID" ]] && kill -0 "$OLD_RELAY_PID" 2>/dev/null; then
       fail "real old Python relay survived reload 1 as PID $OLD_RELAY_PID detail=$(ps -p "$OLD_RELAY_PID" -o pid=,ppid=,stat=,command=) slot=$(lua 'return tostring(remuda._butler_relay)') processes=$(lua 'return table.concat(remuda.processes(), ",")')"
@@ -229,6 +238,7 @@ for i in 1 2 3; do
     lua "local m = remuda._butler_bus.agents.m1; remuda._butler_delivery_count_before = #remuda._butler_mail.mailbox(m.id); remuda._butler_send('butler', 'm1', 'single delivery after transition')"
     lua "local m = remuda._butler_bus.agents.m1; assert(#remuda._butler_mail.mailbox(m.id) - remuda._butler_delivery_count_before == 1, 'one send after transition must queue exactly one inbox message')"
     EXPECT_NEW=${EXPECT_NEW/mail=2/mail=3}
+    EXPECT_RESTART_BLOCKED=${EXPECT_NEW/relay=$RELAY_EXPECT/relay=false}
   fi
   if [[ $i == 2 ]]; then
     lua "local ids = {}; for _, id in ipairs(remuda.processes()) do ids[id] = true end; assert(ids[$FOREIGN_RELAY_ID], 'foreign path recorded in legacy slot was killed')"
@@ -254,13 +264,17 @@ echo "== roll forward again"
 new_files
 lua "remuda.reload('butler')"; settle
 if [[ -n "$OLD_RELAY_PID" ]] && kill -0 "$OLD_RELAY_PID" 2>/dev/null; then fail "rollback Python relay survived roll-forward"; fi
-check "roll forward" "boots=$((BASE_BOOT + 5)) $EXPECT_NEW_EMPTY"
+check "roll forward" "boots=$((BASE_BOOT + 5)) $EXPECT_RESTART_BLOCKED_EMPTY"
+[[ $(lua 'return tostring(remuda._butler_relay_restart_blocked)') == true ]] || \
+  fail "roll forward: owner-unverified relay restart was not reported blocked"
 
 echo "== tight reload loop: one boot per reload, nothing duplicated"
 lua "for _ = 1, 5 do remuda.reload('butler') end"
 for _ in 1 2 3 4 5; do lua "remuda.reload('butler')"; done
 settle
-check "tight x10" "boots=$((BASE_BOOT + 15)) $EXPECT_NEW_EMPTY"
+check "tight x10" "boots=$((BASE_BOOT + 15)) $EXPECT_RESTART_BLOCKED_EMPTY"
+[[ $(lua 'return tostring(remuda._butler_relay_restart_blocked)') == true ]] || \
+  fail "tight x10: owner-unverified relay restart was not reported blocked"
 [[ $(lua 'return #(remuda.hooks["butler-start"] or {})') == 1 ]] || fail "butler-start hook duplicated"
 
 echo "== cold boot through remuda butler"

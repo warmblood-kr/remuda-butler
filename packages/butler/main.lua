@@ -939,6 +939,10 @@ remuda._butler_commands_config = { current_agent = current_agent, OPERATOR = OPE
 remuda.exec("butler/schedule")
 remuda.exec("butler/schedule_cli")
 remuda.exec("butler/status_hook")
+-- guard_grants extends the published table in place, so a failed candidate
+-- would otherwise overwrite the last-good closures that rollback restores.
+-- Stage a fresh table for this load; the rollback snapshot keeps the old one.
+if remuda.butler then remuda.butler.guard_grants = {} end
 remuda.exec("butler/guard_policy")
 remuda.exec("butler/guard_grants")
 remuda.exec("butler/guard_approval")
