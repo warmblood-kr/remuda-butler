@@ -527,6 +527,15 @@ task sent to this terminal. Your Butler identity is already in
 `REMUDA_BUTLER_AGENT_ID`, and your leader is in `REMUDA_BUTLER_LEADER_ID`.
 Start by running `remuda butler inbox` to read your welcome message.
 
+## Milestones
+
+Report progress at a milestone at least every 20-30 minutes for fast work and
+every hour for normal work. At each milestone, remind yourself of the task and
+its definition of done, re-check whether the current approach is still the
+shortest safe path, and confirm with your leader or the team before continuing
+on a risky path. Do not send repetitive empty reports: each report must carry
+new evidence, a decision, a change, or a specific blocker.
+
 ## Memory
 
 Keep useful notes under `docs/`. Put stable, reusable facts and decisions in
@@ -546,6 +555,8 @@ manual file practices; do not assume a process performs them automatically.
   prompt = function()
     return "You are a Butler team member. Start by running `remuda butler inbox` to read "
       .. "your welcome message, then read AGENTS.md in your working directory. "
+      .. "Report at 20-30 minutes for fast work or 1 hour for normal work; at each "
+      .. "milestone re-check your approach and the team; never send empty repeated reports. "
   end })
 remuda._butler_contribute("butler.guidance", "cli", { order = 20,
   agents_md = function()

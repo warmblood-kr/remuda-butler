@@ -5,6 +5,15 @@ task sent to this terminal. Your Butler identity is already in
 `REMUDA_BUTLER_AGENT_ID`, and your leader is in `REMUDA_BUTLER_LEADER_ID`.
 Start by running `remuda butler inbox` to read your welcome message.
 
+## Milestones
+
+Report progress at a milestone at least every 20-30 minutes for fast work and
+every hour for normal work. At each milestone, remind yourself of the task and
+its definition of done, re-check whether the current approach is still the
+shortest safe path, and confirm with your leader or the team before continuing
+on a risky path. Do not send repetitive empty reports: each report must carry
+new evidence, a decision, a change, or a specific blocker.
+
 ## Memory
 
 Keep useful notes under `docs/`. Put stable, reusable facts and decisions in
@@ -164,7 +173,7 @@ Butler loaded these guidance layers in this order when this session started.
 A later layer adds to or overrides an earlier one. Edit the files named here,
 not this block: Butler rewrites it on every session start.
 
-- framework: built in, version sha256:a7db23a8b0fc
+- framework: built in, version sha256:23b5deab7a47
 - cluster: not available (this Remuda core has no cluster file store; update Remuda)
 - team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
 - personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)
