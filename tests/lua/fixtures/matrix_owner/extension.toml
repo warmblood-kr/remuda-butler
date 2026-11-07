@@ -1,0 +1,4 @@
+name = "matrix_owner"
+entry = "packages/matrix_owner/init.lua"
+api = "remuda-lua-v1"
+lifecycle = "remuda-module-v1"

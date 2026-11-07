@@ -201,7 +201,203 @@ local late = late_answer()
 assert(type(late) == "table" and late.status == 200 and not late.error,
   "the mid-interval arrival answered")
 
--- 9. A missing scheduler settles the queue before dispatch; it never falls
+-- 9. A write that may have reached the homeserver is typed uncertain when the
+-- dispatch throws, and a late transport callback cannot settle it twice.
+remuda.butler.matrix = {}
+dofile("packages/butler/matrix_request.lua")
+matrix = assert(remuda.butler.matrix)
+now_ms = now_ms + 1000
+local write_puts, write_callbacks, late_write = 0, 0, nil
+remuda.http.request = function(spec)
+  write_puts = write_puts + 1
+  late_write = spec.callback
+  error("boom after side effect")
+end
+local write_result
+matrix.request_json({ method = "PUT",
+  path = "/_matrix/client/v3/rooms/!room:example.org/send/m.room.message/tx1",
+  body = "{}" }, function(result) write_callbacks = write_callbacks + 1; write_result = result end)
+assert(write_puts == 1, "the write is attempted once")
+assert(write_callbacks == 1, "the throwing write settles once")
+assert(type(write_result) == "table" and write_result.uncertain == true
+  and tostring(write_result.error):find("outcome unknown", 1, true),
+  "a throwing write reports an uncertain outcome")
+-- The transport still calls back late with success: finish-once keeps the
+-- uncertain result, and no retry is scheduled.
+late_write({ status = 200, headers = {}, body = "{}" })
+now_ms = now_ms + 1000
+local write_pending = {}
+for _, spec in pairs(schedules) do write_pending[#write_pending + 1] = spec.run end
+for _, run in ipairs(write_pending) do run() end
+assert(write_callbacks == 1, "a late write callback cannot settle the request twice")
+assert(type(write_result) == "table" and write_result.uncertain == true,
+  "the uncertain write result is retained")
+assert(write_puts == 1, "a late write callback causes no retry")
+remuda.http.request = real_request
+
+-- 10. Cancelling a dispatched write latches uncertainty BEFORE transport.cancel;
+-- an inline generic error from the transport cannot replace that result.
+remuda.butler.matrix = {}
+dofile("packages/butler/matrix_request.lua")
+matrix = assert(remuda.butler.matrix)
+now_ms = now_ms + 1000
+local cancel_puts, cancel_calls, cancel_callbacks, cancel_late = 0, 0, 0, nil
+remuda.http.request = function(spec)
+  cancel_puts = cancel_puts + 1
+  cancel_late = spec.callback
+  return { cancel = function()
+    cancel_calls = cancel_calls + 1
+    if type(cancel_late) == "function" then cancel_late({ error = "transport cancelled" }) end
+  end }
+end
+local cancel_result
+local write_handle = matrix.request_json({ method = "POST",
+  path = "/_matrix/client/v3/rooms/!room:example.org/send/m.room.message/tx2",
+  body = "{}" }, function(result)
+    cancel_callbacks = cancel_callbacks + 1; cancel_result = result
+  end)
+assert(cancel_puts == 1, "the write dispatches")
+write_handle.cancel()
+assert(cancel_calls == 1, "the transport cancel is requested")
+assert(cancel_callbacks == 1, "cancel settles the write exactly once")
+assert(type(cancel_result) == "table" and cancel_result.uncertain == true
+  and tostring(cancel_result.error) == "cancelled",
+  "the latched uncertain cancellation wins over the inline error")
+cancel_late({ status = 200, headers = {}, body = "{}" })
+assert(cancel_callbacks == 1 and cancel_result.uncertain == true,
+  "a late success cannot replace the uncertain cancellation")
+now_ms = now_ms + 1000
+local cancel_pending = {}
+for _, spec in pairs(schedules) do cancel_pending[#cancel_pending + 1] = spec.run end
+for _, run in ipairs(cancel_pending) do run() end
+assert(cancel_puts == 1, "no retry after a cancelled write")
+remuda.http.request = real_request
+
+-- 11. A caller callback that throws is contained: the request settles once and
+-- the module keeps serving later work.
+remuda.butler.matrix = {}
+dofile("packages/butler/matrix_request.lua")
+matrix = assert(remuda.butler.matrix)
+now_ms = now_ms + 1000
+local throwing_calls = 0
+matrix.request({ method = "GET", path = "/_matrix/client/versions" },
+  function() throwing_calls = throwing_calls + 1; error("callback boom") end)
+assert(throwing_calls == 1, "the throwing callback ran once")
+local next_result
+matrix.request({ method = "GET", path = "/_matrix/client/v3/joined_rooms" },
+  function(result) next_result = result end)
+now_ms = now_ms + 250
+local next_pending = {}
+for _, spec in pairs(schedules) do next_pending[#next_pending + 1] = spec.run end
+for _, run in ipairs(next_pending) do run() end
+assert(type(next_result) == "table" and next_result.status == 200 and not next_result.error,
+  "a throwing callback does not stall the next request")
+
+-- 12. Retiring a generation settles queued-not-dispatched work once, cancels
+-- both exact timers, refuses old enqueue, and cannot be revived by old ticks.
+remuda.butler.matrix = {}
+dofile("packages/butler/matrix_request.lua")
+matrix = assert(remuda.butler.matrix)
+now_ms = now_ms + 1000
+dispatched = 0
+local first_answer = request("/_matrix/client/versions")
+assert(dispatched == 1, "the initial token dispatches")
+local retired_answers = {}
+matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function(result) retired_answers[1] = result end)
+matrix.request({ method = "GET", path = "/_matrix/client/v3/joined_rooms" },
+  function(result) retired_answers[2] = result end)
+local retire_refill, retire_refill_spec = find_schedule("matrix-request-refill")
+local retire_watchdog, retire_watchdog_spec = find_schedule("matrix-request-watchdog")
+assert(retire_refill and retire_watchdog, "both timers are armed before retirement")
+local cancel_before = #cancelled
+matrix.request_retire()
+assert(#cancelled == cancel_before + 2, "retire cancels exactly both timers")
+assert(schedules[retire_refill] == nil and schedules[retire_watchdog] == nil,
+  "both retired handles are gone")
+for index = 1, 2 do
+  local value = retired_answers[index]
+  assert(type(value) == "table" and value.queue_retired == true and value.not_sent == true
+    and tostring(value.error):find("generation ended", 1, true),
+    "queued request settles once with the typed pre-dispatch result")
+end
+local after_retire = dispatched
+retire_refill_spec.run()
+retire_watchdog_spec.run()
+assert(dispatched == after_retire, "late old ticks dispatch nothing")
+local refused_count = 0
+matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function(result) refused_count = refused_count + 1; retired_answers[3] = result end)
+assert(refused_count == 1 and retired_answers[3].not_sent == true,
+  "old enqueue is refused with the typed result")
+assert(dispatched == after_retire, "old enqueue sends nothing")
+-- Resume republishes a fresh empty epoch; nothing retired is replayed.
+matrix.request_resume()
+local resumed
+matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function(result) resumed = result end)
+assert(dispatched == after_retire + 1, "resume dispatches a fresh request immediately")
+assert(type(resumed) == "table" and resumed.status == 200 and not resumed.error,
+  "the resumed request answers with its 200 result")
+assert(#retired_answers == 3, "resume does not replay retired callbacks")
+
+-- The captured JSON wrapper stays on its own generation: replacing the public
+-- helper must not send a retired request through the new client.
+matrix.request_retire()
+local old_json = matrix.request_json
+local stray = 0
+matrix.request = function() stray = stray + 1; error("new client must not see the retired wrapper") end
+local captured_result
+old_json({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function(result) captured_result = result end)
+assert(stray == 0, "the captured JSON wrapper does not call the replaced request")
+assert(type(captured_result) == "table" and captured_result.not_sent == true,
+  "the captured wrapper returns the typed retired result")
+matrix.request_resume()
+local fresh_result
+matrix.request_json({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function(result) fresh_result = result end)
+assert(type(fresh_result) == "table" and fresh_result.status == 200 and not fresh_result.error,
+  "the resumed client JSON wrapper answers 200")
+
+-- Repeated resume on a live generation must not drop active handles.
+remuda.butler.matrix = {}
+dofile("packages/butler/matrix_request.lua")
+matrix = assert(remuda.butler.matrix)
+now_ms = now_ms + 1000
+dispatched = 0
+request("/_matrix/client/versions")
+local live_answer
+matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function(result) live_answer = result end)
+local live_refill, live_refill_spec = find_schedule("matrix-request-refill")
+local live_watchdog = find_schedule("matrix-request-watchdog")
+assert(live_refill and live_watchdog, "the live queue has both timers")
+matrix.request_resume()
+matrix.request_resume()
+assert(schedules[live_refill] ~= nil and schedules[live_watchdog] ~= nil,
+  "repeated resume keeps both live handles")
+now_ms = now_ms + 250
+live_refill_spec.run()
+assert(type(live_answer) == "table" and live_answer.status == 200 and not live_answer.error,
+  "the live queue still dispatches after idempotent resume")
+
+-- 13. A throwing retired callback cannot strand the remaining queued items.
+remuda.butler.matrix = {}
+dofile("packages/butler/matrix_request.lua")
+matrix = assert(remuda.butler.matrix)
+now_ms = now_ms + 1000
+dispatched = 0
+request("/_matrix/client/versions")
+local settled = 0
+matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function() settled = settled + 1; error("retired callback boom") end)
+matrix.request({ method = "GET", path = "/_matrix/client/v3/joined_rooms" },
+  function() settled = settled + 1 end)
+matrix.request_retire()
+assert(settled == 2, "both queued callbacks settle despite the first throwing")
+
+-- 14. A missing scheduler settles the queue before dispatch; it never falls
 -- back to an unthrottled network send.
 remuda.butler.matrix = {}
 remuda.schedule = nil
@@ -222,4 +418,4 @@ assert(type(unavailable_result) == "table"
 
 os.remove(config_path)
 os.remove(token_path)
-print("ok: Matrix request queue replaces stale refill timers, recovers a lone item and keeps fairness")
+print("ok: Matrix request queue replaces stale refill timers, recovers a lone item, keeps fairness, and types write uncertainty")

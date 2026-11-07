@@ -11,6 +11,16 @@ local cli_parse = assert(host.cli and host.cli.parse,
   "Butler CLI requires remuda.cli.parse (Remuda core #465 or later); upgrade Remuda")
 local system, dialogs, input_originals
 local booted, main_loaded = false, false
+-- The exact compiled Matrix request client API from this activation. A failed
+-- reload may overwrite the shared butler.matrix table; resume must republish
+-- this handle rather than reread a possibly broken helper.
+local request_client_api
+local function capture_request_client()
+  local matrix = host.butler and host.butler.matrix
+  if matrix and type(matrix.request_resume) == "function" then
+    request_client_api = { retire = matrix.request_retire, resume = matrix.request_resume }
+  end
+end
 local function load_main()
   if main_loaded then return end
   main_loaded = true
@@ -19,6 +29,7 @@ local function load_main()
   host.exec("butler/main")
   dialogs = host.butler and host.butler.dialogs
   input_originals = host._butler_dialog_originals
+  capture_request_client()
 end
 local function start_matrix_relay()
   local matrix = host.butler and host.butler.matrix
@@ -159,6 +170,7 @@ return {
   start = function(state)
     host._butler_state = state
     boot()
+    capture_request_client()
     stop_legacy_matrix_relay()
   end,
   -- Rollback restores this activation's registrations. Reinstall only resources
@@ -170,6 +182,12 @@ return {
         host.butler.dialogs = dialogs
         host._butler_dialog_originals = input_originals
         dialogs.install()
+      end
+      if request_client_api and type(request_client_api.resume) == "function" then
+        -- Fresh empty epoch from the retained compiled client; no reread of a
+        -- helper a failed activation may have replaced, and no replay of work
+        -- the old stop already settled.
+        request_client_api.resume()
       end
       if booted then start_matrix_relay() end
     end)
@@ -191,6 +209,12 @@ return {
     local matrix = host.butler and host.butler.matrix
     if matrix and matrix.relay then pcall(matrix.relay.stop)
     end
+    -- Relay stop above fences generic retries; retire this request generation
+    -- only after that, so a queued pre-dispatch item settles terminally instead
+    -- of being retried by an outbox that is no longer active.
+    local retire = request_client_api and request_client_api.retire
+    if type(retire) ~= "function" and matrix then retire = matrix.request_retire end
+    if type(retire) == "function" then pcall(retire) end
     stop_legacy_matrix_relay()
     cancel_start_fallback()
   end,
