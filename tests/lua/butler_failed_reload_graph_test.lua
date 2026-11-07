@@ -68,20 +68,11 @@ T.test("failed reload barriers preserve the last-good notification graph", funct
       table.sort(agents)
       table.sort(pending)
       local data = remuda._butler_paths.data_home .. "/remuda/butler"
-      local parts = { table.concat(agents, ","), table.concat(pending, ","),
+      local seeded = assert(remuda._durable_mail, "seed durable mail missing")
+      return table.concat({ table.concat(agents, ","), table.concat(pending, ","),
         bytes(data .. "/agents.jsonl"), bytes(data .. "/roster.json"),
-        bytes(data .. "/delivery-journal") }
-      local mail = remuda._butler_paths.mail_root
-      if mail then
-        local pipe = io.popen("find '" .. mail .. "' -type f 2>/dev/null | sort")
-        if pipe then
-          for path in pipe:lines() do
-            parts[#parts + 1] = path:sub(#mail) .. "=" .. bytes(path)
-          end
-          pipe:close()
-        end
-      end
-      return table.concat(parts, "\n")
+        bytes(data .. "/delivery-journal"), bytes(seeded.inbox),
+        bytes(seeded.message), bytes(seeded.object) }, "\n")
     end
     local HELPER_KEYS = { "_butler_notify", "_butler_inbox_delivery",
       "_butler_schedule_tick", "_butler_schedule_env",
@@ -163,6 +154,23 @@ T.test("failed reload barriers preserve the last-good notification graph", funct
     }
 
     before = assert(instance(), "root instance")
+    -- Seed one known mail fact so the durable parity check is not vacuous.
+    local seeded_mail = assert(remuda._butler_mail, "mail module missing")
+      .queue("butler", "butler", "durable reload fixture")
+    local recipient = assert(seeded_mail.to and seeded_mail.to[1] and seeded_mail.to[1].id,
+      "seed recipient id")
+    local function hex(value)
+      return (value:gsub(".", function(byte) return string.format("%02x", string.byte(byte)) end))
+    end
+    remuda._durable_mail = {
+      inbox = remuda._butler_paths.mail_root .. "/inboxes/" .. hex(recipient) .. ".jsonl",
+      message = remuda._butler_paths.mail_root .. "/messages/" .. seeded_mail.id .. ".json",
+      object = remuda._butler_paths.mail_root .. "/objects/" .. seeded_mail.body.object_id,
+    }
+    for _, path in ipairs({ remuda._durable_mail.inbox, remuda._durable_mail.message,
+        remuda._durable_mail.object }) do
+      assert(bytes(path) ~= "<absent>", "seed durable fact missing: " .. path)
+    end
     local policy = remuda.butler.send_policy
     local base_readiness = assert(policy.readiness)
     remuda._current_calls = 0

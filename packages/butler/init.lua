@@ -184,6 +184,8 @@ local function request_client_present()
   return type(matrix) == "table" and type(matrix.request) == "function"
 end
 
+local retire_candidate_request_client
+
 local function load_main()
   if main_loaded then return end
   if main_loading then return end
@@ -200,7 +202,13 @@ local function load_main()
     input_originals = host._butler_dialog_originals
   end)
   main_loading = false
-  if not ok then error(err, 0) end
+  if not ok then
+    -- A candidate may have published a fresh request generation before the
+    -- rest of main failed. Retire that exact candidate generation; the old
+    -- captured pair stays untouched for rollback.
+    retire_candidate_request_client()
+    error(err, 0)
+  end
   -- guard.boot refusal and the test-mode early return publish a commands-only
   -- graph. Keep its command/help/refusal contract, but never call it an active
   -- runtime or validate it as one.
@@ -305,6 +313,29 @@ local function request_pair_coherent()
       or matrix.request_retire ~= request_client_api.retire
       or matrix.request_resume ~= request_client_api.resume then
     return false, "request pair changed"
+  end
+  return true
+end
+
+retire_candidate_request_client = function()
+  local matrix = host.butler and host.butler.matrix
+  if type(matrix) ~= "table" then return true end
+  local retire, resume = matrix.request_retire, matrix.request_resume
+  if type(retire) ~= "function" or type(resume) ~= "function" then return true end
+  -- Only a pair distinct from the retained old generation is a candidate.
+  if request_client_api and retire == request_client_api.retire then return true end
+  local called, result = pcall(retire)
+  local ok, why
+  if not called then
+    ok, why = false, "request retire failed"
+  else
+    ok, why = request_result_ok(result, "retire")
+  end
+  if not ok then
+    host._butler_request_retire_failed = why or "request retire failed"
+    host._butler_request_retire_blocked = true
+    report_relay("degraded", "request_candidate_retire_failed")
+    return false
   end
   return true
 end
