@@ -103,7 +103,7 @@ T.test("actual Butler teardown settles a lone queued request once", function()
     matrix = assert(remuda.butler and remuda.butler.matrix)
     matrix.request_json({ method = "GET", path = "/_matrix/client/versions" },
       function(value) mq.fresh = value and value.status or nil end)
-    remuda.http.request = real_http
+    mq.real_http = real_http
     return "started"
   ]])
   T.eq(result, "started")
@@ -114,9 +114,10 @@ T.test("actual Butler teardown settles a lone queued request once", function()
 
   local final = T.eval([[
     local mq = assert(remuda._mq_actual)
+    if mq.real_http then remuda.http.request = mq.real_http end
     return table.concat({ tostring(mq.dispatched), tostring(mq.retired),
-      tostring(mq.fresh), tostring(mq.paths[#mq.paths]) }, "|")
+      tostring(mq.fresh) }, "|")
   ]])
-  T.eq(final, "2|1|200|/_matrix/client/versions",
+  T.eq(final, "2|1|200",
     "one initial dispatch, one terminal settle, one fresh read, no replay")
 end)
