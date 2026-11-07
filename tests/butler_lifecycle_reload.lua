@@ -507,4 +507,98 @@ test("a pre-provider failure retires no pair", function()
     "pre-provider failure set a request teardown failure")
 end)
 
+test("a saved candidate hook is inert after finally", function()
+  local host = fixture()
+  local saved, saved_nonce
+  host.exec = function(name)
+    if name == "butler/system" then host._butler_system = {}; return end
+    if name ~= "butler/main" then return end
+    saved = host._butler_request_candidate_capture
+    saved_nonce = host._butler_request_candidate_nonce
+    publish_graph(host)
+  end
+  local module = declaration(host)
+  module.commands({})
+  assert(type(saved) == "function" and saved_nonce ~= nil, "hook not observed")
+  local candidate = { retire = 0 }
+  candidate.request = function() end
+  candidate.request_json = function() end
+  candidate.request_retire = function()
+    candidate.retire = candidate.retire + 1
+    return { ok = true, retired = true, queued_settled = 0,
+      cancel_failed = {}, detail = "" }
+  end
+  candidate.request_resume = function()
+    return { ok = true, retired = false, queued_settled = 0,
+      cancel_failed = {}, detail = "" }
+  end
+  assert(saved(saved_nonce, candidate, candidate.request_retire,
+    candidate.request_resume, candidate.request, candidate.request_json) == false,
+    "saved hook captured after finally")
+  assert(candidate.retire == 0, "saved hook retired a candidate")
+end)
+
+test("the pre-load old pair is never a candidate", function()
+  local host, _, counters = request_fixture()
+  local old_module = declaration(host)
+  old_module.commands({})
+  local old_matrix = assert(host.butler.matrix, "old matrix missing")
+  assert(type(old_matrix.request_retire) == "function", "old pair missing")
+  local accepted
+  host.exec = function(name)
+    if name == "butler/system" then host._butler_system = {}; return end
+    if name ~= "butler/main" then return end
+    local capture = assert(host._butler_request_candidate_capture)
+    accepted = capture(host._butler_request_candidate_nonce, old_matrix,
+      old_matrix.request_retire, old_matrix.request_resume,
+      old_matrix.request, old_matrix.request_json)
+    publish_graph(host)
+  end
+  local fresh = declaration(host)
+  fresh.commands({})
+  assert(accepted == false, "pre-load old pair was accepted as a candidate")
+  assert(counters.retire == 0, "old pair was retired as a candidate")
+end)
+
+test("a failed candidate retire stays pending and retries the exact pair", function()
+  local host = fixture()
+  local calls, phase = 0, 1
+  local candidate = { retire = 0 }
+  candidate.request = function() end
+  candidate.request_json = function() end
+  candidate.request_retire = function()
+    calls = calls + 1
+    if calls == 1 then
+      return { ok = false, retired = true, queued_settled = 1,
+        cancel_failed = { "refill" }, detail = "cancel refused" }
+    end
+    return { ok = true, retired = true, queued_settled = 0,
+      cancel_failed = {}, detail = "" }
+  end
+  candidate.request_resume = function()
+    return { ok = true, retired = false, queued_settled = 0,
+      cancel_failed = {}, detail = "" }
+  end
+  host.exec = function(name)
+    if name == "butler/system" then host._butler_system = {}; return end
+    if name ~= "butler/main" then return end
+    if phase == 1 then
+      local capture = assert(host._butler_request_candidate_capture)
+      assert(capture(host._butler_request_candidate_nonce, candidate,
+        candidate.request_retire, candidate.request_resume,
+        candidate.request, candidate.request_json), "candidate not captured")
+      error("candidate failure")
+    end
+    publish_graph(host)
+  end
+  local module = declaration(host)
+  assert(not pcall(module.commands, {}), "candidate did not fail")
+  assert(calls == 1, "candidate retire count: " .. tostring(calls))
+  assert(host._butler_request_retire_blocked == true, "failed cleanup not marked pending")
+  phase = 2
+  module.commands({})
+  assert(calls == 2, "candidate retry count: " .. tostring(calls))
+  assert(host._butler_request_retire_blocked == nil, "pending not cleared after clean retry")
+end)
+
 os.exit(failures == 0 and 0 or 1)

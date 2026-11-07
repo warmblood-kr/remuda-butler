@@ -188,39 +188,78 @@ local retire_candidate_request_client, promote_candidate_request_client
 
 -- One-shot, nonce-scoped candidate capture. main.lua reports the exact staged
 -- matrix and request pair immediately after the provider fills it; a late
--- public-table lookup is never ownership proof.
-local function install_candidate_capture()
+-- public-table lookup is never ownership proof. The closure carries its own
+-- `capture_active` so a saved reference cannot capture after finally.
+local function install_candidate_capture(preload_matrix, preload_pair)
   local previous_hook = host._butler_request_candidate_capture
   local previous_nonce = host._butler_request_candidate_nonce
   local nonce = {}
+  local capture_active = true
   host._butler_request_candidate_nonce = nonce
   host._butler_request_candidate_capture = function(candidate_nonce, matrix,
       retire, resume, request, request_json)
+    if not capture_active then return false end
     if candidate_nonce ~= nonce then return false end
     if candidate_request_api then return false end
     if type(matrix) ~= "table" or type(retire) ~= "function"
         or type(resume) ~= "function" or type(request) ~= "function"
         or type(request_json) ~= "function" then return false end
+    -- The matrix must actually carry this exact pair, not a mixed generation.
+    if matrix.request_retire ~= retire or matrix.request_resume ~= resume
+        or matrix.request ~= request or matrix.request_json ~= request_json then
+      return false
+    end
+    -- The pre-load graph/pair is never a candidate, even when a new activation
+    -- has no retained local pair yet.
+    if matrix == preload_matrix then return false end
+    if preload_pair and (retire == preload_pair.retire
+        or resume == preload_pair.resume or request == preload_pair.request
+        or request_json == preload_pair.request_json) then
+      return false
+    end
     candidate_request_api = { matrix = matrix, retire = retire, resume = resume,
       request = request, request_json = request_json, nonce = nonce }
     host._butler_request_candidate_capture = nil
     return true
   end
   return function()
+    capture_active = false
     host._butler_request_candidate_capture = previous_hook
     host._butler_request_candidate_nonce = previous_nonce
   end
 end
 
+local function preload_request_pair(matrix)
+  if type(matrix) ~= "table" then return nil end
+  local retire, resume = matrix.request_retire, matrix.request_resume
+  local request, request_json = matrix.request, matrix.request_json
+  if type(retire) ~= "function" or type(resume) ~= "function"
+      or type(request) ~= "function" or type(request_json) ~= "function" then
+    return nil
+  end
+  return { retire = retire, resume = resume, request = request,
+    request_json = request_json }
+end
+
 local function load_main()
   if main_loaded then return end
   if main_loading then return end
+  -- A failed candidate cleanup is a hard pending state: retry the exact
+  -- capability before any new load, and refuse while it remains unresolved.
+  if candidate_request_api then
+    local cleaned, clean_why = retire_candidate_request_client()
+    if not cleaned then
+      error("Matrix request candidate cleanup pending: " .. tostring(clean_why), 0)
+    end
+  end
   main_loading = true
   -- The refusal signal is a per-load outcome, never a sticky bypass: clear it
   -- before this load and let main.lua set it only for its own guard decision.
   host._butler_runtime_refusal = nil
   runtime_refusal_only = false
-  local restore_capture = install_candidate_capture()
+  local preload_matrix = host.butler and host.butler.matrix
+  local restore_capture = install_candidate_capture(preload_matrix,
+    preload_request_pair(preload_matrix))
   local ok, err = pcall(function()
     host.exec("butler/system")
     system = assert(host._butler_system)
@@ -252,9 +291,13 @@ local function load_main()
     retire_candidate_request_client()
     error(validation_err, 0)
   end
+  local promoted, promote_why = promote_candidate_request_client()
+  if not promoted then
+    retire_candidate_request_client()
+    error("Matrix request pair is not coherent: " .. tostring(promote_why), 0)
+  end
   runtime_refusal_only = false
   main_loaded = true
-  promote_candidate_request_client()
 end
 
 -- A stopped handle does not prove the old writer is gone. A future resource
@@ -350,8 +393,24 @@ end
 
 promote_candidate_request_client = function()
   local candidate = candidate_request_api
+  if not candidate then
+    local captured = capture_request_client()
+    if not captured and request_client_incomplete then
+      return false, "request lifecycle API is incomplete"
+    end
+    return true
+  end
+  -- Promotion is ownership proof only when the public matrix carries the exact
+  -- captured generation, not merely the same nonce.
+  local matrix = host.butler and host.butler.matrix
+  if type(matrix) ~= "table" or matrix ~= candidate.matrix
+      or matrix.request ~= candidate.request
+      or matrix.request_json ~= candidate.request_json
+      or matrix.request_retire ~= candidate.retire
+      or matrix.request_resume ~= candidate.resume then
+    return false, "request pair changed"
+  end
   candidate_request_api = nil
-  if not candidate then return capture_request_client() end
   request_client_api = { retire = candidate.retire, resume = candidate.resume,
     request = candidate.request, request_json = candidate.request_json }
   request_client_incomplete = nil
@@ -362,10 +421,10 @@ end
 
 retire_candidate_request_client = function()
   local candidate = candidate_request_api
-  candidate_request_api = nil
   if not candidate then return true end
   -- Only the exact pair reported at this load's creation point is a candidate.
   if request_client_api and candidate.retire == request_client_api.retire then
+    candidate_request_api = nil
     return true
   end
   local called, result = pcall(candidate.retire)
@@ -376,11 +435,16 @@ retire_candidate_request_client = function()
     ok, why = request_result_ok(result, "retire")
   end
   if not ok then
+    -- Keep the exact candidate capability for a bounded retry. A failed
+    -- cancel can return retired=true with ok=false/roles; that is not success.
     host._butler_request_retire_failed = why or "request retire failed"
     host._butler_request_retire_blocked = true
     report_relay("degraded", "request_candidate_retire_failed")
-    return false
+    return false, host._butler_request_retire_failed
   end
+  candidate_request_api = nil
+  host._butler_request_retire_failed = nil
+  host._butler_request_retire_blocked = nil
   return true
 end
 
