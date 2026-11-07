@@ -78,7 +78,7 @@ local matrix_arg_spec = {
       "remuda butler matrix event EVENT_ID"),
     follow = matrix_verb("Follow replies to a Matrix event. Example: remuda butler matrix follow '$EVENT_ID'", { arg("EVENT_ID", "Event ID beginning with $", true) }, nil,
       "remuda butler matrix thread EVENT_ID"),
-    unfollow = matrix_verb("Stop following replies to a Matrix event; unmentioned replies in that thread stay out of the inbox, even in all mode. Example: remuda butler matrix unfollow '$EVENT_ID'", { arg("EVENT_ID", "Event ID beginning with $", true) }, nil,
+    unfollow = matrix_verb("Stop following replies to a Matrix event and block an automatic re-follow; delivery then follows the room notification policy (all, mentions-followed, or none). Example: remuda butler matrix unfollow '$EVENT_ID'", { arg("EVENT_ID", "Event ID beginning with $", true) }, nil,
       "remuda butler matrix thread EVENT_ID"),
     quarantine = matrix_verb("List quarantined Matrix events or show one event. Example: remuda butler matrix quarantine --id '$EVENT_ID'",
       nil, { opt("id", "EVENT_ID", "Show one quarantined event") },

@@ -1126,10 +1126,14 @@ function relay.new(options)
     return true
   end
 
-  function instance:note_own_turn(room, root)
+  function instance:note_own_turn(room, root, allowlisted_human)
     -- The loop budget counts messages from other Butlers, not our progress
-    -- reports. Our reply is a boundary: it makes the peer's next message a new
-    -- turn, but does not increment or reset the peer count.
+    -- reports. A reply to a verified person on the allowlist is owner-directed
+    -- progress, not part of the peer exchange: it must not change, increment or
+    -- reset the peer count. For an agent or unknown target our reply stays a
+    -- boundary: it makes the peer's next message a new turn, but does not
+    -- increment or reset the peer count.
+    if allowlisted_human == true then return 0 end
     local turns = b2b_turns[room] and b2b_turns[room][root]
     if not turns then return 0 end
     turns.last_agent = cfg.self_mxid
@@ -1329,6 +1333,21 @@ function relay.new(options)
         end
       end
     end
+  end
+
+  -- The owner-progress boundary exemption needs an exact delivered-source
+  -- identity: only the event that itself arrived as mail from an allowlisted
+  -- human counts. A route reached through last_reply_event_id (our own sent
+  -- event, or a later reply) inherits the human flag for guard/post-cap
+  -- compatibility but is not a human target for the turn boundary.
+  function instance:event_targets_allowlisted_human(room_id, event_id)
+    if type(event_id) ~= "string" then return false end
+    for _, route in pairs(state.routes) do
+      if route.event_id == event_id and (room_id == nil or route.room_id == room_id) then
+        return route.allowlisted_human == true
+      end
+    end
+    return false
   end
 
   function instance:can_reply_to(event_id)
@@ -1599,7 +1618,8 @@ function relay.new(options)
         txn_id = opts.txn_id or ("butler_" .. reply_id), attempts = 0, status = "pending",
         created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
       persist()
-      instance:note_own_turn(room, root)
+      instance:note_own_turn(room, root,
+        instance:event_targets_allowlisted_human(room, route.event_id))
     end
     instance._send_reply(reply_id, callback)
     return { cancel = function() end }
@@ -1737,10 +1757,7 @@ function relay.new(options)
         local event = state.pending[id]
         if event and not delivery_retry_waiting[id] then
           local subscriptions = state.subscriptions[event.room_id] or {}
-          local root_unfollowed = event.thread_root ~= nil
-            and unfollowed(state, event.room_id, event.thread_root)
-          if not matrix.delivery_policy.accept_pending(cfg, event.room_id, subscriptions, event,
-              root_unfollowed) then
+          if not matrix.delivery_policy.accept_pending(cfg, event.room_id, subscriptions, event) then
             diagnostic("filtered", "filter_policy", id)
             add_processed(state, event.event_id)
             state.pending[id] = nil
@@ -2381,9 +2398,8 @@ function relay.new(options)
           local subscriptions = state.subscriptions[actual_room] or json.object({})
           state.subscriptions[actual_room] = subscriptions
           local follow_root = thread_root or ev.event_id
-          -- An explicit unfollow mutes unmentioned replies in that thread; a
-          -- mention in it is still delivered but never re-follows it.
-          local root_unfollowed = thread_root ~= nil and unfollowed(state, actual_room, thread_root)
+          -- An explicit unfollow keeps a tombstone that blocks an implicit
+          -- re-follow; delivery itself follows the current room policy.
           local auto_followed = false
           if trusted and is_mention and not subscriptions[follow_root]
               and not unfollowed(state, actual_room, follow_root) then
@@ -2392,7 +2408,7 @@ function relay.new(options)
           local is_agent = sender_kind == "AGENT"
           local accepted = matrix.delivery_policy.accept_received(cfg, actual_room, subscriptions, {
             thread_root = thread_root, is_mention = is_mention, is_room_mention = is_room_mention,
-          }, root_unfollowed)
+          })
           local route_mail_id = thread_id
             and instance:mail_route_for_event(actual_room, thread_root, in_reply_to) or nil
           local thread_root_mail_id = thread_root
@@ -2445,8 +2461,6 @@ function relay.new(options)
             trusted = trusted,
             is_mention = is_mention,
             is_room_mention = is_room_mention,
-            mention_follow_root = is_mention and trusted and subscriptions[follow_root] ~= nil
-              and follow_root or nil,
             subscribe_thread = is_mention and trusted,
             thread_id = thread_id,
           }
