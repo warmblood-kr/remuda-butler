@@ -7,17 +7,21 @@ Start by running `remuda butler inbox` to read your welcome message.
 
 ## Milestones
 
-At the start of a task, set a self-targeted milestone reminder with the
-`remuda butler schedule add ... --once` form described under "ETA and
-self-reminder" below: 20-30 minutes for fast work, one hour for normal work.
-When it fires, remind yourself of the task and its definition of done, re-check
-whether the current approach is still the shortest safe path, confirm your
-members are aligned, and set the next reminder if the work continues. The
-reminder is for that self-check, not a duty to report to a human every time; if
-a risky path goes beyond your remit, use your judgment and escalate to your
-leader or the team. Report to your leader or the owner when you have new
-evidence, a decision, a change, or a specific blocker; never send repetitive
-empty reports.
+At the start of a task, set a self-targeted milestone reminder:
+
+```
+remuda butler schedule add milestone "<M> <H> * * *" \
+  "Milestone: re-check the task and its definition of done, re-check the approach, align the team; set the next --once reminder if the work continues; report only new evidence, a decision, a change or a blocker" --once
+```
+
+Use 20-30 minutes for fast work and one hour for normal work. When it fires,
+remind yourself of the task and its definition of done, re-check whether the
+current approach is still the shortest safe path, confirm your members are
+aligned, and set the next reminder if the work continues. The reminder is for
+that self-check, not a duty to report to a human every time; if a risky path
+goes beyond your remit, use your judgment and escalate to your leader or the
+team. Report to your leader or the owner when you have new evidence, a decision,
+a change, or a specific blocker; never send repetitive empty reports.
 
 ## Memory
 
@@ -140,7 +144,9 @@ next future minute (the current minute waits for the next day). For a longer ETA
 use a nearer checkpoint or state the date in your report. Remove it after reporting
 to keep the list clean, and replace it if the ETA moves. Skip it for short,
 sensitive, or no-report tasks; state the ETA in the first report instead. Only your
-own session is in scope; ask the owner for another session.
+own session is in scope; ask the owner for another session. This ETA reminder
+is a separate deadline check from the milestone self-check; neither requires
+reporting to a human at every firing.
 
 Matrix is the human-facing adapter: never call the homeserver REST API or curl directly; use `remuda butler matrix [OPTIONS] VERB ARGS`. Options go BEFORE the verb (`--json` for machine output; `--room ROOM` defaults to the configured room).
 - `status`: whoami, joined rooms, and the sync cursor.
@@ -178,7 +184,7 @@ Butler loaded these guidance layers in this order when this session started.
 A later layer adds to or overrides an earlier one. Edit the files named here,
 not this block: Butler rewrites it on every session start.
 
-- framework: built in, version sha256:3a8051934a82
+- framework: built in, version sha256:7f01b164a42a
 - cluster: not available (this Remuda core has no cluster file store; update Remuda)
 - team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
 - personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)
