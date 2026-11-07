@@ -73,8 +73,11 @@ if old_relay and old_relay.stop then pcall(old_relay.stop)
 end
 -- Stage the candidate away from the last-good matrix table: matrix.lua and
 -- matrix_relay.lua extend an existing table in place, which would otherwise
--- corrupt the graph a failed candidate's rollback must restore.
-if remuda.butler then remuda.butler.matrix = nil end
+-- corrupt the graph a failed candidate's rollback must restore. Keep the exact
+-- staged reference local so candidate cleanup never reinterprets the public
+-- table after a failed exec.
+local staged_matrix = {}
+if remuda.butler then remuda.butler.matrix = staged_matrix end
 
 -- Replace handles created imperatively by the previous Butler version. The
 -- lifecycle declaration owns these schedules from this activation onward.
@@ -144,6 +147,15 @@ if remuda._butler_relay_receipts then
   end
 end
 remuda.exec("butler/matrix_request")
+-- Report the exact staged matrix and request pair at creation time. The init
+-- hook is scoped by this load's nonce and is one-shot; a failure before here
+-- leaves no candidate, a later failure cleans only this exact pair.
+local candidate_capture = remuda._butler_request_candidate_capture
+if type(candidate_capture) == "function" then
+  candidate_capture(remuda._butler_request_candidate_nonce, staged_matrix,
+    staged_matrix.request_retire, staged_matrix.request_resume,
+    staged_matrix.request, staged_matrix.request_json)
+end
 remuda.exec("butler/matrix")
 -- The root Butler's permission rule and the write-only-when-changed helper
 -- live in permissions.lua; these are the file helpers it is handed.

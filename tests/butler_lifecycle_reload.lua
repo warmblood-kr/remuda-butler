@@ -404,4 +404,107 @@ test("a failed request retire blocks resume and relay start", function()
   assert(counters.starts == 0, "relay started after failed retire")
 end)
 
+test("candidate capture is nonce-scoped and one-shot", function()
+  local host = fixture()
+  local candidate = { retire = 0 }
+  candidate.request = function() end
+  candidate.request_json = function() end
+  candidate.request_retire = function()
+    candidate.retire = candidate.retire + 1
+    return { ok = true, retired = true, queued_settled = 0,
+      cancel_failed = {}, detail = "" }
+  end
+  candidate.request_resume = function()
+    return { ok = true, retired = false, queued_settled = 0,
+      cancel_failed = {}, detail = "" }
+  end
+  local wrong, first, second
+  host.exec = function(name)
+    if name == "butler/system" then host._butler_system = {}; return end
+    if name ~= "butler/main" then return end
+    local capture = assert(host._butler_request_candidate_capture,
+      "candidate hook not installed")
+    local nonce = host._butler_request_candidate_nonce
+    wrong = capture({}, candidate, candidate.request_retire,
+      candidate.request_resume, candidate.request, candidate.request_json)
+    first = capture(nonce, candidate, candidate.request_retire,
+      candidate.request_resume, candidate.request, candidate.request_json)
+    second = capture(nonce, candidate, candidate.request_retire,
+      candidate.request_resume, candidate.request, candidate.request_json)
+    error("candidate failure")
+  end
+  local module = declaration(host)
+  assert(not pcall(module.commands, {}), "candidate did not fail")
+  assert(wrong == false, "wrong nonce was accepted")
+  assert(first == true, "correct nonce was rejected")
+  assert(second == false, "repeated capture replaced the candidate")
+  assert(candidate.retire == 1, "candidate retire count: " .. tostring(candidate.retire))
+  assert(host._butler_request_candidate_capture == nil, "candidate hook was not restored")
+end)
+
+test("a validation failure retires only the captured candidate", function()
+  local host = fixture()
+  local candidate = { retire = 0 }
+  candidate.request = function() end
+  candidate.request_json = function() end
+  candidate.request_retire = function()
+    candidate.retire = candidate.retire + 1
+    return { ok = true, retired = true, queued_settled = 0,
+      cancel_failed = {}, detail = "" }
+  end
+  candidate.request_resume = function()
+    return { ok = true, retired = false, queued_settled = 0,
+      cancel_failed = {}, detail = "" }
+  end
+  host.exec = function(name)
+    if name == "butler/system" then host._butler_system = {}; return end
+    if name ~= "butler/main" then return end
+    -- Publish a graph whose readiness makes validate_runtime fail.
+    local notice = { _policy_bound = true }
+    host.butler = {
+      dialogs = { install = function() end, stop = function() end },
+      native_dispatch = { admit = function() return { outcome = "not_written" } end },
+      send_policy = { readiness = function()
+        return { owner = notice, bound = false, transport_acquired = true }
+      end },
+      matrix = { relay = {} },
+    }
+    host._butler_notice = notice
+    host._butler_notice_config = { bus = host._butler_bus }
+    local capture = assert(host._butler_request_candidate_capture)
+    assert(capture(host._butler_request_candidate_nonce, candidate,
+      candidate.request_retire, candidate.request_resume,
+      candidate.request, candidate.request_json), "candidate not captured")
+  end
+  local module = declaration(host)
+  assert(not pcall(module.commands, {}), "invalid readiness was accepted")
+  assert(candidate.retire == 1, "candidate was not retired")
+  assert(host._butler_request_retire_blocked == nil, "clean candidate retire blocked resume")
+end)
+
+test("a load restores the previous candidate hook and nonce", function()
+  local host = fixture()
+  local outer_hook, outer_nonce = function() end, {}
+  host._butler_request_candidate_capture = outer_hook
+  host._butler_request_candidate_nonce = outer_nonce
+  local module = declaration(host)
+  module.commands({})
+  assert(host._butler_request_candidate_capture == outer_hook,
+    "outer candidate hook was not restored")
+  assert(host._butler_request_candidate_nonce == outer_nonce,
+    "outer candidate nonce was not restored")
+end)
+
+test("a pre-provider failure retires no pair", function()
+  local host = fixture()
+  host.exec = function(name)
+    if name == "butler/system" then host._butler_system = {}; return end
+    if name == "butler/main" then error("pre-provider failure") end
+  end
+  local module = declaration(host)
+  assert(not pcall(module.commands, {}), "pre-provider load did not fail")
+  assert(host._butler_request_retire_failed == nil,
+    "pre-provider failure set a request teardown failure")
+end)
+
 os.exit(failures == 0 and 0 or 1)

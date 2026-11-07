@@ -155,7 +155,7 @@ end
 -- The exact compiled Matrix request-client pair from this activation. A failed
 -- candidate may replace the shared butler.matrix table, so resume must use
 -- this pair, never a late lookup. A half-pair is a hard degraded state.
-local request_client_api, request_client_incomplete
+local request_client_api, request_client_incomplete, candidate_request_api
 
 local function capture_request_client()
   local matrix = host.butler and host.butler.matrix
@@ -184,7 +184,33 @@ local function request_client_present()
   return type(matrix) == "table" and type(matrix.request) == "function"
 end
 
-local retire_candidate_request_client
+local retire_candidate_request_client, promote_candidate_request_client
+
+-- One-shot, nonce-scoped candidate capture. main.lua reports the exact staged
+-- matrix and request pair immediately after the provider fills it; a late
+-- public-table lookup is never ownership proof.
+local function install_candidate_capture()
+  local previous_hook = host._butler_request_candidate_capture
+  local previous_nonce = host._butler_request_candidate_nonce
+  local nonce = {}
+  host._butler_request_candidate_nonce = nonce
+  host._butler_request_candidate_capture = function(candidate_nonce, matrix,
+      retire, resume, request, request_json)
+    if candidate_nonce ~= nonce then return false end
+    if candidate_request_api then return false end
+    if type(matrix) ~= "table" or type(retire) ~= "function"
+        or type(resume) ~= "function" or type(request) ~= "function"
+        or type(request_json) ~= "function" then return false end
+    candidate_request_api = { matrix = matrix, retire = retire, resume = resume,
+      request = request, request_json = request_json, nonce = nonce }
+    host._butler_request_candidate_capture = nil
+    return true
+  end
+  return function()
+    host._butler_request_candidate_capture = previous_hook
+    host._butler_request_candidate_nonce = previous_nonce
+  end
+end
 
 local function load_main()
   if main_loaded then return end
@@ -194,6 +220,7 @@ local function load_main()
   -- before this load and let main.lua set it only for its own guard decision.
   host._butler_runtime_refusal = nil
   runtime_refusal_only = false
+  local restore_capture = install_candidate_capture()
   local ok, err = pcall(function()
     host.exec("butler/system")
     system = assert(host._butler_system)
@@ -201,11 +228,11 @@ local function load_main()
     dialogs = host.butler and host.butler.dialogs
     input_originals = host._butler_dialog_originals
   end)
+  restore_capture()
   main_loading = false
   if not ok then
-    -- A candidate may have published a fresh request generation before the
-    -- rest of main failed. Retire that exact candidate generation; the old
-    -- captured pair stays untouched for rollback.
+    -- Only the exact pair reported by this load's hook is a candidate; a
+    -- failure before the hook leaves the retained old pair untouched.
     retire_candidate_request_client()
     error(err, 0)
   end
@@ -213,6 +240,7 @@ local function load_main()
   -- graph. Keep its command/help/refusal contract, but never call it an active
   -- runtime or validate it as one.
   if host._butler_standby or host._butler_runtime_refusal then
+    retire_candidate_request_client()
     runtime_refusal_only = true
     main_loaded = true
     return
@@ -220,10 +248,13 @@ local function load_main()
   -- A cold successful load must satisfy the same graph/ownership readiness
   -- contract as a resume; an unverifiable graph is not loaded.
   local valid, validation_err = pcall(validate_runtime)
-  if not valid then error(validation_err, 0) end
+  if not valid then
+    retire_candidate_request_client()
+    error(validation_err, 0)
+  end
   runtime_refusal_only = false
   main_loaded = true
-  capture_request_client()
+  promote_candidate_request_client()
 end
 
 -- A stopped handle does not prove the old writer is gone. A future resource
@@ -317,14 +348,27 @@ local function request_pair_coherent()
   return true
 end
 
+promote_candidate_request_client = function()
+  local candidate = candidate_request_api
+  candidate_request_api = nil
+  if not candidate then return capture_request_client() end
+  request_client_api = { retire = candidate.retire, resume = candidate.resume,
+    request = candidate.request, request_json = candidate.request_json }
+  request_client_incomplete = nil
+  host._butler_request_retire_failed = nil
+  host._butler_request_retire_blocked = nil
+  return true
+end
+
 retire_candidate_request_client = function()
-  local matrix = host.butler and host.butler.matrix
-  if type(matrix) ~= "table" then return true end
-  local retire, resume = matrix.request_retire, matrix.request_resume
-  if type(retire) ~= "function" or type(resume) ~= "function" then return true end
-  -- Only a pair distinct from the retained old generation is a candidate.
-  if request_client_api and retire == request_client_api.retire then return true end
-  local called, result = pcall(retire)
+  local candidate = candidate_request_api
+  candidate_request_api = nil
+  if not candidate then return true end
+  -- Only the exact pair reported at this load's creation point is a candidate.
+  if request_client_api and candidate.retire == request_client_api.retire then
+    return true
+  end
+  local called, result = pcall(candidate.retire)
   local ok, why
   if not called then
     ok, why = false, "request retire failed"
