@@ -64,7 +64,10 @@ T.test("failed reload barriers preserve the last-good notification graph", funct
       for name, agent in pairs(bus.agents or {}) do
         agents[#agents + 1] = name .. ":" .. tostring(agent.id) .. ":" .. tostring(agent.kind)
       end
-      for name in pairs(bus.pending_tasks or {}) do pending[#pending + 1] = name end
+      for name, value in pairs(bus.pending_tasks or {}) do
+        local ok, encoded = pcall(remuda.json.encode, value or {})
+        pending[#pending + 1] = name .. "=" .. (ok and tostring(encoded) or tostring(value))
+      end
       table.sort(agents)
       table.sort(pending)
       local data = remuda._butler_paths.data_home .. "/remuda/butler"
@@ -171,6 +174,18 @@ T.test("failed reload barriers preserve the last-good notification graph", funct
         remuda._durable_mail.object }) do
       assert(bytes(path) ~= "<absent>", "seed durable fact missing: " .. path)
     end
+    -- Seed a real uncertain delivery-journal entry for a recipient unrelated
+    -- to the reload so the journal parity compares meaningful content, not
+    -- only an absent/empty file.
+    local journal = assert(remuda._butler_delivery_journal, "delivery journal missing")
+    local entry = assert(journal.begin({
+      protocol = "pty", recipient_id = "fixture_recipient",
+      message_ids = { "fixture_message" }, instance = "fixture_instance",
+      row_id = "fixture_row", nonce = "fixture_nonce",
+      generation = "fixture_generation", body = "fixture body",
+    }))
+    assert(journal.mark(entry, "uncertain", "fixture_uncertain"), "journal uncertain seed failed")
+    assert(journal.status().uncertain >= 1, "uncertain seed missing")
     local policy = remuda.butler.send_policy
     local base_readiness = assert(policy.readiness)
     remuda._current_calls = 0
