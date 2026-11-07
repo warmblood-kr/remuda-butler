@@ -1438,6 +1438,16 @@ function relay.new(options)
       thread_root = item.thread_root, txn_id = item.txn_id, from_outbox = true }, function(result)
       if reply_in_flight[reply_id] ~= token or generation ~= send_generation then return end
       reply_in_flight[reply_id] = nil
+      if type(result) == "table" and result.uncertain then
+        -- The write may have reached the homeserver. Stop this outbox item in
+        -- the existing uncertain state; never enter the generic retry path.
+        item.status = "uncertain"
+        item.last_error = tostring(result.error or "Matrix reply dispatch outcome unknown")
+        diagnostic("error", "reply_uncertain", tostring(reply_id))
+        pcall(persist)
+        if callback then callback({ error = item.last_error, uncertain = true }) end
+        return
+      end
       if type(result) == "table" and not result.error then
         local ids = result.event_ids or {}
         local sent_id = result.event_id or ids[#ids]

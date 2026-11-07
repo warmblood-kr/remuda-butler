@@ -1803,6 +1803,10 @@ return function(matrix, pinned_hostname)
     if not timer.cancelled and timer.spec.every == 0.25 then rate_timer = timer; break end
   end
   assert(rate_timer, "scripted relay sync should have a rate-limit timer")
+  -- Advance the Matrix request fixture clock to the real first refill due.
+  if type(remuda._butler_matrix_request_clock) == "function" then
+    remuda._mq_now = (remuda._mq_now or 0) + 250
+  end
   rate_timer.spec.run()
   assert(#scripted_requests == 2, "relay should continue syncing after the initial baseline")
   scripted_requests[2].callback({ status = 200, headers = {}, body =

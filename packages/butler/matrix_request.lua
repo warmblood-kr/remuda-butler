@@ -11,17 +11,18 @@ matrix.json_array = json.array
 local MiB = 1024 * 1024
 local MAX_REQUEST_BYTES = 20 * MiB
 local DEFAULT_RESPONSE_BYTES = MiB
-local queue, timer = {}, nil
+local queue, timer, watchdog = {}, nil, nil
 local tokens, burst = 1, 1
 local interval = tonumber(os.getenv("REMUDA_BUTLER_MATRIX_RATE_INTERVAL")) or 0.25
 if interval < 0 then interval = 0 end
 -- A refill timer belongs to the module generation that armed it. A stored
 -- handle is not proof that it still ticks: after a partial reload or a failed
 -- resume the old closure can stop while `timer` stays set, and the queue then
--- waits forever. Every tick stamps a heartbeat; a handle that stops stamping
--- is replaced instead of trusted.
-local timer_heartbeat = 0
-local STALE_AFTER = math.max(2, interval * 8)
+-- waits forever. Keep an exact handle/generation fence and a separate watchdog
+-- so a lone queued item recovers without another request arriving.
+local timer_generation, watchdog_generation = 0, 0
+local last_tick_ms, next_refill_ms = nil, nil
+local STALE_MS = math.max(2000, interval * 8000)
 
 local function trim(value)
   return (value:gsub("^%s+", ""):gsub("%s+$", ""))
@@ -770,31 +771,101 @@ function matrix.request_json(args, on_done)
   end)
 end
 
-local function clear_timer()
-  local handle = timer
-  timer, timer_heartbeat = nil, 0
+local function now_ms()
+  if type(remuda._butler_matrix_request_clock) == "function" then
+    local value = remuda._butler_matrix_request_clock()
+    if value ~= nil then return value end
+  end
+  if type(remuda.clock) == "function" then return remuda.clock() end
+end
+
+local function registry_has(handle)
+  local registry = remuda.schedules
+  if type(registry) ~= "table" then return nil end
+  return registry[handle] ~= nil
+end
+
+local function finish(item, result)
+  if item.completed then return end
+  item.completed = true
+  item.in_queue = false
+  if type(item.done) == "function" then pcall(item.done, result) end
+end
+
+local function clear_timer(handle, generation)
+  if timer ~= handle or timer_generation ~= generation then return false end
+  -- Keep next_refill_ms across a pump replacement: recovery must not postpone
+  -- the absolute refill deadline. A fresh module starts it on first arm.
+  timer, last_tick_ms = nil, nil
   if handle and type(remuda.cancel) == "function" then pcall(remuda.cancel, handle) end
+  return true
+end
+
+local function clear_watchdog(handle, generation)
+  if watchdog ~= handle or watchdog_generation ~= generation then return false end
+  watchdog = nil
+  if handle and type(remuda.cancel) == "function" then pcall(remuda.cancel, handle) end
+  return true
 end
 
 local function timer_is_stale()
-  return timer ~= nil and (os.clock() - timer_heartbeat) > STALE_AFTER
+  if not timer then return false end
+  -- Exact handle presence is immediate evidence; elapsed time is only used
+  -- when the core exposes a monotonic clock. Never guess with os.clock/os.time.
+  if registry_has(timer) == false then return true end
+  local now = now_ms()
+  return now ~= nil and last_tick_ms ~= nil and now - last_tick_ms > STALE_MS
 end
 
 -- A dispatch that throws must not lose the item silently: the caller's `done`
 -- is once-only, so answering it with the error is the only honest outcome.
 local function run_item(item)
-  if item.cancelled then return end
+  if item.completed or item.cancelled then return end
   local ok, err = pcall(item.dispatch, item)
-  if not ok and item.done then
-    item.completed = true
-    item.done({ error = "Matrix request dispatch failed: " .. tostring(err) })
+  if not ok then
+    item.transport = nil
+    local result = { error = "Matrix request dispatch failed (outcome unknown): "
+      .. tostring(err) }
+    -- A write may have reached the homeserver before the exception. Keep that
+    -- uncertainty typed so an outbox never enters its generic retry path.
+    if item.uncertain_on_throw then result.uncertain = true end
+    finish(item, result)
   end
 end
 
-local function schedule_queue()
+local schedule_queue, ensure_watchdog
+
+ensure_watchdog = function()
+  if watchdog or #queue == 0 or type(remuda.schedule) ~= "function" then return end
+  watchdog_generation = watchdog_generation + 1
+  local generation = watchdog_generation
+  local handle
+  handle = remuda.schedule({ every = math.max(1, interval), name = "matrix-request-watchdog",
+    run = function()
+      if watchdog ~= handle or watchdog_generation ~= generation then return end
+      local ok, err = pcall(function()
+        if #queue == 0 then
+          clear_watchdog(handle, generation)
+          return
+        end
+        if not timer then
+          schedule_queue()
+        elseif timer_is_stale() then
+          if clear_timer(timer, timer_generation) then schedule_queue() end
+        end
+      end)
+      -- The periodic watchdog stays armed after a transient error; do not
+      -- fall back to an immediate unthrottled drain.
+      if not ok and type(remuda.log) == "function" then
+        pcall(remuda.log, "warn", "matrix request watchdog: " .. tostring(err))
+      end
+    end })
+  watchdog = handle
+end
+
+schedule_queue = function()
   if #queue == 0 then return end
-  if timer_is_stale() then clear_timer() end
-  if interval == 0 or type(remuda.schedule) ~= "function" then
+  if interval == 0 then
     while #queue > 0 do
       local item = table.remove(queue, 1)
       item.in_queue = false
@@ -802,23 +873,59 @@ local function schedule_queue()
     end
     return
   end
-  if timer then return end
-  timer = remuda.schedule({ every = interval, run = function()
-    timer_heartbeat = os.clock()
-    tokens = math.min(burst, tokens + 1)
-    if #queue > 0 and tokens > 0 then
+  if type(remuda.schedule) ~= "function" then
+    -- A missing scheduler is not permission to bypass the rate limit: settle
+    -- the queue before any dispatch with a clear pre-write error.
+    while #queue > 0 do
       local item = table.remove(queue, 1)
       item.in_queue = false
-      tokens = tokens - 1
-      run_item(item)
+      finish(item, { error = "Matrix request scheduler is unavailable; request was not sent" })
     end
-    if #queue == 0 then clear_timer() end
-  end })
-  timer_heartbeat = os.clock()
+    return
+  end
+  if timer then
+    if not timer_is_stale() then ensure_watchdog(); return end
+    clear_timer(timer, timer_generation)
+  end
+  timer_generation = timer_generation + 1
+  local generation = timer_generation
+  local handle
+  handle = remuda.schedule({ every = interval, name = "matrix-request-refill",
+    run = function()
+      if timer ~= handle or timer_generation ~= generation then return end
+      local now = now_ms()
+      if now then
+        if next_refill_ms == nil then next_refill_ms = now + interval * 1000 end
+        -- Preserve the absolute refill deadline across recovery: an early
+        -- replacement tick grants no extra credit.
+        if now < next_refill_ms then return end
+        last_tick_ms = now
+        local step = interval * 1000
+        local missed = math.floor((now - next_refill_ms) / step) + 1
+        next_refill_ms = next_refill_ms + missed * step
+      end
+      tokens = math.min(burst, tokens + 1)
+      if #queue > 0 and tokens > 0 then
+        local item = table.remove(queue, 1)
+        item.in_queue = false
+        tokens = tokens - 1
+        run_item(item)
+      end
+      if #queue == 0 then
+        clear_timer(handle, generation)
+        if watchdog then clear_watchdog(watchdog, watchdog_generation) end
+      end
+    end })
+  timer = handle
+  local now = now_ms()
+  last_tick_ms = now
+  if next_refill_ms == nil and now ~= nil then next_refill_ms = now + interval * 1000 end
+  ensure_watchdog()
 end
 
-local function enqueue(dispatch, done)
-  local item = { dispatch = dispatch, done = done, cancelled = false }
+local function enqueue(dispatch, done, uncertain_on_throw)
+  local item = { dispatch = dispatch, done = done, cancelled = false, completed = false,
+    uncertain_on_throw = uncertain_on_throw == true }
   local handle = { cancel = function()
     if item.cancelled or item.completed then return end
     item.cancelled = true
@@ -826,16 +933,28 @@ local function enqueue(dispatch, done)
       for index, queued in ipairs(queue) do
         if queued == item then table.remove(queue, index); break end
       end
-      item.in_queue = false
-      item.completed = true
-      done({ error = "cancelled" })
+      finish(item, { error = "cancelled" })
       return
     end
-    if item.transport then item.transport:cancel() end
+    local result = { error = "cancelled" }
+    -- A dispatched write may have reached the server; keep it uncertain for
+    -- the outbox instead of entering a generic retry. Latch the terminal state
+    -- BEFORE transport.cancel: an inline cancellation callback must not win.
+    if item.uncertain_on_throw then result.uncertain = true end
+    finish(item, result)
+    if item.transport and type(item.transport.cancel) == "function" then
+      pcall(item.transport.cancel, item.transport)
+    end
   end }
   item.handle = handle
   if tokens > 0 then
     tokens = tokens - 1
+    local now = now_ms()
+    -- The initial credit starts the global rate phase: the next refill cannot
+    -- mint another token at the same instant.
+    if now ~= nil and (next_refill_ms == nil or next_refill_ms <= now) then
+      next_refill_ms = now + interval * 1000
+    end
     run_item(item)
   else
     item.in_queue = true
@@ -911,32 +1030,37 @@ function matrix.request(args, on_done)
   end
   if not headers.Accept and not headers.accept then headers.Accept = "application/json" end
   headers.Authorization = "Bearer " .. conf.token
+  local function handle_result(item, result)
+    if not item then return done(result) end
+    if type(result) ~= "table" then result = { error = "Matrix request returned no result" } end
+    if result.error and conf.pin and result.error:find(matrix.PIN_MISMATCH, 1, true) then
+      return finish(item, { error = result.error
+        .. "\nNext: recompute pin_sha256 as the server key's SPKI SHA-256"
+        .. " (see docs/butler.md) or use ca_file=PATH" })
+    end
+    if result.error and result.error:find(matrix.CERT_UNTRUSTED, 1, true) then
+      return finish(item, { error = result.error .. "\n" .. matrix.UNTRUSTED_NEXT })
+    end
+    if result.error then return finish(item, { error = result.error }) end
+    result.headers = json.object(type(result.headers) == "table" and result.headers or {})
+    if result.status and (result.status < 200 or result.status >= 300) then
+      return finish(item, { error = matrix_http_error(result.status, result.body),
+        status = result.status, headers = result.headers })
+    end
+    return finish(item, result)
+  end
   local spec = {
     method = method, url = conf.base .. path, headers = headers,
     body = body, timeout = timeout, connect_timeout = math.min(10, timeout),
     max_bytes = max_bytes, ca_file = conf.ca_file, pin = conf.pin, pin_only = conf.pin ~= nil,
-    callback = function(result)
-      if result.error and conf.pin and result.error:find(matrix.PIN_MISMATCH, 1, true) then
-        return done({ error = result.error .. "\nNext: recompute pin_sha256 as the server key's SPKI SHA-256"
-          .. " (see docs/butler.md) or use ca_file=PATH" })
-      end
-      if result.error and result.error:find(matrix.CERT_UNTRUSTED, 1, true) then
-        return done({ error = result.error .. "\n" .. matrix.UNTRUSTED_NEXT })
-      end
-      if result.error then return done({ error = result.error }) end
-      result.headers = json.object(type(result.headers) == "table" and result.headers or {})
-      if result.status and (result.status < 200 or result.status >= 300) then
-        return done({ error = matrix_http_error(result.status, result.body), status = result.status,
-          headers = result.headers })
-      end
-      done(result)
-    end,
+    callback = function(result) return handle_result(nil, result) end,
   }
   local dispatch = function(item)
     if item and item.cancelled then return end
+    spec.callback = function(result) return handle_result(item, result) end
     item.transport = remuda.http.request(spec)
   end
-  return enqueue(dispatch, done)
+  return enqueue(dispatch, done, method ~= "GET")
 end
 
 function matrix.same_room(room, event_id, on_done)
