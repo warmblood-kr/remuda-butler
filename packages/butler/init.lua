@@ -25,6 +25,18 @@ local function shallow_copy(value)
   return copy
 end
 
+-- Transitive notification/lifecycle helpers published as globals. A failed
+-- notice load can leave candidate functions here that close over the old
+-- policy owner/journal, so restore every key, including one absent before.
+local RUNTIME_HELPERS = {
+  "_butler_notify", "_butler_deliver_notices", "_butler_schedule_tick",
+  "_butler_inbox_message", "_butler_send", "_butler_notice_compacted",
+  "_butler_notice_open_stuck", "_butler_inbox_delivery", "_butler_dialog_tick",
+  "_butler_reconcile", "_butler_reconcile_retry", "_butler_done_tick",
+  "_butler_compaction_tick", "_butler_session_exited", "_butler_compaction_submit",
+  "_butler_cancel_active_choosers",
+}
+
 local function restore_entries(target, snapshot)
   if type(target) ~= "table" or type(snapshot) ~= "table" then return end
   for key in pairs(target) do
@@ -48,6 +60,8 @@ local function capture_runtime()
   if not runtime_graph_complete() then return last_good end
   local butler, matrix = host.butler, host.butler.matrix
   local relay = matrix.relay
+  local helpers = {}
+  for _, key in ipairs(RUNTIME_HELPERS) do helpers[key] = { value = host[key] } end
   last_good = {
     butler = butler,
     butler_entries = shallow_copy(butler),
@@ -62,9 +76,7 @@ local function capture_runtime()
     notice_config = host._butler_notice_config,
     dialogs = dialogs,
     input_originals = input_originals,
-    notify = host._butler_notify,
-    deliver_notices = host._butler_deliver_notices,
-    inbox_delivery = host._butler_inbox_delivery,
+    helpers = helpers,
     -- Resource intent, not the handle: a pre-stop stopped instance must not be
     -- restored as if it were still running.
     relay_running = type(relay) == "table" and relay.instance ~= nil or false,
@@ -87,11 +99,13 @@ local function restore_runtime()
   host._butler_notice = snapshot.notice
   restore_entries(host._butler_notice, snapshot.notice_entries)
   host._butler_notice_config = snapshot.notice_config
+  host._butler_matrix_config = snapshot.relay_config
   dialogs, input_originals = snapshot.dialogs, snapshot.input_originals
   host._butler_dialog_originals = snapshot.input_originals
-  if snapshot.notify ~= nil then host._butler_notify = snapshot.notify end
-  if snapshot.deliver_notices ~= nil then host._butler_deliver_notices = snapshot.deliver_notices end
-  if snapshot.inbox_delivery ~= nil then host._butler_inbox_delivery = snapshot.inbox_delivery end
+  for _, key in ipairs(RUNTIME_HELPERS) do
+    local saved = snapshot.helpers[key]
+    host[key] = saved and saved.value or nil
+  end
 end
 
 -- Read-only identity and ownership checks. They never reopen the consumed
@@ -105,16 +119,20 @@ local function validate_runtime()
   if type(policy) ~= "table" then
     error("Butler notification policy is unavailable; reload Butler when idle", 0)
   end
-  if type(policy.readiness) == "function" then
-    local ready = policy.readiness()
-    if not (type(ready) == "table" and ready.bound == true and ready.owner == notice) then
-      error("Butler notification policy is not bound to the current notice owner; reload Butler when idle", 0)
-    end
-    if type(notice) ~= "table" or notice._policy_bound ~= true then
-      error("Butler notice owner is not policy-bound; reload Butler when idle", 0)
-    end
+  -- A missing, throwing or partial checker is unverifiable, not ready.
+  if type(policy.readiness) ~= "function" then
+    error("Butler notification policy has no readiness check; reload Butler when idle", 0)
   end
-  if type(butler.native_dispatch) ~= "table" then
+  local checked, ready = pcall(policy.readiness)
+  if not checked or type(ready) ~= "table" or ready.bound ~= true
+      or ready.transport_acquired ~= true or ready.owner ~= notice then
+    error("Butler notification policy is not ready; reload Butler when idle", 0)
+  end
+  if type(notice) ~= "table" or notice._policy_bound ~= true then
+    error("Butler notice owner is not policy-bound; reload Butler when idle", 0)
+  end
+  if type(butler.native_dispatch) ~= "table"
+      or type(butler.native_dispatch.admit) ~= "function" then
     error("Butler native dispatch is unavailable; reload Butler when idle", 0)
   end
   if type(butler.matrix) ~= "table" then
@@ -140,7 +158,22 @@ local function load_main()
   end)
   main_loading = false
   if not ok then error(err, 0) end
+  -- A cold successful load must satisfy the same graph/ownership readiness
+  -- contract as a resume; an unverifiable graph is not loaded.
+  local valid, validation_err = pcall(validate_runtime)
+  if not valid then error(validation_err, 0) end
   main_loaded = true
+end
+
+-- A stopped handle does not prove the old writer is gone. A future resource
+-- registry/owner epoch may expose a read-only proof; until then the answer is
+-- no and resume must not start a second writer.
+local function relay_owner_fenced()
+  local matrix = host.butler and host.butler.matrix
+  local relay = matrix and matrix.relay
+  if type(relay) ~= "table" or type(relay.owner_proven) ~= "function" then return false end
+  local ok, proven = pcall(relay.owner_proven)
+  return ok and proven == true
 end
 
 local function start_matrix_relay()
@@ -321,12 +354,25 @@ return {
         host._butler_dialog_originals = input_originals
         dialogs.install()
       end
-      -- Restart only a resource that was running before stop; never restore a
-      -- stopped relay handle. `start_matrix_relay` is idempotent.
-      if boot_stage >= 4 and last_good and last_good.relay_running then
-        start_matrix_relay()
-      end
+      -- Validate the restored graph before any resource can poll or send.
       validate_runtime()
+      -- A stopped handle is not proof the old writer is gone. Never restart a
+      -- stopped snapshot without a positive owner/resource fence: a hidden
+      -- writer would become a second owner. Mark the resource unavailable and
+      -- leave it stopped for explicit owner maintenance.
+      if boot_stage >= 4 and last_good and last_good.relay_running then
+        local matrix = host.butler and host.butler.matrix
+        local relay = matrix and matrix.relay
+        if relay and not relay.instance then
+          if relay_owner_fenced() then
+            start_matrix_relay()
+          else
+            host._butler_relay_restart_blocked = true
+            local trace = host._butler_session_trace or _G._butler_session_trace
+            if trace then pcall(trace, "relay_owner_unknown", "resume left Matrix relay stopped") end
+          end
+        end
+      end
     end)
     if not ok then
       -- Never leave raw input exposed if the old activation cannot resume.

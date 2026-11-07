@@ -222,7 +222,8 @@ end
 -- held. A consumed `native_dispatch.install` is the normal handoff state and is
 -- deliberately not consulted here.
 function M.readiness()
-  return { owner = bound_owner, bound = bound_make_seam ~= nil }
+  return { owner = bound_owner, bound = bound_make_seam ~= nil,
+    transport_acquired = make_channel ~= nil }
 end
 
 -- Classify the existing notice outcome for the transient typed result only;
