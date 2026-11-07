@@ -37,6 +37,9 @@ local MAX_REQUEST_BYTES = 20 * MiB
 local DEFAULT_RESPONSE_BYTES = MiB
 local queue, timer, watchdog = {}, nil, nil
 local retired = false
+-- nil | "retiring" | "resuming". Callbacks may reenter the public API while a
+-- teardown is settling; a nested call must never look like a clean completion.
+local lifecycle_phase = nil
 local RETIRED_ERROR = "Matrix request generation ended before the request was sent"
 local tokens, burst = 1, 1
 local interval = tonumber(os.getenv("REMUDA_BUTLER_MATRIX_RATE_INTERVAL")) or 0.25
@@ -1213,84 +1216,119 @@ local function retirement_result(settled)
   }
 end
 
+local function in_progress_result()
+  return { ok = false, retired = retired, resumed = false, queued_settled = 0,
+    cancel_failed = cancel_failed_roles(), detail = "transition busy" }
+end
+
 local function retire_generation()
+  if lifecycle_phase then return in_progress_result() end
   if retired then
     -- Idempotent: retry only the exact handles a previous cancel failed to
     -- release. Never resettle queued work and never move the epoch again.
-    retry_pending_cancels()
-    return retirement_result(0)
-  end
-  retired = true
-  timer_generation = timer_generation + 1
-  watchdog_generation = watchdog_generation + 1
-  local refill, health = timer, watchdog
-  timer, watchdog = nil, nil
-  last_tick_ms = nil
-  if refill then cancel_exact("refill", refill) end
-  if health then cancel_exact("watchdog", health) end
-  local settled = 0
-  local pending = queue
-  queue = {}
-  for _, item in ipairs(pending) do
-    if not item.completed then
-      item.in_queue = false
-      finish(item, { error = RETIRED_ERROR, queue_retired = true, not_sent = true })
-      settled = settled + 1
+    lifecycle_phase = "retiring"
+    local retry_ok, retry_result = pcall(function()
+      retry_pending_cancels()
+      return retirement_result(0)
+    end)
+    lifecycle_phase = nil
+    if not retry_ok then
+      return { ok = false, retired = true, queued_settled = 0,
+        cancel_failed = cancel_failed_roles(), detail = "retirement failed internally" }
     end
+    return retry_result
   end
-  return retirement_result(settled)
+  lifecycle_phase = "retiring"
+  local ok, result = pcall(function()
+    retired = true
+    timer_generation = timer_generation + 1
+    watchdog_generation = watchdog_generation + 1
+    local refill, health = timer, watchdog
+    timer, watchdog = nil, nil
+    last_tick_ms = nil
+    if refill then cancel_exact("refill", refill) end
+    if health then cancel_exact("watchdog", health) end
+    local settled = 0
+    local pending = queue
+    queue = {}
+    for _, item in ipairs(pending) do
+      if not item.completed then
+        item.in_queue = false
+        finish(item, { error = RETIRED_ERROR, queue_retired = true, not_sent = true })
+        settled = settled + 1
+      end
+    end
+    return retirement_result(settled)
+  end)
+  lifecycle_phase = nil
+  if not ok then
+    return { ok = false, retired = true, queued_settled = 0,
+      cancel_failed = cancel_failed_roles(), detail = "retirement failed internally" }
+  end
+  return result
 end
 
 local function resume_generation()
-  -- Republish on whatever table is public now: a failed activation may have
-  -- replaced the whole butler.matrix reference, not just its functions.
-  local target = (remuda.butler and remuda.butler.matrix) or matrix
-  target.request = generation_api.request
-  target.request_json = generation_api.request_json
-  target.request_retire = generation_api.retire
-  target.request_resume = generation_api.resume
-  -- A live generation is already usable: repeated resume must not drop the
-  -- handles of an active queue without cancelling them.
-  if not retired then
-    return { ok = true, retired = false, resumed = false, queued_settled = 0,
-      cancel_failed = {}, detail = "generation is live; request API republished" }
-  end
-  local failed = retry_pending_cancels()
-  if #failed > 0 then
-    -- Fail closed: stay retired/fenced until every exact handle is confirmed.
-    return { ok = false, retired = true, resumed = false, queued_settled = 0,
-      cancel_failed = failed,
-      detail = cancel_detail("resume refused: timer cancellation is unconfirmed") }
-  end
-  retired = false
-  timer_generation = timer_generation + 1
-  watchdog_generation = watchdog_generation + 1
-  local refill, health = timer, watchdog
-  timer, watchdog = nil, nil
-  if refill then cancel_exact("refill", refill) end
-  if health then cancel_exact("watchdog", health) end
-  failed = cancel_failed_roles()
-  if #failed > 0 then
-    retired = true
-    return { ok = false, retired = true, resumed = false, queued_settled = 0,
-      cancel_failed = failed,
-      detail = cancel_detail("resume refused: timer cancellation is unconfirmed") }
-  end
-  -- The same captured client keeps its rate state: EMPTY means the queue only.
-  -- Tokens and the absolute next_refill_ms survive retire/resume; a fresh new
-  -- module client is the separate initial-burst case.
-  local settled = 0
-  local leftover = queue
-  queue = {}
-  for _, item in ipairs(leftover) do
-    if not item.completed then
-      item.in_queue = false
-      finish(item, { error = RETIRED_ERROR, queue_retired = true, not_sent = true })
-      settled = settled + 1
+  if lifecycle_phase then return in_progress_result() end
+  -- The guard covers the public-table republish and the cleanup retry too.
+  lifecycle_phase = "resuming"
+  local ok, result = pcall(function()
+    -- Republish on whatever table is public now: a failed activation may have
+    -- replaced the whole butler.matrix reference, not just its functions.
+    local target = (remuda.butler and remuda.butler.matrix) or matrix
+    target.request = generation_api.request
+    target.request_json = generation_api.request_json
+    target.request_retire = generation_api.retire
+    target.request_resume = generation_api.resume
+    -- A live generation is already usable: repeated resume must not drop the
+    -- handles of an active queue without cancelling them.
+    if not retired then
+      return { ok = true, retired = false, resumed = false, queued_settled = 0,
+        cancel_failed = {}, detail = "generation is live; request API republished" }
     end
+    local failed = retry_pending_cancels()
+    if #failed > 0 then
+      -- Fail closed: stay retired/fenced until every exact handle is confirmed.
+      return { ok = false, retired = true, resumed = false, queued_settled = 0,
+        cancel_failed = failed,
+        detail = cancel_detail("resume refused: timer cancellation is unconfirmed") }
+    end
+    retired = false
+    timer_generation = timer_generation + 1
+    watchdog_generation = watchdog_generation + 1
+    local refill, health = timer, watchdog
+    timer, watchdog = nil, nil
+    if refill then cancel_exact("refill", refill) end
+    if health then cancel_exact("watchdog", health) end
+    failed = cancel_failed_roles()
+    if #failed > 0 then
+      retired = true
+      return { ok = false, retired = true, resumed = false, queued_settled = 0,
+        cancel_failed = failed,
+        detail = cancel_detail("resume refused: timer cancellation is unconfirmed") }
+    end
+    -- The same captured client keeps its rate state: EMPTY means the queue only.
+    -- Tokens and the absolute next_refill_ms survive retire/resume; a fresh new
+    -- module client is the separate initial-burst case.
+    local settled = 0
+    local leftover = queue
+    queue = {}
+    for _, item in ipairs(leftover) do
+      if not item.completed then
+        item.in_queue = false
+        finish(item, { error = RETIRED_ERROR, queue_retired = true, not_sent = true })
+        settled = settled + 1
+      end
+    end
+    return { ok = true, retired = false, resumed = true, queued_settled = settled,
+      cancel_failed = {}, detail = "request queue emptied; rate state preserved" }
+  end)
+  lifecycle_phase = nil
+  if not ok then
+    return { ok = false, retired = retired, resumed = false, queued_settled = 0,
+      cancel_failed = cancel_failed_roles(), detail = "resume failed internally" }
   end
-  return { ok = true, retired = false, resumed = true, queued_settled = settled,
-    cancel_failed = {}, detail = "request queue emptied; rate state preserved" }
+  return result
 end
 
 local function retire_public()
@@ -1312,7 +1350,7 @@ remuda._butler_matrix_request_state = function()
   for role in pairs(cancel_pending) do pending[#pending + 1] = role end
   table.sort(pending)
   return { timer = timer, watchdog = watchdog, queued = #queue, retired = retired,
-    cancel_pending = #pending > 0 and pending or nil }
+    phase = lifecycle_phase, cancel_pending = #pending > 0 and pending or nil }
 end
 
 return matrix

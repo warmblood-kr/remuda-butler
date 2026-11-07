@@ -554,7 +554,129 @@ live_spec.run()
 assert(dispatched == 2 and fresh.status == 200,
   "the preserved deadline mints exactly one credit at +250")
 
--- 17. A bare helper replacement validates the prior retirement strictly
+-- 17. A queue_retired callback cannot reactivate or replace the client while
+-- the outer teardown is still running.
+remuda.butler.matrix = {}
+dofile("packages/butler/matrix_request.lua")
+matrix = assert(remuda.butler.matrix)
+now_ms = now_ms + 1000
+dispatched = 0
+request("/_matrix/client/versions")
+local nested = {}
+matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function(result)
+    nested.first_result = result
+    local resumed = matrix.request_resume()
+    nested.resume_ok, nested.resume_resumed, nested.resume_retired =
+      resumed.ok, resumed.resumed, resumed.retired
+    local retired_again = matrix.request_retire()
+    nested.retire_ok, nested.retire_retired = retired_again.ok, retired_again.retired
+    local new_request
+    matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+      function(value) new_request = value end)
+    nested.new_not_sent = new_request and new_request.not_sent
+    local ok, err = pcall(dofile, "packages/butler/matrix_request.lua")
+    nested.reexec_ok = ok
+    nested.reexec_refused = tostring(err):find("helper replacement refused", 1, true) ~= nil
+  end)
+matrix.request({ method = "GET", path = "/_matrix/client/v3/joined_rooms" },
+  function(result) nested.second_result = result end)
+local outer = matrix.request_retire()
+assert(outer.ok == true and outer.retired == true and outer.queued_settled == 2,
+  "the outer retire still settles both queued items exactly once")
+assert(nested.first_result.not_sent == true and nested.second_result.not_sent == true,
+  "every queued callback receives the typed retirement")
+assert(nested.resume_ok == false and nested.resume_resumed == false
+  and nested.resume_retired == true,
+  "a nested resume reports the in-progress phase, not clean success")
+assert(nested.retire_ok == false and nested.retire_retired == true,
+  "a nested retire reports the in-progress phase")
+assert(nested.new_not_sent == true,
+  "a nested new request is refused with the typed retirement")
+assert(nested.reexec_ok == false and nested.reexec_refused == true,
+  "a nested helper replacement is refused")
+assert(dispatched == 1, "reentrant calls send nothing")
+local settled_state = remuda._butler_matrix_request_state()
+assert(settled_state.phase == nil and settled_state.retired == true,
+  "the phase clears and the generation stays retired")
+local resumed_after = matrix.request_resume()
+assert(resumed_after.ok == true and resumed_after.resumed == true,
+  "a real resume works after the teardown completes")
+local live
+matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function(result) live = result end)
+assert(dispatched == 1, "the preserved bucket still waits for its due")
+now_ms = now_ms + 250
+local live_spec = find_schedule("matrix-request-refill")
+live_spec.run()
+assert(dispatched == 2 and live.status == 200,
+  "one credit dispatches the post-teardown request")
+
+-- 18. Cancel advice that reenters the public API during retire (and during a
+-- pending-cancel retry) gets the busy phase, never a clean completion.
+remuda.butler.matrix = {}
+dofile("packages/butler/matrix_request.lua")
+matrix = assert(remuda.butler.matrix)
+now_ms = now_ms + 1000
+dispatched = 0
+request("/_matrix/client/versions")
+local advice = {}
+matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function(result) advice.settled = result end)
+local real_cancel = remuda.cancel
+remuda.cancel = function(handle)
+  local nested_resume = matrix.request_resume()
+  local nested_retire = matrix.request_retire()
+  advice.resume_ok, advice.resume_resumed, advice.resume_detail =
+    nested_resume.ok, nested_resume.resumed, nested_resume.detail
+  advice.retire_ok, advice.retire_detail = nested_retire.ok, nested_retire.detail
+  return real_cancel(handle)
+end
+local first = matrix.request_retire()
+assert(first.ok == true and first.queued_settled == 1,
+  "cancel advice does not break the outer retirement")
+assert(advice.resume_ok == false and advice.resume_resumed == false
+  and advice.resume_detail == "transition busy",
+  "cancel-advice resume reports the busy phase")
+assert(advice.retire_ok == false and advice.retire_detail == "transition busy",
+  "cancel-advice retire reports the busy phase")
+assert(advice.settled.not_sent == true and dispatched == 1,
+  "cancel advice sends nothing and the queued item still settles")
+
+-- Pending-cancel retry is also guarded: the cancel advice reenters the retry.
+remuda.butler.matrix = {}
+dofile("packages/butler/matrix_request.lua")
+matrix = assert(remuda.butler.matrix)
+now_ms = now_ms + 1000
+dispatched = 0
+request("/_matrix/client/versions")
+matrix.request({ method = "GET", path = "/_matrix/client/v3/account/whoami" },
+  function() end)
+local retry_target = remuda._butler_matrix_request_state().timer
+remuda.cancel = function(handle)
+  if handle == retry_target then return false end
+  return real_cancel(handle)
+end
+local failed_retire = matrix.request_retire()
+assert(failed_retire.ok == false and #failed_retire.cancel_failed == 1,
+  "the first retire leaves one pending cancel")
+remuda.cancel = function(handle)
+  local nested_resume = matrix.request_resume()
+  local nested_retire = matrix.request_retire()
+  advice.retry_resume_ok = nested_resume.ok
+  advice.retry_retire_ok = nested_retire.ok
+  advice.retry_detail = nested_retire.detail
+  return real_cancel(handle)
+end
+local retried = matrix.request_retire()
+assert(retried.ok == true and retried.queued_settled == 0,
+  "the repeated retire retries the exact pending handle")
+assert(advice.retry_resume_ok == false and advice.retry_retire_ok == false
+  and advice.retry_detail == "transition busy",
+  "cancel advice during the retry reports the busy phase")
+assert(dispatched == 1, "the retry path sends nothing")
+
+-- 19. A bare helper replacement validates the prior retirement strictly
 -- before publishing; a refusal keeps the old public API and sends nothing.
 local function load_request_module()
   remuda.butler.matrix = {}
@@ -597,7 +719,7 @@ assert(dofile("packages/butler/matrix_request.lua"))
 assert(replaced.request ~= old_request, "a clean prior retirement allows replacement")
 assert(dispatched == 0, "a clean replacement sends nothing")
 
--- 18. A missing scheduler settles the queue before dispatch; it never falls
+-- 20. A missing scheduler settles the queue before dispatch; it never falls
 -- back to an unthrottled network send.
 remuda.butler.matrix = {}
 remuda.schedule = nil
