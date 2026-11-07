@@ -37,13 +37,21 @@ local function fixture(options)
     assert(name == "butler/main")
     loads = loads + 1
     if failing then error("injected main failure") end
+    local notice = { _policy_bound = true }
+    local policy = {}
+    if options.readiness ~= false then
+      policy.readiness = function()
+        return { owner = notice, bound = true, transport_acquired = true }
+      end
+    end
     host.butler = {
       dialogs = { install = function() end, stop = function() end },
-      native_dispatch = {},
-      send_policy = {},
+      native_dispatch = { admit = function() return { outcome = "not_written" } end },
+      send_policy = policy,
       matrix = options.matrix or {},
     }
-    host._butler_notice = {}
+    host._butler_notice = notice
+    host._butler_notice_config = { bus = host._butler_bus }
   end
   return host,
     function(value) failing = value end,
@@ -117,31 +125,103 @@ test("partial emit fails closed for this activation, a fresh one retries", funct
   module2.start({})
 end)
 
-test("resume restarts a previously running relay exactly once", function()
-  local starts, stops = 0, 0
+local function relay_fixture(fenced)
+  local starts, stops, seen = 0, 0, nil
   local relay = { instance = {} }
-  relay.start = function()
+  relay.start = function(config)
     starts = starts + 1
+    seen = config
     relay.instance = {}
   end
   relay.stop = function()
     stops = stops + 1
     relay.instance = nil
   end
+  if fenced then relay.owner_proven = function() return true end end
   local host = fixture({ relay = true, matrix = { relay = relay } })
-  host._butler_matrix_config = { config_path = "/tmp/butler-test-config" }
   host.http = { request = function() end }
+  return host, relay, {
+    starts = function() return starts end,
+    stops = function() return stops end,
+    seen = function() return seen end,
+  }
+end
+
+test("resume restarts a stopped relay once with a positive owner fence", function()
+  local host, relay, counters = relay_fixture(true)
+  host._butler_matrix_config = { config_path = "/tmp/butler-test-config" }
   local module = declaration(host)
   local state = {}
   module.commands(state)
   module.start(state)
-  assert(starts == 0 and relay.instance ~= nil, "relay starts only through resume")
+  assert(counters.starts() == 0 and relay.instance ~= nil, "relay starts only through resume")
   module.stop(state)
-  assert(stops == 1 and relay.instance == nil, "stop clears the handle")
+  assert(counters.stops() == 1 and relay.instance == nil, "stop clears the handle")
   module.resume(state)
-  assert(starts == 1 and relay.instance ~= nil, "resume restarts exactly once")
+  assert(counters.starts() == 1 and relay.instance ~= nil, "fenced resume restarts once")
+  assert(counters.seen() == host._butler_matrix_config, "restored relay config")
   module.resume(state)
-  assert(starts == 1, "a second resume must not restart a live relay")
+  assert(counters.starts() == 1, "a second resume must not restart a live relay")
+end)
+
+test("resume never restarts a stopped snapshot without an owner fence", function()
+  local host, relay, counters = relay_fixture(false)
+  host._butler_matrix_config = { config_path = "/tmp/butler-test-config" }
+  local module = declaration(host)
+  local state = {}
+  module.commands(state)
+  module.start(state)
+  module.stop(state)
+  assert(relay.instance == nil, "stopped by the lifecycle")
+  module.resume(state)
+  assert(counters.starts() == 0, "unfenced resume must not create a second writer")
+  assert(host._butler_relay_restart_blocked == true, "blocked state is explicit")
+end)
+
+test("resume validates the graph before starting a resource", function()
+  local host, _, counters = relay_fixture(true)
+  host._butler_matrix_config = {}
+  local module = declaration(host)
+  local state = {}
+  module.commands(state)
+  module.start(state)
+  module.stop(state)
+  host._butler_bus = {}
+  assert(not pcall(module.resume, state), "bus mismatch must fail")
+  assert(counters.starts() == 0, "invalid graph started a relay before validation")
+end)
+
+test("resume restores the pre-stop relay config", function()
+  local host, _, counters = relay_fixture(true)
+  local old = { marker = "old" }
+  host._butler_matrix_config = old
+  local module = declaration(host)
+  local state = {}
+  module.commands(state)
+  module.start(state)
+  module.stop(state)
+  host._butler_matrix_config = { marker = "candidate" }
+  module.resume(state)
+  assert(host._butler_matrix_config == old, "candidate config survived rollback")
+  assert(counters.seen() == old, "resumed relay used the candidate config")
+end)
+
+test("missing readiness fails closed at load and resume", function()
+  local host = fixture({ readiness = false })
+  local module = declaration(host)
+  assert(not pcall(module.commands, {}), "unverifiable policy was loaded")
+end)
+
+test("rollback clears a candidate export absent from the old graph", function()
+  local host = fixture()
+  local module = declaration(host)
+  local state = {}
+  module.commands(state)
+  module.start(state)
+  module.stop(state)
+  host._butler_notify = function() error("candidate") end
+  module.resume(state)
+  assert(host._butler_notify == nil, "candidate notify survived rollback")
 end)
 
 test("resume does not rewind durable bus state", function()
