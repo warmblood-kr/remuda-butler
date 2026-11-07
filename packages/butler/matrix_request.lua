@@ -786,12 +786,6 @@ local function now_ms()
   if type(remuda.clock) == "function" then return remuda.clock() end
 end
 
-local function registry_has(handle)
-  local registry = remuda.schedules
-  if type(registry) ~= "table" then return nil end
-  return registry[handle] ~= nil
-end
-
 local function finish(item, result)
   if item.completed then return end
   item.completed = true
@@ -817,9 +811,10 @@ end
 
 local function timer_is_stale()
   if not timer then return false end
-  -- Exact handle presence is immediate evidence; elapsed time is only used
-  -- when the core exposes a monotonic clock. Never guess with os.clock/os.time.
-  if registry_has(timer) == false then return true end
+  -- Staleness is monotonic elapsed time only. `remuda.schedules[handle]` is
+  -- not a capability proof (a live core may key natively), and os.clock is CPU
+  -- time, not wall time. Without remuda.clock there is no bounded repair: the
+  -- documented capability limit, never a guess.
   local now = now_ms()
   return now ~= nil and last_tick_ms ~= nil and now - last_tick_ms > STALE_MS
 end
@@ -1193,5 +1188,10 @@ generation_api = { request = matrix.request, request_json = matrix.request_json,
   retire = retire_public, resume = resume_public }
 matrix.request_retire = retire_public
 matrix.request_resume = resume_public
+-- Test seam: the exact handles this generation returned. A real core may not
+-- key remuda.schedules by handle, so fixtures must not guess from the table.
+remuda._butler_matrix_request_state = function()
+  return { timer = timer, watchdog = watchdog, queued = #queue, retired = retired }
+end
 
 return matrix
