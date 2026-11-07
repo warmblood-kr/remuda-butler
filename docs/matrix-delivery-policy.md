@@ -5,33 +5,35 @@ relay module loads. `accept_received` and `accept_pending` compose the same
 notification-mode selector with mention and followed-thread eligibility.
 `followed`, `accept_mode` and `accept_thread` are the constituent policy
 functions. The module does not change subscriptions, issue requests, write relay
-state, or deliver mail. It never reads relay state: the relay passes the
-explicit-unfollow marker for the event's thread as the last argument
-(`unfollowed_root`, a boolean).
+state, or deliver mail. It never reads relay state: an explicit unfollow is a
+subscription removal plus a tombstone kept by the relay, and it is not a
+delivery input.
 
 The relay uses `accept_received` for ordinary receive eligibility and typed-line
 room eligibility, and `accept_pending` immediately before context/delivery work.
 Receive-time validation, trusted-mention auto-follow, per-room rate limiting,
 context fetches, routes, acknowledgments, dead-letter/retry handling, cursor
 persistence and lifecycle cancellation stay with the relay. The typed-line gate
-calls `accept_received` without an unfollow marker: an owner's `!` line is an
+calls `accept_received` the same way as receive: an owner's `!` line is an
 action, not inbox delivery.
 
 Modes retain their existing defaults and behavior: HOME defaults to `all`,
 additional rooms to `mentions-followed`, and `none` suppresses all notifications.
 Only `m.thread` roots confer followed-thread eligibility; an `in_reply_to` link
 alone does not. A trusted mention still auto-follows even in `none` mode unless
-the thread carries an explicit unfollow marker. An explicitly unfollowed thread
-suppresses unmentioned replies in every mode, including `all`; a mention is
-still delivered (that message only) and the relay skips the re-follow. Pending
-mail is checked against current mode, follows and the current unfollow marker:
-removing a recorded `mention_follow_root` revokes that pending mention's
-eligibility, unless its thread is independently still followed or the thread was
-explicitly unfollowed (the mention itself is delivered, without re-following).
-Historical pending entries without that field keep the original
-mention rule. Suppressed pending mail is durably marked processed; changing
-policy later does not resurrect it. Policy functions are not an authorization
-boundary: sender validation and command gates remain in their existing modules.
+the thread carries an explicit unfollow tombstone.
+
+An explicit unfollow removes the subscription and leaves the tombstone, and
+delivery returns to the room policy: `all` delivers the thread,
+`mentions-followed` delivers only a direct mention or a still-followed thread,
+and `none` delivers nothing. A mention is delivered once and does not clear the
+tombstone or re-follow the thread; only an explicit follow clears it. Because
+eligibility is recomputed from current state, a pending mention whose follow was
+removed stays eligible in `mentions-followed`; historical persisted
+`mention_follow_root` fields are ignored. Pending mail follows the same contract
+as receive. Suppressed pending mail is durably marked processed; changing policy
+later does not resurrect it. Policy functions are not an authorization boundary:
+sender validation and command gates remain in their existing modules.
 
 ## Reevaluation and restart boundaries
 
@@ -78,6 +80,10 @@ In particular:
   reevaluating the Matrix leaf modules. Existing documented startup-only config
   fields still require restart; this refactor does not broaden live config reload.
 
+The Butler-to-Butler turn counters are deliberately volatile: they live in the
+running relay instance and reset when the relay or daemon restarts. Only the
+follow set and the unfollow tombstones are durable relay state.
+
 No installed package or live relay was updated/reloaded while preparing this
 change. Any later installation or activation remains an owner operation.
 
@@ -95,13 +101,10 @@ The relay suite uses a temporary HOME/state and scripted HTTP, not a homeserver.
 Its existing coverage includes notification switches during context waits,
 unfollow during pending delivery, follows and mail routes across restart,
 durable acknowledgments, retries, context cancellation and lifecycle behavior.
-Three additional registered tests cover the policy mode/mention/follow table,
-composed pending suppression persisted across restart, and reevaluation on a
-retained instance. They demonstrate that factory/closure identity remains
-unchanged for existing instances while future policy lookups see a new table;
-a separately captured old function remains old. Reevaluation is tested with
-worktree `dofile` under the pinned core, not installed-mod lifecycle activation.
-The table also crosses the explicit-unfollow marker (`unfollowed_root`) with
-every mode. Relay coverage adds HOME `all` unfollow muting, a mention that does
-not re-follow, pending suppression marked processed, marker survival across
-restart, and a turn guard that counts only exchanges between different agents.
+Registered tests cover the policy mode/mention/follow table, composed pending
+suppression persisted across restart, and reevaluation on a retained instance.
+Relay coverage adds unfollow behavior in every mode (all-mode delivery,
+mentions-followed mention-only, none), the tombstone that blocks an implicit
+re-follow and survives restart, explicit-follow clearing, durable deduplication
+of a filtered reply, and a turn guard that counts only exchanges between
+different agents while an owner-directed reply is not a peer boundary.

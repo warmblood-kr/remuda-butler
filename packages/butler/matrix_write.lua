@@ -272,7 +272,7 @@ function matrix.reply(opts, on_done)
         local slot, slot_error = matrix.take_post_slot()
         if not slot then return error_result(reply_done, slot_error) end
       end
-      relay:note_own_turn(room, root)
+      relay:note_own_turn(room, root, allowlisted_human_reply)
     end
     return send_chunks(room, opts.text, thread_relation(opts), reply_done, opts.txn_id)
   end)

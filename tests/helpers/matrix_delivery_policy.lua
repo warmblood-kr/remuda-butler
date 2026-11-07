@@ -12,36 +12,32 @@ return function(t)
       local cfg = { home_room = t.home, rooms = { [t.home] = "home", [t.room] = "joined" },
         room_notifications = {} }
       local subscriptions = { ["$followed"] = {} }
-      -- Each row specifies receive/pending independently, including legacy state,
-      -- unfollowed mention roots, and a still-followed reply after another unfollow.
-      -- The fourth column is the explicit-unfollow marker for the event's thread.
+      -- Each row: event fields, then the eligibility it carries in
+      -- mentions-followed (direct/room mention, or a followed thread root).
+      -- `all` accepts every row and `none` accepts none; an explicit unfollow
+      -- is not a delivery input (only the relay tombstone blocks re-follows).
+      -- Legacy persisted fields such as mention_follow_root are ignored.
       local rows = {
-        { {}, false, false, false },
-        { { is_mention = true }, true, true, false },
-        { { thread_root = "$followed" }, true, true, false },
-        { { thread_root = "$gone" }, false, false, false },
-        { { is_mention = true, mention_follow_root = "$gone" }, true, false, false },
-        { { is_mention = true, mention_follow_root = "$followed" }, true, true, false },
-        { { is_mention = true, mention_follow_root = "$gone", thread_root = "$followed" }, true, true, false },
-        { { in_reply_to = "$followed" }, false, false, false },
-        { { thread_root = "$gone" }, false, false, true },
-        { { thread_root = "$followed" }, false, false, true },
-        { { is_mention = true, thread_root = "$gone" }, true, true, true },
-        { { is_room_mention = true, thread_root = "$gone" }, true, true, true },
-        { { is_mention = true, mention_follow_root = "$gone", thread_root = "$gone" }, true, true, true },
+        { {}, false, false },
+        { { is_mention = true }, true, false },
+        { { is_room_mention = true }, true, false },
+        { { thread_root = "$followed" }, false, true },
+        { { thread_root = "$gone" }, false, false },
+        { { is_mention = true, thread_root = "$gone" }, true, false },
+        { { is_room_mention = true, thread_root = "$gone" }, true, false },
+        { { is_mention = true, thread_root = "$followed" }, true, true },
+        { { is_mention = true, mention_follow_root = "$gone" }, true, false },
+        { { is_mention = true, mention_follow_root = "$gone", thread_root = "$gone" }, true, false },
+        { { in_reply_to = "$followed" }, false, false },
       }
       for _, mode in ipairs({ "all", "mentions-followed", "none" }) do
         cfg.room_notifications[t.room] = mode
         for index, row in ipairs(rows) do
-          local received, pending = row[2], row[3]
-          if mode == "all" then received, pending = true, true end
-          if mode == "none" then received, pending = false, false end
-          if row[4] and not (row[1].is_mention or row[1].is_room_mention) then
-            received, pending = false, false
-          end
-          assert(policy.accept_received(cfg, t.room, subscriptions, row[1], row[4]) == received,
+          local expected = mode == "all"
+            or (mode == "mentions-followed" and (row[2] or row[3]))
+          assert(policy.accept_received(cfg, t.room, subscriptions, row[1]) == expected,
             mode .. " receive row " .. index)
-          assert(policy.accept_pending(cfg, t.room, subscriptions, row[1], row[4]) == pending,
+          assert(policy.accept_pending(cfg, t.room, subscriptions, row[1]) == expected,
             mode .. " pending row " .. index)
         end
       end

@@ -4,6 +4,9 @@
 assert(type(remuda) == "table" and type(remuda.json) == "table",
   "run this suite with a Remuda core that provides remuda.json")
 remuda.butler = { matrix = {} }
+-- A BMR_ONLY run may skip the test that first installs this fallback, so the
+-- later groups get the same default at load time.
+remuda._butler_new_ulid = remuda._butler_new_ulid or function() return "01TESTULID" end
 remuda._relay_timers = {}
 function remuda.schedule(spec)
   local timer = { spec = spec, cancelled = false }
@@ -3917,6 +3920,101 @@ function test_rx_room_notification_modes()
   end)
 end
 
+-- Unfollow removes the subscription and leaves a tombstone that only blocks
+-- an implicit re-follow; delivery itself follows the current room policy.
+rx_policy_tests = {}
+function rx_policy_tests.unfollow_reverts_to_room_policy()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    -- HOME defaults to all: an unfollowed thread still delivers, and only the
+    -- tombstone (not delivery) changes.
+    relay:subscribe_thread(HOME, "$ufa-root")
+    rx_sync(client, HOME, { rx_msg("$ufa-t1", OWNER, "followed reply", rx_thread("$ufa-root")) })
+    assert(rx_find(delivered, "$ufa-t1"), "a followed thread delivers in HOME")
+    relay:unsubscribe_thread(HOME, "$ufa-root")
+    rx_sync(client, HOME, { rx_msg("$ufa-t2", OWNER, "unmentioned after unfollow", rx_thread("$ufa-root")) })
+    assert(rx_find(delivered, "$ufa-t2"),
+      "all mode still delivers an unmentioned reply after unfollow (policy, not tombstone)")
+    rx_sync(client, HOME, { rx_msg("$ufa-t3", RX_ALLY, "@bot:example.org mention after unfollow",
+      rx_thread("$ufa-root")) })
+    assert(rx_find(delivered, "$ufa-t3"), "a mention in the unfollowed thread is delivered")
+    assert(not rx_followed(relay, HOME, "$ufa-root"),
+      "delivering the mention does not implicitly re-follow the unfollowed thread")
+
+    -- A reply that is pending when the unfollow arrives is rechecked against
+    -- the room policy, not the tombstone.
+    relay:subscribe_thread(HOME, "$ufa-pending-root")
+    rx_sync(client, HOME, { rx_msg("$ufa-pending", OWNER, "wait for context",
+      rx_thread("$ufa-pending-root")) }, true)
+    assert(relay:state().pending["$ufa-pending"], "the followed thread reply waits for context")
+    relay:unsubscribe_thread(HOME, "$ufa-pending-root")
+    rx_context(client, true)
+    assert(rx_find(delivered, "$ufa-pending"),
+      "all mode still delivers a reply that was pending when the unfollow arrived")
+
+    -- The tombstone survives restart: all-mode delivery continues and a
+    -- mention still does not re-follow.
+    relay:stop()
+    local again, client2, delivered2 = rx_relay(path)
+    assert((((again:state().unfollowed or {})[HOME] or {})["$ufa-root"] ~= nil),
+      "the explicit unfollow tombstone survives restart")
+    rx_sync(client2, HOME, { rx_msg("$ufa-t4", OWNER, "after restart", rx_thread("$ufa-root")),
+      rx_msg("$ufa-t5", RX_ALLY, "@bot:example.org still no refollow", rx_thread("$ufa-root")) })
+    assert(rx_find(delivered2, "$ufa-t4") and rx_find(delivered2, "$ufa-t5"),
+      "all mode keeps delivering the unfollowed thread after restart")
+    assert(not rx_followed(again, HOME, "$ufa-root"), "the mention after restart does not re-follow")
+    again:stop()
+  end)
+end
+
+-- In mentions-followed only a direct mention survives an unfollow; in none
+-- nothing does. A filtered event stays durably processed, and an explicit
+-- follow clears the tombstone and restores the subscription.
+function rx_policy_tests.unfollow_policy_in_joined_and_none_rooms()
+  local dir, path = rx_fixture()
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    relay:set_notification_mode(NEW, "mentions-followed")
+    relay:subscribe_thread(NEW, "$ufb-root")
+    rx_sync(client, NEW, { rx_msg("$ufb-t1", OWNER, "followed", rx_thread("$ufb-root")) })
+    assert(rx_find(delivered, "$ufb-t1"), "mentions-followed delivers a followed thread")
+    relay:unsubscribe_thread(NEW, "$ufb-root")
+    rx_sync(client, NEW, { rx_msg("$ufb-t2", OWNER, "unmentioned after unfollow", rx_thread("$ufb-root")) })
+    assert(not rx_find(delivered, "$ufb-t2"),
+      "mentions-followed does not deliver an unmentioned reply after unfollow")
+    assert(relay:state().processed["$ufb-t2"],
+      "the filtered reply is durably processed, not left pending")
+    rx_sync(client, NEW, { rx_msg("$ufb-t3", OWNER, "@bot:example.org mention after unfollow",
+      rx_thread("$ufb-root")) })
+    assert(rx_find(delivered, "$ufb-t3"), "mentions-followed still delivers a direct mention")
+    assert(not rx_followed(relay, NEW, "$ufb-root"), "the mention does not implicitly re-follow")
+
+    -- none suppresses the unfollowed thread and its mention; the mention still
+    -- must not create a follow.
+    relay:set_notification_mode(NEW, "none")
+    rx_sync(client, NEW, { rx_msg("$ufb-t4", OWNER, "unmentioned under none", rx_thread("$ufb-root")),
+      rx_msg("$ufb-t5", OWNER, "@bot:example.org mention under none", rx_thread("$ufb-root")) })
+    assert(not rx_find(delivered, "$ufb-t4") and not rx_find(delivered, "$ufb-t5"),
+      "none suppresses the unfollowed thread and its mention")
+    assert(not rx_followed(relay, NEW, "$ufb-root"), "a none-mode mention does not re-follow")
+
+    -- A later policy change does not resurrect the filtered event, and all
+    -- delivers the thread again without a follow.
+    relay:set_notification_mode(NEW, "all")
+    rx_sync(client, NEW, { rx_msg("$ufb-t2", OWNER, "unmentioned after unfollow", rx_thread("$ufb-root")),
+      rx_msg("$ufb-t6", OWNER, "unmentioned under all", rx_thread("$ufb-root")) })
+    assert(not rx_find(delivered, "$ufb-t2"), "a filtered reply is deduplicated after a policy change")
+    assert(rx_find(delivered, "$ufb-t6"), "all mode delivers the unfollowed thread again")
+
+    -- Only an explicit follow clears the tombstone.
+    relay:subscribe_thread(NEW, "$ufb-root")
+    assert((((relay:state().unfollowed or {})[NEW] or {})["$ufb-root"] == nil),
+      "an explicit follow clears the tombstone")
+    relay:stop()
+  end)
+end
+
 local function rx_event_http(path, run)
   with_alias_http(path, function()
     return { status = 200, body = '{"event_id":"$mine","room_id":"' .. HOME .. '","type":"m.room.message",'
@@ -4085,7 +4183,7 @@ local function test_rx_allowlisted_human_unchanged()
       end
       assert(not rx_find(emitted, "$a-root"), "an unmentioned root in ALL-BUTLERS is not delivered by default")
       assert(rx_find(emitted, "$h-root").text == "plain owner text", "allowlisted body is unchanged")
-      assert(not rx_find(emitted, "$a-quiet"), "an unfollowed thread reply in ALL stays filtered")
+      assert(not rx_find(emitted, "$a-quiet"), "an unmentioned reply in a thread that was never followed stays filtered")
     end)
   end)
 end
@@ -4874,6 +4972,58 @@ local function test_rx_only_allowlisted_human_resumes_stopped_thread()
     assert(ok, "an allowlisted human's reply resumes the thread: " .. tostring(err))
     assert(client:messages(HOME, "reply-three") == 1 and client:messages(HOME, "reply-two") == 0,
       "only the reply after the owner's message is posted")
+    relay:stop()
+  end)
+end
+
+-- A reply to a verified person on the allowlist is owner-directed progress, not
+-- part of the peer exchange: it must not change, increment or reset last_agent.
+-- Agent and unknown targets keep the conservative own-reply boundary.
+function rx_policy_tests.owner_progress_is_not_a_peer_boundary()
+  local dir, path = invite_fixture(OWNER .. "," .. RX_ALLY, "b2b_max_turns=2\n")
+  rx_with_dir(dir, function()
+    local relay, client, delivered = rx_relay(path)
+    relay_module.instance = relay
+    rx_post_http(path, function()
+      rx_sync(client, HOME, { rx_msg("$op", OWNER, "@bot:example.org status") })
+      local owner_mail = assert(rx_mail_id(delivered, "$op"), "the owner's request is delivered")
+      rx_sync(client, HOME, { rx_msg("$op-a1", RX_ALLY, "@bot:example.org report 1", rx_thread("$op")) })
+      assert(not relay:b2b_stopped(HOME, "$op"), "one peer report is one turn")
+      local ok, err = relay:queue_mail_reply({ mail_id = owner_mail, reply_mail_id = "OP1", text = "owner progress" })
+      assert(ok, "owner progress is queued: " .. tostring(err))
+      rx_sync(client, HOME, { rx_msg("$op-a2", RX_ALLY, "@bot:example.org report 2", rx_thread("$op")) })
+      assert(not relay:b2b_stopped(HOME, "$op"),
+        "owner-directed progress must not make one agent's next report a new turn")
+
+      -- The direct CLI reply path uses the same verified-target test.
+      local direct = rx_cli({ "matrix", "reply", "$op", "direct owner progress" })
+      assert(direct.code == 0, "a direct reply to the owner posts: " .. tostring(direct.stderr))
+      rx_sync(client, HOME, { rx_msg("$op-a3", RX_ALLY, "@bot:example.org report 3", rx_thread("$op")) })
+      assert(not relay:b2b_stopped(HOME, "$op"),
+        "a direct owner reply must not make one agent's next report a new turn")
+
+      -- A different agent is still a real exchange.
+      rx_sync(client, HOME, { rx_msg("$op-b1", RX_PREFIX, "@bot:example.org other agent", rx_thread("$op")) })
+      assert(relay:b2b_stopped(HOME, "$op"), "a different agent still counts as a new turn")
+
+      -- A target that is not route.allowlisted_human keeps the boundary: a
+      -- non-allowlisted human is not upgraded to a verified owner.
+      rx_sync(client, HOME, { rx_msg("$op2-s", STRANGER, "status", rx_thread("$op2")) })
+      local stranger_mail = assert(rx_mail_id(delivered, "$op2-s"), "the untrusted human is delivered")
+      rx_sync(client, HOME, { rx_msg("$op2-a1", RX_ALLY, "@bot:example.org report", rx_thread("$op2")) })
+      ok, err = relay:queue_mail_reply({ mail_id = stranger_mail, reply_mail_id = "OP2", text = "untrusted target" })
+      assert(ok, "a reply to a non-allowlisted human is still allowed: " .. tostring(err))
+      rx_sync(client, HOME, { rx_msg("$op2-a2", RX_ALLY, "@bot:example.org report 2", rx_thread("$op2")) })
+      assert(relay:b2b_stopped(HOME, "$op2"),
+        "an untrusted/unknown target keeps the own-reply boundary")
+
+      -- An omitted target argument is also unknown, not an owner.
+      rx_sync(client, HOME, { rx_msg("$op3-a1", RX_ALLY, "@bot:example.org report", rx_thread("$op3")) })
+      relay:note_own_turn(HOME, "$op3")
+      rx_sync(client, HOME, { rx_msg("$op3-a2", RX_ALLY, "@bot:example.org report 2", rx_thread("$op3")) })
+      assert(relay:b2b_stopped(HOME, "$op3"),
+        "an omitted target keeps the conservative own-reply boundary")
+    end)
     relay:stop()
   end)
 end
@@ -6251,45 +6401,11 @@ rx_tests = {
   { "test_rx_reply_to_allowlisted_human_takes_no_post_slot", test_rx_reply_to_allowlisted_human_takes_no_post_slot },
   { "test_rx_post_cap_home_line_once_per_hour", test_rx_post_cap_home_line_once_per_hour },
   { "test_rx_link_like_root_counted_but_not_shown", test_rx_link_like_root_counted_but_not_shown },
-  -- Explicit unfollow mutes unmentioned thread replies even in HOME's all mode.
-  -- A mention still delivers that message once but never re-follows the thread;
-  -- the marker survives restart and an explicit follow restores delivery.
-  { "test_rx_unfollow_mutes_thread_replies_in_all", function()
-    local dir, path = rx_fixture()
-    rx_with_dir(dir, function()
-      local relay, client, delivered = rx_relay(path)
-      rx_sync(client, HOME, { rx_msg("$uf-t0", OWNER, "thread reply", rx_thread("$uf-root")) })
-      assert(rx_find(delivered, "$uf-t0"),
-        "HOME all delivers an unmentioned reply in a thread that was never unfollowed")
-      relay:subscribe_thread(HOME, "$uf-root")
-      rx_sync(client, HOME, { rx_msg("$uf-t1", OWNER, "followed reply", rx_thread("$uf-root")) })
-      assert(rx_find(delivered, "$uf-t1"), "a followed thread delivers in HOME all")
-      relay:unsubscribe_thread(HOME, "$uf-root")
-      rx_sync(client, HOME, { rx_msg("$uf-t2", OWNER, "unmentioned after unfollow", rx_thread("$uf-root")) })
-      assert(not rx_find(delivered, "$uf-t2"),
-        "unfollow mutes an unmentioned thread reply even in HOME's default all policy")
-      rx_sync(client, HOME, { rx_msg("$uf-t3", OWNER, "@bot:example.org mention after unfollow",
-        rx_thread("$uf-root")) })
-      assert(rx_find(delivered, "$uf-t3"),
-        "a mention in an unfollowed thread still delivers that message")
-      assert(not rx_followed(relay, HOME, "$uf-root"),
-        "the delivered mention does not re-follow the explicitly unfollowed thread")
-      rx_sync(client, HOME, { rx_msg("$uf-t4", OWNER, "later unmentioned reply", rx_thread("$uf-root")) })
-      assert(not rx_find(delivered, "$uf-t4"), "a later unmentioned reply stays muted")
-      relay:subscribe_thread(HOME, "$uf-root")
-      rx_sync(client, HOME, { rx_msg("$uf-t5", OWNER, "after explicit follow", rx_thread("$uf-root")) })
-      assert(rx_find(delivered, "$uf-t5"), "an explicit follow restores delivery")
-      relay:unsubscribe_thread(HOME, "$uf-restart")
-      relay:stop()
-      local again, client2, delivered2 = rx_relay(path)
-      assert((((again:state().unfollowed or {})[HOME] or {})["$uf-restart"] ~= nil),
-        "the unfollow marker is persisted in relay state")
-      rx_sync(client2, HOME, { rx_msg("$uf-r1", OWNER, "after restart", rx_thread("$uf-restart")) })
-      assert(not rx_find(delivered2, "$uf-r1"),
-        "an unmentioned reply in the unfollowed thread is suppressed after restart")
-      again:stop()
-    end)
-  end },
+  -- Unfollow keeps a tombstone that blocks an implicit re-follow; delivery
+  -- follows the current room policy (all/mentions-followed/none).
+  { "test_rx_unfollow_reverts_to_room_policy", rx_policy_tests.unfollow_reverts_to_room_policy },
+  { "test_rx_unfollow_policy_in_joined_and_none_rooms", rx_policy_tests.unfollow_policy_in_joined_and_none_rooms },
+  { "test_rx_owner_progress_is_not_a_peer_boundary", rx_policy_tests.owner_progress_is_not_a_peer_boundary },
   { "test_inbox_header_names_room_and_thread", ctx_tests.test_inbox_header_names_room_and_thread },
   { "test_matrix_thread_takes_room_from_route", ctx_tests.test_matrix_thread_takes_room_from_route },
   { "test_matrix_thread_takes_a_mail_id", ctx_tests.test_matrix_thread_takes_a_mail_id },
@@ -7376,6 +7492,16 @@ end
 -- failure at the end instead of stopping the suite.
 local rx_failures = {}
 local function rx_check(name, test)
+  -- BMR_ONLY=substr[,substr...] runs only matching receive-rules tests. It is a
+  -- read-only selector for QA/debug runs; the full suite ignores it.
+  local only = os.getenv("BMR_ONLY")
+  if only and only ~= "" then
+    local selected = false
+    for part in only:gmatch("[^,]+") do
+      if name:find(part, 1, true) then selected = true break end
+    end
+    if not selected then return end
+  end
   local ok, err = pcall(test)
   if not ok then rx_failures[#rx_failures + 1] = name .. ": " .. tostring(err) end
 end
