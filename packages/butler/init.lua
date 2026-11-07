@@ -152,6 +152,38 @@ local function validate_runtime()
   end
 end
 
+-- The exact compiled Matrix request-client pair from this activation. A failed
+-- candidate may replace the shared butler.matrix table, so resume must use
+-- this pair, never a late lookup. A half-pair is a hard degraded state.
+local request_client_api, request_client_incomplete
+
+local function capture_request_client()
+  local matrix = host.butler and host.butler.matrix
+  local retire = matrix and matrix.request_retire
+  local resume = matrix and matrix.request_resume
+  local request = matrix and matrix.request
+  local request_json = matrix and matrix.request_json
+  if type(retire) == "function" and type(resume) == "function"
+      and type(request) == "function" and type(request_json) == "function" then
+    request_client_api = { retire = retire, resume = resume,
+      request = request, request_json = request_json }
+    request_client_incomplete = nil
+    host._butler_request_retire_failed = nil
+    host._butler_request_retire_blocked = nil
+    return true
+  end
+  request_client_api = nil
+  request_client_incomplete = (type(retire) == "function" or type(resume) == "function"
+    or type(request) == "function" or type(request_json) == "function")
+    and "request lifecycle API is incomplete" or nil
+  return false
+end
+
+local function request_client_present()
+  local matrix = host.butler and host.butler.matrix
+  return type(matrix) == "table" and type(matrix.request) == "function"
+end
+
 local function load_main()
   if main_loaded then return end
   if main_loading then return end
@@ -183,6 +215,7 @@ local function load_main()
   if not valid then error(validation_err, 0) end
   runtime_refusal_only = false
   main_loaded = true
+  capture_request_client()
 end
 
 -- A stopped handle does not prove the old writer is gone. A future resource
@@ -203,9 +236,142 @@ local function report_relay(outcome, reason)
   end
 end
 
+-- Final typed API: {ok, retired, queued_settled, cancel_failed, detail}.
+-- `cancel_failed` is a required dense array of unique roles, not a boolean:
+-- an empty array is clean; any role is a named, observable cancellation
+-- failure. pcall alone is not success.
+local REQUEST_CANCEL_ROLES = { refill = true, watchdog = true }
+
+local function request_cancel_roles(value)
+  if type(value) ~= "table" then return false, "cancel_failed is not an array" end
+  local seen, count = {}, 0
+  for key, role in pairs(value) do
+    if type(key) ~= "number" or key < 1 or key % 1 ~= 0 then
+      return false, "cancel_failed is not a dense array"
+    end
+    if type(role) ~= "string" or not REQUEST_CANCEL_ROLES[role] then
+      return false, "unknown cancel role"
+    end
+    if seen[role] then return false, "duplicate cancel role" end
+    seen[role] = true
+    count = count + 1
+  end
+  if count ~= #value then return false, "cancel_failed is sparse" end
+  for index = 1, count do
+    if value[index] == nil then return false, "cancel_failed is sparse" end
+  end
+  return true, count
+end
+
+local function request_result_ok(result, phase)
+  if type(result) ~= "table" then return false, "request result missing" end
+  if result.ok ~= true then return false, "request operation failed" end
+  local clean, roles = request_cancel_roles(result.cancel_failed)
+  if not clean then return false, "request cancellation state invalid" end
+  if roles ~= 0 then return false, "request timers not confirmed gone" end
+  if type(result.queued_settled) ~= "number" or result.queued_settled < 0
+      or result.queued_settled % 1 ~= 0 then
+    return false, "request queue count invalid"
+  end
+  if result.detail ~= nil and (type(result.detail) ~= "string" or #result.detail > 512) then
+    return false, "request detail invalid"
+  end
+  if phase == "retire" and result.retired ~= true then
+    return false, "request retire did not commit"
+  end
+  if phase == "resume" and result.retired ~= false then
+    return false, "request resume stayed retired"
+  end
+  return true
+end
+
+-- Bounded constants only: never echo a plugin result/detail or an exception
+-- into the diagnostic/doctor surface.
+local function request_fail(phase)
+  local why = phase == "retire" and "request retire failed" or "request resume failed"
+  host._butler_request_retire_failed = why
+  host._butler_request_retire_blocked = true
+  report_relay("degraded",
+    phase == "retire" and "request_retire_failed" or "request_resume_failed")
+  return false, why
+end
+
+local function request_pair_coherent()
+  if not request_client_api then return true end
+  local matrix = host.butler and host.butler.matrix
+  if type(matrix) ~= "table" then return false, "request matrix missing" end
+  if matrix.request ~= request_client_api.request
+      or matrix.request_json ~= request_client_api.request_json
+      or matrix.request_retire ~= request_client_api.retire
+      or matrix.request_resume ~= request_client_api.resume then
+    return false, "request pair changed"
+  end
+  return true
+end
+
+local function request_retire()
+  if not request_client_api then
+    if request_client_incomplete or request_client_present() then
+      return request_fail("retire")
+    end
+    return true
+  end
+  local called, result = pcall(request_client_api.retire)
+  if not called then return request_fail("retire") end
+  local ok, why = request_result_ok(result, "retire")
+  if not ok then
+    host._butler_request_retire_failed = why or "request retire failed"
+    host._butler_request_retire_blocked = true
+    report_relay("degraded", "request_retire_failed")
+    return false, host._butler_request_retire_failed
+  end
+  host._butler_request_retire_failed = nil
+  host._butler_request_retire_blocked = nil
+  return true
+end
+
+local function request_resume()
+  if not request_client_api then
+    if request_client_incomplete or request_client_present() then
+      return request_fail("resume")
+    end
+    return true
+  end
+  if host._butler_request_retire_blocked then
+    report_relay("degraded", "request_resume_failed")
+    return false, "request generation teardown incomplete"
+  end
+  local called, result = pcall(request_client_api.resume)
+  if not called then return request_fail("resume") end
+  local ok, why = request_result_ok(result, "resume")
+  if not ok then
+    host._butler_request_retire_failed = why or "request resume failed"
+    host._butler_request_retire_blocked = true
+    report_relay("degraded", "request_resume_failed")
+    return false, host._butler_request_retire_failed
+  end
+  local coherent, coherence_why = request_pair_coherent()
+  if not coherent then
+    host._butler_request_retire_failed = coherence_why or "request pair changed"
+    host._butler_request_retire_blocked = true
+    report_relay("degraded", "request_resume_failed")
+    return false, host._butler_request_retire_failed
+  end
+  host._butler_request_retire_failed = nil
+  host._butler_request_retire_blocked = nil
+  return true
+end
+
 local function start_matrix_relay()
   local matrix = host.butler and host.butler.matrix
   local relay = matrix and matrix.relay
+  -- A request generation that could not confirm both timer cancellations is
+  -- not a safe base for a new relay. Keep the admission barrier explicit.
+  if host._butler_request_retire_blocked then
+    host._butler_relay_restart_blocked = true
+    report_relay("degraded", "request_generation_incomplete")
+    return
+  end
   -- The marker is an admission barrier, not just a diagnostic: a relay that
   -- was running when the previous activation stopped may have a hidden writer.
   -- Only a positive owner proof may start again; a clean cold start has no
@@ -394,6 +560,7 @@ return {
   start = function(state)
     host._butler_state = state
     boot()
+    capture_request_client()
     stop_legacy_matrix_relay()
   end,
   -- Rollback restores this activation's registrations. Reinstall only resources
@@ -407,8 +574,17 @@ return {
         host._butler_dialog_originals = input_originals
         dialogs.install()
       end
-      -- Validate the restored graph before any resource can poll or send.
+      -- Validate the restored graph before activating the captured client:
+      -- an invalid bus/owner must not cause a request_resume side effect.
       validate_runtime()
+      local resumed, resume_why = request_resume()
+      if not resumed then
+        error("Matrix request resume failed: " .. tostring(resume_why), 0)
+      end
+      local coherent, coherence_why = request_pair_coherent()
+      if not coherent then
+        error("Matrix request pair is not coherent: " .. tostring(coherence_why), 0)
+      end
       -- A stopped handle is not proof the old writer is gone. Never restart a
       -- stopped snapshot without a positive owner/resource fence; the shared
       -- start path makes that an admission barrier and reports owner_unknown.
@@ -453,8 +629,18 @@ return {
     if controls and type(controls.stop_all) == "function" then pcall(controls.stop_all) end
     if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
     local matrix = host.butler and host.butler.matrix
-    if matrix and matrix.relay then pcall(matrix.relay.stop)
+    if matrix and matrix.relay and type(matrix.relay.stop) == "function" then
+      local stopped, stop_err = pcall(matrix.relay.stop)
+      if not stopped then
+        -- A relay stop that threw is not a verified stop; keep it visible.
+        report_relay("degraded", "relay_stop_failed")
+      end
     end
+    -- Stop the relay first, then retire the captured request generation: queued
+    -- pre-dispatch work settles once with the typed queue_retired/not_sent
+    -- result, dispatched requests stay untouched and nothing is replayed.
+    local retired, retire_why = request_retire()
+    host._butler_request_retire_failed = retired and nil or retire_why
     stop_legacy_matrix_relay()
     cancel_start_fallback()
   end,

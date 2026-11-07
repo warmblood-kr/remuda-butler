@@ -72,6 +72,31 @@ local function fixture(options)
     function() return emits end
 end
 
+local function request_fixture(retire_result)
+  local counters = { retire = 0, resume = 0, starts = 0 }
+  local relay = { instance = {} }
+  relay.start = function() counters.starts = counters.starts + 1; relay.instance = {} end
+  relay.stop = function() relay.instance = nil end
+  relay.owner_proven = function() return true end
+  local matrix = { relay = relay }
+  matrix.request = function() end
+  matrix.request_json = function() end
+  matrix.request_retire = function()
+    counters.retire = counters.retire + 1
+    return retire_result or { ok = true, retired = true, queued_settled = 0,
+      cancel_failed = {}, detail = "" }
+  end
+  matrix.request_resume = function()
+    counters.resume = counters.resume + 1
+    return { ok = true, retired = false, queued_settled = 0,
+      cancel_failed = {}, detail = "" }
+  end
+  local host = fixture({ relay = true, matrix = matrix })
+  host.http = { request = function() end }
+  host._butler_matrix_config = { config_path = "/tmp/butler-request-test" }
+  return host, relay, counters
+end
+
 local failures = 0
 local function test(name, body)
   local ok, why = pcall(body)
@@ -347,6 +372,36 @@ test("throwing readiness starts no resource and issues no transport", function()
   assert(counters.starts() == 1 and relay.instance ~= nil,
     "corrected reload did not recover the resource")
   assert(counters.http() == 0, "recovery issued transport before a send")
+end)
+
+test("an invalid restored graph does not activate the request client", function()
+  local host, _, counters = request_fixture()
+  local module = declaration(host)
+  local state = {}
+  module.commands(state)
+  module.start(state)
+  module.stop(state)
+  -- Same table captured at stop: the invalid bus identity reaches validation.
+  host._butler_notice_config.bus = {}
+  assert(not pcall(module.resume, state), "invalid graph resumed")
+  assert(counters.resume == 0, "request client was activated before validation")
+  assert(counters.starts == 0, "relay started on an invalid graph")
+end)
+
+test("a failed request retire blocks resume and relay start", function()
+  local host, _, counters = request_fixture({ ok = true, retired = true,
+    queued_settled = 1, cancel_failed = { "refill" }, detail = "refill cancel failed" })
+  local module = declaration(host)
+  local state = {}
+  module.commands(state)
+  module.start(state)
+  module.stop(state)
+  assert(host._butler_request_retire_blocked == true, "retire failure not marked")
+  assert(host._butler_request_retire_failed == "request timers not confirmed gone",
+    "unexpected bounded reason: " .. tostring(host._butler_request_retire_failed))
+  assert(not pcall(module.resume, state), "resume after failed retire succeeded")
+  assert(counters.resume == 0, "request resume ran despite failed retire")
+  assert(counters.starts == 0, "relay started after failed retire")
 end)
 
 os.exit(failures == 0 and 0 or 1)

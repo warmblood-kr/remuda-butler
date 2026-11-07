@@ -121,19 +121,50 @@ end)
 -- stop/resume into the failed functions.
 T.test("init stop/resume uses the captured request client across a replaced table", function()
   local log = {}
-  local fake = {
+  local fake
+  fake = {
     cli = { parse = function() end },
-    exec = function() end,
     schedules = {},
     butler = {},
     _butler_system = {},
   }
   fake.cancel = function() end
-  fake.butler.matrix = {
+  local mate = {
     relay = { stop = function() log[#log + 1] = "relay-stop" end },
-    request_retire = function() log[#log + 1] = "retire" end,
-    request_resume = function() log[#log + 1] = "resume" end,
+    request = function() end,
+    request_json = function() end,
   }
+  local good = {}
+  mate.request_retire = function()
+    log[#log + 1] = "retire"
+    return { ok = true, retired = true, queued_settled = 0, cancel_failed = {}, detail = "" }
+  end
+  mate.request_resume = function()
+    log[#log + 1] = "resume"
+    -- The provider republishes this generation's exact compiled pair.
+    mate.request, mate.request_json = good.request, good.request_json
+    mate.request_retire, mate.request_resume = good.retire, good.resume
+    return { ok = true, retired = false, queued_settled = 0, cancel_failed = {}, detail = "" }
+  end
+  good.request, good.request_json = mate.request, mate.request_json
+  good.retire, good.resume = mate.request_retire, mate.request_resume
+  fake.butler.matrix = mate
+  fake.exec = function(name)
+    if name == "butler/system" then fake._butler_system = {} return end
+    if name ~= "butler/main" then return end
+    local matrix = fake.butler.matrix
+    local notice = { _policy_bound = true }
+    fake.butler = {
+      dialogs = { install = function() end, stop = function() end },
+      native_dispatch = { admit = function() return { outcome = "not_written" } end },
+      send_policy = { readiness = function()
+        return { owner = notice, bound = true, transport_acquired = true }
+      end },
+      matrix = matrix,
+    }
+    fake._butler_notice = notice
+    fake._butler_notice_config = {}
+  end
   local globals = setmetatable({ remuda = fake }, { __index = _G })
   local env = setmetatable({}, { __index = globals })
   env._G = env
@@ -149,10 +180,10 @@ T.test("init stop/resume uses the captured request client across a replaced tabl
   module.stop({})
   T.eq(table.concat(log, ","), "relay-stop,retire",
     "stop fences the relay before retiring the captured client")
-  fake.butler.matrix = {
-    request_retire = function() log[#log + 1] = "BROKEN-retire" end,
-    request_resume = function() log[#log + 1] = "BROKEN-resume" end,
-  }
+  -- Break the public table in place after the capture: the captured pair must
+  -- still be the one stop/resume use, not the replaced functions.
+  fake.butler.matrix.request_retire = function() log[#log + 1] = "BROKEN-retire" end
+  fake.butler.matrix.request_resume = function() log[#log + 1] = "BROKEN-resume" end
   module.resume({})
   T.eq(table.concat(log, ","), "relay-stop,retire,resume",
     "resume uses the captured client, not the replaced table")
