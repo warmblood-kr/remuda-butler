@@ -87,7 +87,9 @@ next future minute (the current minute waits for the next day). For a longer ETA
 use a nearer checkpoint or state the date in your report. Remove it after reporting
 to keep the list clean, and replace it if the ETA moves. Skip it for short,
 sensitive, or no-report tasks; state the ETA in the first report instead. Only your
-own session is in scope; ask the owner for another session.
+own session is in scope; ask the owner for another session. This ETA reminder
+is a separate deadline check from the milestone self-check; neither requires
+reporting to a human at every firing.
 
 ## Scheduled reminders
 
@@ -149,7 +151,7 @@ Butler loaded these guidance layers in this order when this session started.
 A later layer adds to or overrides an earlier one. Edit the files named here,
 not this block: Butler rewrites it on every session start.
 
-- framework: built in, version sha256:c369c42ebc23
+- framework: built in, version sha256:a95933ad74a9
 - cluster: not available (this Remuda core has no cluster file store; update Remuda)
 - team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
 - personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)

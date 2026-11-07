@@ -1268,7 +1268,9 @@ next future minute (the current minute waits for the next day). For a longer ETA
 use a nearer checkpoint or state the date in your report. Remove it after reporting
 to keep the list clean, and replace it if the ETA moves. Skip it for short,
 sensitive, or no-report tasks; state the ETA in the first report instead. Only your
-own session is in scope; ask the owner for another session.
+own session is in scope; ask the owner for another session. This ETA reminder
+is a separate deadline check from the milestone self-check; neither requires
+reporting to a human at every firing.
 
 ## Scheduled reminders
 

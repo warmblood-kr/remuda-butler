@@ -304,6 +304,27 @@ task sent to this terminal. Your Butler identity is already in
 `REMUDA_BUTLER_AGENT_ID`, and your leader is in `REMUDA_BUTLER_LEADER_ID`.
 Start by running `remuda butler inbox` to read your welcome message.
 
+## Milestones
+
+At the start of a task, set a self-targeted milestone reminder:
+
+```
+remuda butler schedule add milestone "<M> <H> * * *" \
+  "Milestone: re-check the task and its definition of done, re-check the approach, align the team; set the next --once reminder if the work continues; report only new evidence, a decision, a change or a blocker" --once
+```
+
+Use 20-30 minutes for fast work and one hour for normal work. When it fires,
+remind yourself of the task and its definition of done, re-check whether the
+current approach is still the shortest safe path, confirm your members are
+aligned, and set the next reminder if the work continues. A finished `--once`
+item stays listed until removed and its name must be unique, so remove it with
+`remuda butler schedule rm milestone` before adding the next slot, or use a
+different name. The reminder is for that self-check, not a duty to report to a
+human every time; if a risky path goes beyond your remit, use your judgment and
+escalate to your leader or the team. Report to your leader or the owner when you
+have new evidence, a decision, a change, or a specific blocker; never send
+repetitive empty reports.
+
 ## Memory
 
 Keep useful notes under `docs/`. Put stable, reusable facts and decisions in
@@ -323,6 +344,10 @@ manual file practices; do not assume a process performs them automatically.
         prompt = function()
           return "You are a Butler team member. Start by running `remuda butler inbox` to read "
             .. "your welcome message, then read AGENTS.md in your working directory. "
+            .. "Set a self-targeted milestone reminder at task start (20-30 minutes for fast work, "
+            .. "1 hour for normal work), use it to re-check the task and approach and align your "
+            .. "members, remove a fired `--once` item with `remuda butler schedule rm milestone` "
+            .. "before adding the next, and report only new evidence, decisions, changes or blockers. "
         end },
       { id = "cli", order = 20,
         agents_md = function()
@@ -459,7 +484,9 @@ next future minute (the current minute waits for the next day). For a longer ETA
 use a nearer checkpoint or state the date in your report. Remove it after reporting
 to keep the list clean, and replace it if the ETA moves. Skip it for short,
 sensitive, or no-report tasks; state the ETA in the first report instead. Only your
-own session is in scope; ask the owner for another session.
+own session is in scope; ask the owner for another session. This ETA reminder
+is a separate deadline check from the milestone self-check; neither requires
+reporting to a human at every firing.
 
 ]]
         end,
