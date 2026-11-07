@@ -251,6 +251,12 @@ function matrix.reply(opts, on_done)
   if unverified then return error_result(done, unverified) end
   local route = relay:route_for_event(opts.event_id)
   local allowlisted_human_reply = route ~= nil and route.allowlisted_human == true
+  -- The turn-boundary exemption uses the exact delivered source, not the
+  -- inherited route flag: replying to our own sent event inside a human-root
+  -- thread must stay conservative. A relay from an older load has no helper,
+  -- so the boundary also stays conservative there.
+  local boundary_exempt = type(relay.event_targets_allowlisted_human) == "function"
+    and relay:event_targets_allowlisted_human(route and route.room_id or room, opts.event_id) == true
   local root = relay:thread_root_for_event(opts.event_id)
   local safe_room = terminal_safe(room)
   local shown_root = matrix.shown_event_id(root or opts.event_id)
@@ -272,7 +278,7 @@ function matrix.reply(opts, on_done)
         local slot, slot_error = matrix.take_post_slot()
         if not slot then return error_result(reply_done, slot_error) end
       end
-      relay:note_own_turn(room, root, allowlisted_human_reply)
+      relay:note_own_turn(room, root, boundary_exempt)
     end
     return send_chunks(room, opts.text, thread_relation(opts), reply_done, opts.txn_id)
   end)

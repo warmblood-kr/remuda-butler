@@ -1335,6 +1335,21 @@ function relay.new(options)
     end
   end
 
+  -- The owner-progress boundary exemption needs an exact delivered-source
+  -- identity: only the event that itself arrived as mail from an allowlisted
+  -- human counts. A route reached through last_reply_event_id (our own sent
+  -- event, or a later reply) inherits the human flag for guard/post-cap
+  -- compatibility but is not a human target for the turn boundary.
+  function instance:event_targets_allowlisted_human(room_id, event_id)
+    if type(event_id) ~= "string" then return false end
+    for _, route in pairs(state.routes) do
+      if route.event_id == event_id and (room_id == nil or route.room_id == room_id) then
+        return route.allowlisted_human == true
+      end
+    end
+    return false
+  end
+
   function instance:can_reply_to(event_id)
     for _, route in pairs(state.routes) do
       if route.event_id == event_id or route.last_reply_event_id == event_id then
@@ -1603,7 +1618,8 @@ function relay.new(options)
         txn_id = opts.txn_id or ("butler_" .. reply_id), attempts = 0, status = "pending",
         created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
       persist()
-      instance:note_own_turn(room, root, route.allowlisted_human == true)
+      instance:note_own_turn(room, root,
+        instance:event_targets_allowlisted_human(room, route.event_id))
     end
     instance._send_reply(reply_id, callback)
     return { cancel = function() end }

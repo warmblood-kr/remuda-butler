@@ -624,7 +624,10 @@ Butler starts a new turn. The Butler's own replies to an agent or unknown
 target neither increment nor reset the peer counter but are a boundary: the
 other Butler's next message is a new turn. A reply whose target is a verified
 person on the allowlist is owner-directed progress, not a peer boundary: it
-does not change, increment or reset the peer count. Replies to verified
+does not change, increment or reset the peer count. That exemption needs the
+exact delivered event: a reply to our own sent event inside a human-root
+thread, or to an agent in that thread, keeps the conservative boundary. Replies
+to verified
 people on the allowlist remain available even when peer replies are paused.
 These counters are held
 in memory and reset when the daemon restarts. `b2b_max_turns` and

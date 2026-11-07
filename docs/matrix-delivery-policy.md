@@ -106,5 +106,8 @@ suppression persisted across restart, and reevaluation on a retained instance.
 Relay coverage adds unfollow behavior in every mode (all-mode delivery,
 mentions-followed mention-only, none), the tombstone that blocks an implicit
 re-follow and survives restart, explicit-follow clearing, durable deduplication
-of a filtered reply, and a turn guard that counts only exchanges between
-different agents while an owner-directed reply is not a peer boundary.
+of a filtered reply, a turn guard that counts only exchanges between different
+agents, and an owner-directed reply that is not a peer boundary only when the
+target is the exact delivered allowlisted-human event (a route that inherited
+the flag through `last_reply_event_id`, or a rebuilt route without it, stays
+conservative).
