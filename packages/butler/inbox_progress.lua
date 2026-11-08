@@ -176,7 +176,7 @@ local function schema_ready(self)
     "SELECT MAX(version) AS version FROM _remuda_migrations", {})
   if not versions then return nil, "schema_unavailable" end
   local version = versions[1] and tonumber(versions[1].version) or 0
-  if version > 3 then return nil, "schema_too_new" end
+  if version > 4 then return nil, "schema_too_new" end
   return true
 end
 
@@ -185,66 +185,70 @@ local function add_delta(self, root, recipient, generation, op)
     local statement, params
     if op.resent ~= nil then
       statement = "INSERT OR IGNORE INTO progress_deliveries "
-        .. "(recipient, generation, message_id, seq, resent_json) VALUES (?, ?, ?, ?, ?)"
-      params = { recipient, generation, op.message_id, op.seq, op.resent }
+        .. "(root, recipient, generation, message_id, seq, resent_json) "
+        .. "VALUES (?, ?, ?, ?, ?, ?)"
+      params = { root, recipient, generation, op.message_id, op.seq, op.resent }
     else
       statement = "INSERT OR IGNORE INTO progress_deliveries "
-        .. "(recipient, generation, message_id, seq) VALUES (?, ?, ?, ?)"
-      params = { recipient, generation, op.message_id, op.seq }
+        .. "(root, recipient, generation, message_id, seq) VALUES (?, ?, ?, ?, ?)"
+      params = { root, recipient, generation, op.message_id, op.seq }
     end
     local inserted, why = checked_exec(self.db, statement, params)
     if not inserted then return nil, "sql: " .. tostring(why) end
     local owner = checked_query(self.db,
       "SELECT message_id FROM progress_deliveries "
-        .. "WHERE recipient = ? AND generation = ? AND seq = ?",
-      { recipient, generation, op.seq })
+        .. "WHERE root = ? AND recipient = ? AND generation = ? AND seq = ?",
+      { root, recipient, generation, op.seq })
     if not owner or #owner == 0 or owner[1].message_id ~= op.message_id then
       return nil, "staging_conflict"
     end
     if op.resent ~= nil then
       local updated, update_why = checked_exec(self.db,
         "UPDATE progress_deliveries SET resent_json = ? "
-          .. "WHERE recipient = ? AND generation = ? AND message_id = ?",
-        { op.resent, recipient, generation, op.message_id })
+          .. "WHERE root = ? AND recipient = ? AND generation = ? AND message_id = ?",
+        { op.resent, root, recipient, generation, op.message_id })
       if not updated then return nil, "sql: " .. tostring(update_why) end
     end
     return true
   end
   if op.op == "read" then
     local inserted, why = checked_exec(self.db,
-      "INSERT OR IGNORE INTO progress_reads (recipient, generation, message_id) "
-        .. "VALUES (?, ?, ?)", { recipient, generation, op.message_id })
+      "INSERT OR IGNORE INTO progress_reads "
+        .. "(root, recipient, generation, message_id) VALUES (?, ?, ?, ?)",
+      { root, recipient, generation, op.message_id })
     if not inserted then return nil, "sql: " .. tostring(why) end
     return true
   end
   if op.op == "metadata" then
     local delivery = checked_query(self.db,
       "SELECT 1 AS present FROM progress_deliveries "
-        .. "WHERE recipient = ? AND generation = ? AND message_id = ?",
-      { recipient, generation, op.message_id })
+        .. "WHERE root = ? AND recipient = ? AND generation = ? AND message_id = ?",
+      { root, recipient, generation, op.message_id })
     if not delivery then return nil, "unavailable" end
     if #delivery == 0 then return nil, "not_committed" end
     local inserted, why = checked_exec(self.db,
       "INSERT OR REPLACE INTO progress_metadata "
-        .. "(recipient, generation, message_id, envelope_ref, object_ref, metadata) "
-        .. "VALUES (?, ?, ?, ?, ?, ?)",
-      { recipient, generation, op.message_id, op.envelope_ref, op.object_ref, op.metadata })
+        .. "(root, recipient, generation, message_id, envelope_ref, object_ref, metadata) "
+        .. "VALUES (?, ?, ?, ?, ?, ?, ?)",
+      { root, recipient, generation, op.message_id, op.envelope_ref, op.object_ref,
+        op.metadata })
     if not inserted then return nil, "sql: " .. tostring(why) end
     return true
   end
   if op.op == "dependency" then
     local inserted, why = checked_exec(self.db,
       "INSERT OR REPLACE INTO progress_dependencies "
-        .. "(recipient, generation, owner, role, path) VALUES (?, ?, ?, ?, ?)",
-      { recipient, generation, op.owner, op.role, op.path })
+        .. "(root, recipient, generation, owner, role, path) "
+        .. "VALUES (?, ?, ?, ?, ?, ?)",
+      { root, recipient, generation, op.owner, op.role, op.path })
     if not inserted then return nil, "sql: " .. tostring(why) end
     return true
   end
   if op.op == "fileproof" then
     local rows = checked_query(self.db,
       "SELECT present, bytes, sha256 FROM progress_fileproofs "
-        .. "WHERE recipient = ? AND generation = ? AND pass = ? AND path = ?",
-      { recipient, generation, op.pass, op.path })
+        .. "WHERE root = ? AND recipient = ? AND generation = ? AND pass = ? AND path = ?",
+      { root, recipient, generation, op.pass, op.path })
     if not rows then return nil, "unavailable" end
     if #rows > 0 then
       local row = rows[1]
@@ -255,17 +259,19 @@ local function add_delta(self, root, recipient, generation, op)
     end
     local inserted, why = checked_exec(self.db,
       "INSERT INTO progress_fileproofs "
-        .. "(recipient, generation, pass, path, present, bytes, sha256) "
-        .. "VALUES (?, ?, ?, ?, ?, ?, ?)",
-      { recipient, generation, op.pass, op.path, op.present and 1 or 0, op.bytes, op.sha256 })
+        .. "(root, recipient, generation, pass, path, present, bytes, sha256) "
+        .. "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+      { root, recipient, generation, op.pass, op.path, op.present and 1 or 0,
+        op.bytes, op.sha256 })
     if not inserted then return nil, "sql: " .. tostring(why) end
     return true
   end
   if op.op == "chunkproof" then
     local rows = checked_query(self.db,
       "SELECT bytes, sha256, eof FROM progress_chunkproofs "
-        .. "WHERE recipient = ? AND generation = ? AND pass = ? AND path = ? AND offset = ?",
-      { recipient, generation, op.pass, op.path, op.offset })
+        .. "WHERE root = ? AND recipient = ? AND generation = ? AND pass = ? "
+        .. "AND path = ? AND offset = ?",
+      { root, recipient, generation, op.pass, op.path, op.offset })
     if not rows then return nil, "unavailable" end
     if #rows > 0 then
       local row = rows[1]
@@ -276,15 +282,15 @@ local function add_delta(self, root, recipient, generation, op)
     end
     local inserted, why = checked_exec(self.db,
       "INSERT INTO progress_chunkproofs "
-        .. "(recipient, generation, pass, path, offset, bytes, sha256, eof) "
-        .. "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-      { recipient, generation, op.pass, op.path, op.offset, op.bytes, op.sha256,
-        op.eof and 1 or 0 })
+        .. "(root, recipient, generation, pass, path, offset, bytes, sha256, eof) "
+        .. "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      { root, recipient, generation, op.pass, op.path, op.offset, op.bytes,
+        op.sha256, op.eof and 1 or 0 })
     if not inserted then return nil, "sql: " .. tostring(why) end
     return true
   end
   if op.op == "ready" then
-    return self:ready(self.root, recipient, generation, op)
+    return self:ready(root, recipient, generation, op)
   end
   if op.op == "invalid" then
     -- The generation is marked unusable by the cursor phase that is committed
@@ -300,53 +306,54 @@ function Progress:ready(root, recipient, generation, op)
     if not rows then return nil, err end
     return tonumber(rows[1] and rows[1].n) or 0
   end
-  local deliveries, why = count(
-    "SELECT COUNT(*) AS n FROM progress_deliveries WHERE recipient = ? AND generation = ?",
-    { recipient, generation })
-  if not deliveries then return nil, "unavailable" end
+  local scope = { root, recipient, generation }
   local missing_metadata = count(
     "SELECT COUNT(*) AS n FROM progress_deliveries d "
-      .. "LEFT JOIN progress_metadata m ON m.recipient = d.recipient "
-      .. "AND m.generation = d.generation AND m.message_id = d.message_id "
-      .. "WHERE d.recipient = ? AND d.generation = ? AND m.message_id IS NULL",
-    { recipient, generation })
+      .. "LEFT JOIN progress_metadata m ON m.root = d.root "
+      .. "AND m.recipient = d.recipient AND m.generation = d.generation "
+      .. "AND m.message_id = d.message_id "
+      .. "WHERE d.root = ? AND d.recipient = ? AND d.generation = ? "
+      .. "AND m.message_id IS NULL", scope)
   if not missing_metadata then return nil, "unavailable" end
   if missing_metadata > 0 then return nil, "not_committed" end
   if op.first_chain ~= op.second_chain then return nil, "stale_generation" end
-  local proofs1, proofs2
-  proofs1, why = count("SELECT COUNT(*) AS n FROM progress_fileproofs "
-    .. "WHERE recipient = ? AND generation = ? AND pass = 1", { recipient, generation })
+  local proofs1 = count("SELECT COUNT(*) AS n FROM progress_fileproofs "
+    .. "WHERE root = ? AND recipient = ? AND generation = ? AND pass = 1", scope)
   if not proofs1 then return nil, "unavailable" end
-  proofs2, why = count("SELECT COUNT(*) AS n FROM progress_fileproofs "
-    .. "WHERE recipient = ? AND generation = ? AND pass = 2", { recipient, generation })
+  local proofs2 = count("SELECT COUNT(*) AS n FROM progress_fileproofs "
+    .. "WHERE root = ? AND recipient = ? AND generation = ? AND pass = 2", scope)
   if not proofs2 then return nil, "unavailable" end
   if proofs1 == 0 or proofs1 ~= proofs2 then return nil, "not_committed" end
   -- Both passes must describe the same exact path set and bytes, not just the
   -- same number of rows.
   local mismatched = count(
     "SELECT COUNT(*) AS n FROM progress_fileproofs a "
-      .. "LEFT JOIN progress_fileproofs b ON b.recipient = a.recipient "
-      .. "AND b.generation = a.generation AND b.path = a.path AND b.pass = 2 "
-      .. "WHERE a.recipient = ? AND a.generation = ? AND a.pass = 1 "
+      .. "LEFT JOIN progress_fileproofs b ON b.root = a.root "
+      .. "AND b.recipient = a.recipient AND b.generation = a.generation "
+      .. "AND b.path = a.path AND b.pass = 2 "
+      .. "WHERE a.root = ? AND a.recipient = ? AND a.generation = ? AND a.pass = 1 "
       .. "AND (b.path IS NULL OR b.present <> a.present OR b.bytes <> a.bytes "
-      .. "OR b.sha256 <> a.sha256)", { recipient, generation })
+      .. "OR b.sha256 <> a.sha256)", scope)
   if not mismatched then return nil, "unavailable" end
   if mismatched > 0 then return nil, "stale_generation" end
   local second_only = count(
     "SELECT COUNT(*) AS n FROM progress_fileproofs a "
-      .. "LEFT JOIN progress_fileproofs b ON b.recipient = a.recipient "
-      .. "AND b.generation = a.generation AND b.path = a.path AND b.pass = 1 "
-      .. "WHERE a.recipient = ? AND a.generation = ? AND a.pass = 2 "
-      .. "AND b.path IS NULL", { recipient, generation })
+      .. "LEFT JOIN progress_fileproofs b ON b.root = a.root "
+      .. "AND b.recipient = a.recipient AND b.generation = a.generation "
+      .. "AND b.path = a.path AND b.pass = 1 "
+      .. "WHERE a.root = ? AND a.recipient = ? AND a.generation = ? AND a.pass = 2 "
+      .. "AND b.path IS NULL", scope)
   if not second_only then return nil, "unavailable" end
   if second_only > 0 then return nil, "stale_generation" end
   for pass = 1, 2 do
     local missing = count(
       "SELECT COUNT(*) AS n FROM progress_dependencies d "
-        .. "LEFT JOIN progress_fileproofs f ON f.recipient = d.recipient "
-        .. "AND f.generation = d.generation AND f.path = d.path AND f.pass = ? "
-        .. "WHERE d.recipient = ? AND d.generation = ? AND f.path IS NULL",
-      { pass, recipient, generation })
+        .. "LEFT JOIN progress_fileproofs f ON f.root = d.root "
+        .. "AND f.recipient = d.recipient AND f.generation = d.generation "
+        .. "AND f.path = d.path AND f.pass = ? "
+        .. "WHERE d.root = ? AND d.recipient = ? AND d.generation = ? "
+        .. "AND f.path IS NULL",
+      { pass, root, recipient, generation })
     if not missing then return nil, "unavailable" end
     if missing > 0 then return nil, "not_committed" end
   end
@@ -492,22 +499,22 @@ local function scan(self, root, recipient, generation, kind, after_key, limit)
     rows, err = checked_query(self.db,
       "SELECT d.message_id, d.seq, d.resent_json, m.envelope_ref, m.object_ref, m.metadata "
         .. "FROM progress_deliveries d LEFT JOIN progress_metadata m "
-        .. "ON m.recipient = d.recipient AND m.generation = d.generation "
-        .. "AND m.message_id = d.message_id "
-        .. "WHERE d.recipient = ? AND d.generation = ? AND d.seq > ? "
-        .. "ORDER BY d.seq LIMIT ?", { recipient, generation, after, fetch })
+        .. "ON m.root = d.root AND m.recipient = d.recipient "
+        .. "AND m.generation = d.generation AND m.message_id = d.message_id "
+        .. "WHERE d.root = ? AND d.recipient = ? AND d.generation = ? AND d.seq > ? "
+        .. "ORDER BY d.seq LIMIT ?", { root, recipient, generation, after, fetch })
   elseif kind == "reads" then
     local after = type(after_key) == "string" and after_key or ""
     rows, err = checked_query(self.db,
       "SELECT message_id FROM progress_reads "
-        .. "WHERE recipient = ? AND generation = ? AND message_id > ? "
-        .. "ORDER BY message_id LIMIT ?", { recipient, generation, after, fetch })
+        .. "WHERE root = ? AND recipient = ? AND generation = ? AND message_id > ? "
+        .. "ORDER BY message_id LIMIT ?", { root, recipient, generation, after, fetch })
   elseif kind == "dependencies" then
     local after = type(after_key) == "string" and after_key or ""
     rows, err = checked_query(self.db,
       "SELECT DISTINCT path FROM progress_dependencies "
-        .. "WHERE recipient = ? AND generation = ? AND path > ? ORDER BY path LIMIT ?",
-      { recipient, generation, after, fetch })
+        .. "WHERE root = ? AND recipient = ? AND generation = ? AND path > ? "
+        .. "ORDER BY path LIMIT ?", { root, recipient, generation, after, fetch })
   elseif kind == "fileproofs" then
     local after_path, after_pass = "", 0
     if type(after_key) == "string" then
@@ -516,10 +523,10 @@ local function scan(self, root, recipient, generation, kind, after_key, limit)
     end
     rows, err = checked_query(self.db,
       "SELECT pass, path, present, bytes, sha256 FROM progress_fileproofs "
-        .. "WHERE recipient = ? AND generation = ? "
+        .. "WHERE root = ? AND recipient = ? AND generation = ? "
         .. "AND (path > ? OR (path = ? AND pass > ?)) "
         .. "ORDER BY path, pass LIMIT ?",
-      { recipient, generation, after_path, after_path, after_pass, fetch })
+      { root, recipient, generation, after_path, after_path, after_pass, fetch })
   elseif kind == "chunkproofs" then
     local after_path, after_pass, after_offset = "", 0, 0
     if type(after_key) == "string" then
@@ -528,10 +535,10 @@ local function scan(self, root, recipient, generation, kind, after_key, limit)
     end
     rows, err = checked_query(self.db,
       "SELECT pass, path, offset, bytes, sha256, eof FROM progress_chunkproofs "
-        .. "WHERE recipient = ? AND generation = ? "
+        .. "WHERE root = ? AND recipient = ? AND generation = ? "
         .. "AND (path > ? OR (path = ? AND (pass > ? OR (pass = ? AND offset > ?)))) "
         .. "ORDER BY path, pass, offset LIMIT ?",
-      { recipient, generation, after_path, after_path, after_pass, after_pass,
+      { root, recipient, generation, after_path, after_path, after_pass, after_pass,
         after_offset, fetch })
   end
   if not rows then return fail("unavailable", kind, err) end
@@ -576,30 +583,31 @@ local function get(self, root, recipient, generation, kind, key)
     rows, err = checked_query(self.db,
       "SELECT d.message_id, d.seq, d.resent_json, m.envelope_ref, m.object_ref, m.metadata "
         .. "FROM progress_deliveries d LEFT JOIN progress_metadata m "
-        .. "ON m.recipient = d.recipient AND m.generation = d.generation "
-        .. "AND m.message_id = d.message_id "
-        .. "WHERE d.recipient = ? AND d.generation = ? AND d.message_id = ?",
-      { recipient, generation, tostring(key) })
+        .. "ON m.root = d.root AND m.recipient = d.recipient "
+        .. "AND m.generation = d.generation AND m.message_id = d.message_id "
+        .. "WHERE d.root = ? AND d.recipient = ? AND d.generation = ? AND d.message_id = ?",
+      { root, recipient, generation, tostring(key) })
   elseif kind == "read" then
     rows, err = checked_query(self.db,
       "SELECT message_id FROM progress_reads "
-        .. "WHERE recipient = ? AND generation = ? AND message_id = ?",
-      { recipient, generation, tostring(key) })
+        .. "WHERE root = ? AND recipient = ? AND generation = ? AND message_id = ?",
+      { root, recipient, generation, tostring(key) })
   elseif kind == "dependency" then
     rows, err = checked_query(self.db,
       "SELECT owner, role, path FROM progress_dependencies "
-        .. "WHERE recipient = ? AND generation = ? AND owner = ? AND role = ?",
-      { recipient, generation, tostring(key.owner), tostring(key.role) })
+        .. "WHERE root = ? AND recipient = ? AND generation = ? AND owner = ? AND role = ?",
+      { root, recipient, generation, tostring(key.owner), tostring(key.role) })
   elseif kind == "fileproof" then
     rows, err = checked_query(self.db,
       "SELECT present, bytes, sha256 FROM progress_fileproofs "
-        .. "WHERE recipient = ? AND generation = ? AND pass = ? AND path = ?",
-      { recipient, generation, key.pass, tostring(key.path) })
+        .. "WHERE root = ? AND recipient = ? AND generation = ? AND pass = ? AND path = ?",
+      { root, recipient, generation, key.pass, tostring(key.path) })
   elseif kind == "chunkproof" then
     rows, err = checked_query(self.db,
       "SELECT bytes, sha256, eof FROM progress_chunkproofs "
-        .. "WHERE recipient = ? AND generation = ? AND pass = ? AND path = ? AND offset = ?",
-      { recipient, generation, key.pass, tostring(key.path), key.offset })
+        .. "WHERE root = ? AND recipient = ? AND generation = ? AND pass = ? "
+        .. "AND path = ? AND offset = ?",
+      { root, recipient, generation, key.pass, tostring(key.path), key.offset })
   end
   if not rows then return fail("unavailable", kind, err) end
   if #rows == 0 then return { state = "absent" } end
