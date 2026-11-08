@@ -121,6 +121,68 @@ CREATE TABLE IF NOT EXISTS relay_import_source (
   verified_count INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS relay_import_source_status ON relay_import_source(status);
+
+-- Durable bounded ingest. relay_source_capture is the immutable original
+-- bytes and identity admitted once; relay_ingest_progress is mutable staging
+-- metadata advanced one bounded unit per public call.
+CREATE TABLE IF NOT EXISTS relay_source_capture (
+  ingest_id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('source','sidecar')),
+  role TEXT NOT NULL,
+  stamp TEXT NOT NULL DEFAULT '',
+  bytes INTEGER NOT NULL,
+  chunk_size INTEGER NOT NULL,
+  raw TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(store_id, source_id, kind)
+);
+CREATE TABLE IF NOT EXISTS relay_ingest_progress (
+  ingest_id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('source','sidecar')),
+  phase TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  owner_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  byte_offset INTEGER NOT NULL DEFAULT 0,
+  chunk_index INTEGER NOT NULL DEFAULT 0,
+  digest_hex TEXT NOT NULL DEFAULT '',
+  chunk_size INTEGER NOT NULL,
+  cursor_field TEXT,
+  cursor_key TEXT,
+  cursor_started INTEGER NOT NULL DEFAULT 0,
+  scan_offset INTEGER NOT NULL DEFAULT 0,
+  line_start INTEGER NOT NULL DEFAULT 0,
+  apply_offset INTEGER NOT NULL DEFAULT 0,
+  applied_count INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL,
+  block_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS relay_ingest_progress_state
+  ON relay_ingest_progress(store_id,state);
+CREATE TABLE IF NOT EXISTS relay_source_ack_range (
+  ingest_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  start_byte INTEGER NOT NULL,
+  end_byte INTEGER NOT NULL,
+  PRIMARY KEY(ingest_id,ordinal)
+);
+DROP TRIGGER IF EXISTS relay_capture_no_update;
+CREATE TRIGGER IF NOT EXISTS relay_capture_no_update BEFORE UPDATE ON relay_source_capture
+BEGIN SELECT RAISE(ABORT,'capture_immutable'); END;
+DROP TRIGGER IF EXISTS relay_capture_no_delete;
+CREATE TRIGGER IF NOT EXISTS relay_capture_no_delete BEFORE DELETE ON relay_source_capture
+BEGIN SELECT RAISE(ABORT,'capture_immutable'); END;
+DROP TRIGGER IF EXISTS relay_capture_no_duplicate;
+CREATE TRIGGER IF NOT EXISTS relay_capture_no_duplicate BEFORE INSERT ON relay_source_capture
+WHEN EXISTS(SELECT 1 FROM relay_source_capture c WHERE c.store_id=NEW.store_id
+  AND c.source_id=NEW.source_id AND c.kind=NEW.kind)
+BEGIN SELECT RAISE(ABORT,'capture_immutable'); END;
 CREATE TABLE IF NOT EXISTS relay_source_fields (
   source_id TEXT NOT NULL,
   path TEXT NOT NULL,
@@ -349,7 +411,7 @@ BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1
 ]]
 
 local METHODS = {
-  'import_prepare', 'import_source', 'import_batch', 'import_acks',
+  'import_prepare', 'import_source', 'import_batch', 'import_acks', 'ingest_step',
   'verify_import', 'activate', 'writer', 'cursor', 'accept_batch',
   'dispatch_page', 'complete_dispatch', 'get', 'put', 'delete', 'page',
   'resolve_operation', 'reply_dispatch_page', 'claim_reply', 'complete_reply',
@@ -359,7 +421,7 @@ local METHODS = {
 -- Bump whenever the verification semantics change. A READY certificate and
 -- activation are bound to this constant through relay_proof_state, so a cert
 -- produced by an older verifier cannot be reused even if triggers match.
-local PROOF_VERSION = 4
+local PROOF_VERSION = 5
 local SCHEMA_VERSION = 1
 
 local KNOWN = {
@@ -399,6 +461,19 @@ end
 local function identifier(value)
   return type(value) == 'string' and #value > 0 and #value <= 256
     and not value:find('[%c"\\]')
+end
+
+-- JSON object keys are not all Lua identifier-safe. Keep the historical short
+-- path for ordinary keys, and quote everything else so empty, dotted, slash or
+-- escaped keys still address the same field.
+local function json_key(key)
+  return '"' .. tostring(key):gsub('\\', '\\\\'):gsub('"', '\\"') .. '"'
+end
+
+local function json_path(key)
+  local text = tostring(key)
+  if text:match('^[%a_][%w_]*$') then return '$.' .. text end
+  return '$.' .. json_key(text)
 end
 
 local function validate(opts)
@@ -894,8 +969,8 @@ function M.open(opts)
   end
 
   local function record_witness(source_id, kind, role, stamp, bytes, raw_sha256,
-      root_digest)
-    local chunk_size = limits.digest_chunk_bytes
+      root_digest, chunk_size)
+    chunk_size = tonumber(chunk_size) or limits.digest_chunk_bytes
     local witness_id, why = witness_digest(store.store_id, source_id, kind,
       role, stamp, bytes, raw_sha256, root_digest, chunk_size)
     if type(witness_id) ~= 'string' then return nil, why or 'witness_digest' end
@@ -1052,21 +1127,31 @@ function M.open(opts)
   end
 
   local function add_unit(source_id, root_field, kind, parent_key, nested, expected)
+    local existing, existing_why = query(db,
+      'SELECT unit_id FROM relay_import_units WHERE source_id=? AND root_field=? ' ..
+        'AND parent_key=? AND nested=? ORDER BY unit_id LIMIT 1',
+      { source_id, root_field, parent_key, nested })
+    if not existing then return nil, existing_why end
+    if existing[1] then return existing[1].unit_id end
     local added, why = exec(db,
       'INSERT INTO relay_import_units (source_id,root_field,kind,parent_key,nested,expected) ' ..
         'VALUES (?,?,?,?,?,?)',
       { source_id, root_field, kind, parent_key, nested, expected })
     if added ~= 1 then return nil, why end
-    local rows, id_why = query(db, 'SELECT last_insert_rowid() AS id')
+    local rows, id_why = query(db,
+      'SELECT unit_id FROM relay_import_units WHERE source_id=? AND root_field=? ' ..
+        'AND parent_key=? AND nested=? ORDER BY unit_id DESC LIMIT 1',
+      { source_id, root_field, parent_key, nested })
     if not rows then return nil, id_why end
-    return rows[1].id
+    if not rows[1] then return nil, 'unit_missing' end
+    return rows[1].unit_id
   end
 
   -- Freeze the bounded extraction order once, then import from the queue. This
   -- avoids re-scanning a 110k-element array for every 64-row page and keeps
   -- the batch query independent of source length.
   local function populate_queue(source_id, unit_id, root_field, kind, parent_key, nested)
-    local path = '$.' .. root_field
+    local path = json_path(root_field)
     local chunk = 16384
     local offset = 0
     local total = 0
@@ -1126,6 +1211,535 @@ function M.open(opts)
     return total
   end
 
+  -- ---------------------------------------------------------------------
+  -- Bounded, restartable original-source ingest.
+  --
+  -- Admission captures the exact original bytes once in an immutable row and
+  -- creates mutable progress. Every later public call advances exactly one
+  -- phase unit: one <=64KiB hash chunk, the separate root hash, one native JSON
+  -- summary, one root field or room, one <=64KiB ack scan, or one <=64-entry
+  -- ack apply. No call hashes or decodes the whole source in Lua.
+  local INGEST_STATE = {
+    HASH = 'hashing', ROOT_HASH = 'hashing',
+    JSON_ROOT = 'validating', JSON_DUPLICATES = 'validating',
+    DISCOVER_FIELD = 'discovering', DISCOVER_ROOM = 'discovering',
+    ACK_SCAN = 'applying', ACK_APPLY = 'applying',
+    READY = 'ready', BLOCKED = 'blocked',
+  }
+  local DIGEST_HEX_BYTES = 32768
+
+  local function ingest_id_for(kind, source_id)
+    return 'ingest:' .. kind .. ':' .. store.store_id .. ':' .. source_id
+  end
+
+  local function ingest_receipt(progress, source_id)
+    return {
+      accepted = true,
+      done = progress.phase == 'READY',
+      state = INGEST_STATE[progress.phase] or 'blocked',
+      source_id = source_id or progress.source_id,
+      ingest_id = progress.ingest_id,
+      revision = tonumber(progress.revision) or 0,
+      phase = progress.phase,
+    }
+  end
+
+  local function ingest_progress_row(ingest_id)
+    local rows, why = query(db,
+      'SELECT ingest_id,store_id,source_id,kind,phase,revision,owner_id,epoch,' ..
+        'byte_offset,chunk_index,digest_hex,chunk_size,cursor_field,cursor_key,' ..
+        'cursor_started,scan_offset,line_start,apply_offset,applied_count,state,' ..
+        'block_reason FROM relay_ingest_progress WHERE ingest_id=?', { ingest_id })
+    if not rows then return nil, why end
+    return rows[1] or false
+  end
+
+  local function capture_row(ingest_id)
+    local rows, why = query(db,
+      'SELECT ingest_id,store_id,source_id,kind,role,stamp,bytes,chunk_size ' ..
+        'FROM relay_source_capture WHERE ingest_id=?', { ingest_id })
+    if not rows then return nil, why end
+    return rows[1] or false
+  end
+
+  local function ingest_budget(options)
+    if options == nil then options = {} end
+    if type(options) ~= 'table' then return nil, 'options' end
+    local function pick(name, default, ceiling)
+      local value = options[name]
+      if value == nil then return default end
+      if type(value) ~= 'number' or value % 1 ~= 0 or value < 1 or value > ceiling then
+        return nil
+      end
+      return value
+    end
+    local max_rows = pick('max_rows', 64, 64)
+    local max_bytes = pick('max_bytes', limits.record_bytes, limits.record_bytes)
+    local max_nodes = pick('max_nodes', 8192, 8192)
+    if not max_rows or not max_bytes or not max_nodes then return nil, 'budget' end
+    return { max_rows = max_rows, max_bytes = max_bytes, max_nodes = max_nodes }
+  end
+
+  local function ingest_hash(p, capture, budget)
+    local bytes = tonumber(capture.bytes) or 0
+    local offset = tonumber(p.byte_offset) or 0
+    if bytes == 0 or offset >= bytes then return { phase = 'ROOT_HASH' } end
+    local chunk_size = tonumber(capture.chunk_size) or 0
+    if chunk_size < 1 or chunk_size > limits.digest_chunk_bytes
+        or chunk_size ~= tonumber(p.chunk_size) then
+      return nil, 'digest_budget'
+    end
+    local take = math.min(chunk_size, bytes - offset)
+    if budget.max_bytes < take then return nil, 'budget_too_small' end
+    local rows, why = query(db,
+      'SELECT substr(CAST(raw AS BLOB),?,?) AS chunk,' ..
+        'length(CAST(raw AS BLOB)) AS bytes FROM relay_source_capture WHERE ingest_id=?',
+      { offset + 1, take, p.ingest_id })
+    if not rows then return nil, 'capture: ' .. tostring(why) end
+    local row = rows[1]
+    if not row or row.chunk == nil or #row.chunk ~= take
+        or (tonumber(row.bytes) or 0) ~= bytes then
+      return nil, 'capture_changed'
+    end
+    local hex, hex_why = invoke(opts.digest.sha256, row.chunk)
+    if type(hex) ~= 'string' then return nil, 'digest_failed: ' .. tostring(hex_why) end
+    local digest_hex = p.digest_hex or ''
+    if #digest_hex + #hex > DIGEST_HEX_BYTES then return nil, 'digest_budget' end
+    local next_offset = offset + take
+    return {
+      phase = next_offset >= bytes and 'ROOT_HASH' or 'HASH',
+      byte_offset = next_offset,
+      chunk_index = (tonumber(p.chunk_index) or 0) + 1,
+      digest_hex = digest_hex .. hex,
+      bytes = take,
+    }
+  end
+
+  local function ingest_root(p, capture, budget)
+    local bytes = tonumber(capture.bytes) or 0
+    local chunk_size = tonumber(capture.chunk_size) or 0
+    local expected = bytes == 0 and 0 or math.ceil(bytes / chunk_size)
+    local parts = p.digest_hex or ''
+    if #parts ~= expected * 64 then return nil, 'digest_budget' end
+    local input = 'butler-relay-source-v1\0' .. tostring(bytes) .. '\0' .. parts
+    if #input > DIGEST_HEX_BYTES + 64 then return nil, 'digest_budget' end
+    if budget.max_bytes < #input then return nil, 'budget_too_small' end
+    local root, root_why = invoke(opts.digest.sha256, input)
+    if type(root) ~= 'string' then return nil, 'digest_failed: ' .. tostring(root_why) end
+    local auth_now, auth_why = current_auth()
+    if not auth_now then return nil, 'authority: ' .. tostring(auth_why) end
+    if capture.kind == 'source' then
+      local status = capture.role == 'primary' and 'importing' or 'evidence'
+      local copied, copy_why = exec(db,
+        'INSERT OR REPLACE INTO relay_import_source ' ..
+          '(source_id,role,stamp,raw,raw_sha256,bytes,status) ' ..
+          'SELECT source_id,role,stamp,raw,?,bytes,? FROM relay_source_capture WHERE ingest_id=?',
+        { root, status, p.ingest_id })
+      if copied ~= 1 then return nil, 'source_insert: ' .. tostring(copy_why) end
+      local witness_id, witness_why = record_witness(capture.source_id, 'source',
+        capture.role, capture.stamp or '', bytes, root, auth_now.source_stamp,
+        chunk_size)
+      if not witness_id then return nil, 'witness: ' .. tostring(witness_why) end
+      return { phase = 'JSON_ROOT', bytes = #input }
+    end
+    local copied, copy_why = exec(db,
+      'INSERT OR REPLACE INTO relay_sidecar (source_id,kind,raw,raw_sha256,stamp) ' ..
+        'SELECT source_id,\'acks\',raw,?,stamp FROM relay_source_capture WHERE ingest_id=?',
+      { root, p.ingest_id })
+    if copied ~= 1 then return nil, 'sidecar_insert: ' .. tostring(copy_why) end
+    local witness_id, witness_why = record_witness(capture.source_id, 'sidecar',
+      capture.source_id, capture.stamp or '', bytes, root, auth_now.source_stamp,
+      chunk_size)
+    if not witness_id then return nil, 'witness: ' .. tostring(witness_why) end
+    return { phase = 'ACK_SCAN', bytes = #input }
+  end
+
+  local function ingest_json_root(p, capture, budget)
+    local rows, why = query(db,
+      'SELECT json_valid(raw) AS valid,json_type(raw) AS kind,' ..
+        'length(CAST(raw AS BLOB)) AS bytes FROM relay_source_capture WHERE ingest_id=?',
+      { p.ingest_id })
+    if not rows then return nil, 'source: ' .. tostring(why) end
+    local row = rows[1]
+    if not row or tonumber(row.valid) ~= 1 or row.kind ~= 'object' then
+      return nil, 'root_shape'
+    end
+    if tonumber(row.bytes) ~= tonumber(capture.bytes) then return nil, 'capture_changed' end
+    local counted, count_why = query(db,
+      'SELECT count(*) AS n FROM relay_source_capture c,json_each(c.raw) e ' ..
+        'WHERE c.ingest_id=?', { p.ingest_id })
+    if not counted then return nil, 'source: ' .. tostring(count_why) end
+    local added = add_field(capture.source_id, '$', '', 'object',
+      tonumber(counted[1].n) or 0)
+    if added ~= 1 then return nil, 'source_fields' end
+    return { phase = 'JSON_DUPLICATES' }
+  end
+
+  local function ingest_json_duplicates(p, capture, budget)
+    local rows, why = query(db,
+      'SELECT count(*) AS n FROM (SELECT n.parent,n.key FROM relay_source_capture c,' ..
+        'json_tree(c.raw) n WHERE c.ingest_id=? AND n.parent IS NOT NULL ' ..
+        'GROUP BY n.parent,n.key HAVING count(*)>1)', { p.ingest_id })
+    if not rows then return nil, 'source: ' .. tostring(why) end
+    if tonumber(rows[1].n) ~= 0 then return nil, 'duplicate_key' end
+    return { phase = 'DISCOVER_FIELD', cursor_key = false, cursor_started = 0,
+      cursor_field = false }
+  end
+
+  local function ingest_discover_field(p, capture, budget)
+    if budget.max_rows < 1 then return nil, 'budget_too_small' end
+    local rows, why = query(db,
+      'SELECT e.key AS key,e.type AS kind FROM relay_source_capture c,' ..
+        'json_each(c.raw) e WHERE c.ingest_id=? AND (?=0 ' ..
+        'OR CAST(e.key AS BLOB)>CAST(? AS BLOB)) ' ..
+        'ORDER BY CAST(e.key AS BLOB) LIMIT 1',
+      { p.ingest_id, tonumber(p.cursor_started) or 0, p.cursor_key or '' })
+    if not rows then return nil, 'source: ' .. tostring(why) end
+    if not rows[1] then return { phase = 'READY' } end
+    local name, kind = tostring(rows[1].key), rows[1].kind
+    if #name > limits.record_bytes then return nil, 'field_oversize' end
+    local expected = KNOWN[name]
+    if expected == 'scalar' then
+      if kind ~= 'text' and kind ~= 'null' then return nil, 'field_type' end
+    elseif expected == 'array' then
+      if kind ~= 'array' then return nil, 'field_type' end
+    elseif expected == 'map' or expected == 'nested_array' or expected == 'nested_map' then
+      if kind ~= 'object' then return nil, 'field_type' end
+    end
+    local field_path = '$.' .. name
+    local path = '$.' .. name
+    local next_fields = {
+      cursor_key = name, cursor_started = 1, cursor_field = false,
+      count = 1, bytes = #name,
+    }
+    if name == 'since' or name == 'messages_since' then
+      local token_bytes, token_why = query(db,
+        'SELECT length(CAST((raw -> ?) AS BLOB)) AS n FROM relay_source_capture ' ..
+          'WHERE ingest_id=?', { path, p.ingest_id })
+      if not token_bytes then return nil, 'cursor: ' .. tostring(token_why) end
+      local n = tonumber(token_bytes[1] and token_bytes[1].n) or 0
+      if n > limits.record_bytes then return nil, 'field_oversize' end
+      local added = add_field(capture.source_id, field_path, '', kind, 1)
+      if added ~= 1 then return nil, 'source_fields' end
+      if capture.role == 'primary' then
+        local cursor_json, cursor_why = query(db,
+          'SELECT raw -> ? AS token, json_extract(raw,?) AS value ' ..
+            'FROM relay_source_capture WHERE ingest_id=?', { path, path, p.ingest_id })
+        if not cursor_json then return nil, 'cursor: ' .. tostring(cursor_why) end
+        local scope = name == 'since' and 'sync' or 'messages'
+        local added_cursor = exec(db,
+          'INSERT OR REPLACE INTO relay_cursors (scope,present,cursor_json,value) ' ..
+            'VALUES (?,1,?,?)',
+          { scope, cursor_json[1].token, cursor_json[1].value or '' })
+        if added_cursor ~= 1 then return nil, 'cursor' end
+      end
+      return next_fields
+    end
+    if expected == 'map' or expected == 'array'
+        or expected == 'nested_array' or expected == 'nested_map' then
+      local counted, count_why = query(db,
+        'SELECT count(*) AS n FROM relay_source_capture c,json_each(c.raw,?) e ' ..
+          'WHERE c.ingest_id=?', { path, p.ingest_id })
+      if not counted then return nil, 'source: ' .. tostring(count_why) end
+      local count = tonumber(counted[1].n) or 0
+      local added = add_field(capture.source_id, field_path, '', kind, count)
+      if added ~= 1 then return nil, 'source_fields' end
+      if capture.role == 'primary' then
+        if expected == 'nested_array' or expected == 'nested_map' then
+          next_fields.phase = 'DISCOVER_ROOM'
+          next_fields.cursor_field = name
+          next_fields.cursor_key = false
+          next_fields.cursor_started = 0
+        elseif count > 0 then
+          local unit_id, unit_why = add_unit(capture.source_id, name, kind, '', 0, count)
+          if not unit_id then return nil, 'source_unit: ' .. tostring(unit_why) end
+        end
+      end
+      return next_fields
+    end
+    local added = add_field(capture.source_id, field_path, '', kind, 1)
+    if added ~= 1 then return nil, 'source_fields' end
+    if capture.role == 'primary' then
+      local unit_id, unit_why = add_unit(capture.source_id, name, 'raw', '', 0, 1)
+      if not unit_id then return nil, 'source_unit: ' .. tostring(unit_why) end
+    end
+    return next_fields
+  end
+
+  local function ingest_discover_room(p, capture, budget)
+    local root = p.cursor_field
+    if type(root) ~= 'string' or root == '' then return nil, 'source_fields' end
+    local expected = KNOWN[root]
+    local child_kind = expected == 'nested_array' and 'array' or 'object'
+    local path = '$.' .. root
+    local jpath = json_path(root)
+    local rows, why = query(db,
+      'SELECT r.key AS key,r.type AS kind FROM relay_source_capture c,' ..
+        'json_each(c.raw,?) r WHERE c.ingest_id=? AND (?=0 ' ..
+        'OR CAST(r.key AS BLOB)>CAST(? AS BLOB)) ' ..
+        'ORDER BY CAST(r.key AS BLOB) LIMIT 1',
+      { jpath, p.ingest_id, tonumber(p.cursor_started) or 0, p.cursor_key or '' })
+    if not rows then return nil, 'source: ' .. tostring(why) end
+    if not rows[1] then
+      return { phase = 'DISCOVER_FIELD', cursor_field = false,
+        cursor_key = root, cursor_started = 1 }
+    end
+    local key = tostring(rows[1].key)
+    if #key > limits.record_bytes then return nil, 'field_oversize' end
+    local next_fields = {
+      cursor_key = key, cursor_started = 1, count = 1, bytes = #key,
+    }
+    if rows[1].kind == child_kind then
+      local counted, count_why = query(db,
+        'SELECT count(*) AS n FROM relay_source_capture c,' ..
+          'json_each(c.raw,?) r,json_each(r.value) e WHERE c.ingest_id=? AND r.key=?',
+        { jpath, p.ingest_id, rows[1].key })
+      if not counted then return nil, 'source: ' .. tostring(count_why) end
+      local count = tonumber(counted[1].n) or 0
+      local child_path = path .. '/' .. key
+      local added = add_field(capture.source_id, child_path, key, child_kind, count)
+      if added ~= 1 then return nil, 'source_fields' end
+      if count > 0 then
+        local unit_id, unit_why = add_unit(capture.source_id, root, child_kind, key, 1, count)
+        if not unit_id then return nil, 'source_unit: ' .. tostring(unit_why) end
+      end
+    end
+    return next_fields
+  end
+
+  local function ingest_ack_scan(p, capture, budget)
+    local bytes = tonumber(capture.bytes) or 0
+    local scan = tonumber(p.scan_offset) or 0
+    if scan >= bytes then
+      local line_start = tonumber(p.line_start) or 0
+      if line_start < bytes then
+        local tail = bytes - line_start
+        if tail > limits.record_bytes then return nil, 'ack_oversize' end
+        return nil, 'ack_partial_eof'
+      end
+      return { phase = 'ACK_APPLY' }
+    end
+    local window = math.min(65536, bytes - scan)
+    if budget.max_bytes < window then window = budget.max_bytes end
+    if window < 1 then return nil, 'budget_too_small' end
+    local rows, why = query(db,
+      'SELECT substr(CAST(raw AS BLOB),?,?) AS chunk FROM relay_source_capture ' ..
+        'WHERE ingest_id=?', { scan + 1, window, p.ingest_id })
+    if not rows then return nil, 'sidecar: ' .. tostring(why) end
+    local chunk = rows[1] and rows[1].chunk or ''
+    local start = tonumber(p.line_start) or scan
+    local line_start = start
+    local pos = 1
+    local ranges = 0
+    local stopped = false
+    local ordinal_row = query(db,
+      'SELECT coalesce(max(ordinal),0) AS n FROM relay_source_ack_range WHERE ingest_id=?',
+      { p.ingest_id })
+    if not ordinal_row then return nil, 'sidecar: range' end
+    local ordinal = tonumber(ordinal_row[1].n) or 0
+    while ranges < budget.max_rows do
+      local nl = string.find(chunk, '\n', pos, true)
+      if not nl then break end
+      if line_start < scan then
+        -- The line began in an earlier window; keep its original start.
+      else
+        line_start = scan + (pos - 1)
+      end
+      local end_abs = scan + (nl - 1)
+      if end_abs > line_start and chunk:sub(nl - 1, nl - 1) == '\r' then
+        end_abs = end_abs - 1
+      end
+      local len = end_abs - line_start
+      if len > limits.record_bytes then return nil, 'ack_oversize' end
+      ordinal = ordinal + 1
+      local added = exec(db,
+        'INSERT INTO relay_source_ack_range (ingest_id,ordinal,start_byte,end_byte) ' ..
+          'VALUES (?,?,?,?)', { p.ingest_id, ordinal, line_start, end_abs })
+      if added ~= 1 then return nil, 'sidecar_range' end
+      ranges = ranges + 1
+      pos = nl + 1
+      line_start = scan + (pos - 1)
+      if ranges >= budget.max_rows then stopped = true end
+    end
+    local consumed = stopped and (pos - 1) or window
+    local next_scan = scan + consumed
+    if next_scan - line_start > limits.record_bytes then
+      return nil, 'ack_oversize'
+    end
+    return {
+      scan_offset = next_scan, line_start = line_start,
+      count = ranges, bytes = consumed,
+    }
+  end
+
+  local function ingest_ack_apply(p, capture, budget)
+    local scan = tonumber(p.scan_offset) or 0
+    local bytes = tonumber(capture.bytes) or 0
+    if scan < bytes then return nil, 'ack_pending_scan' end
+    local rows, why = query(db,
+      'SELECT ordinal,start_byte,end_byte FROM relay_source_ack_range ' ..
+        'WHERE ingest_id=? AND ordinal>? ORDER BY ordinal LIMIT ?',
+      { p.ingest_id, tonumber(p.apply_offset) or 0, budget.max_rows })
+    if not rows then return nil, 'sidecar: ' .. tostring(why) end
+    if #rows == 0 then return { phase = 'READY' } end
+    local applied, used, last = 0, 0, tonumber(p.apply_offset) or 0
+    for _, range in ipairs(rows) do
+      local len = (tonumber(range.end_byte) or 0) - (tonumber(range.start_byte) or 0)
+      if len > 0 then
+        if used + len > budget.max_bytes then
+          if applied == 0 then return nil, 'budget_too_small' end
+          break
+        end
+        local line_row, line_why = query(db,
+          'SELECT substr(CAST(raw AS BLOB),?,?) AS line FROM relay_source_capture ' ..
+            'WHERE ingest_id=?', { (tonumber(range.start_byte) or 0) + 1, len, p.ingest_id })
+        if not line_row then return nil, 'sidecar: ' .. tostring(line_why) end
+        local id = line_row[1] and line_row[1].line or ''
+        if id ~= '' then
+          local event, event_why = query(db,
+            'SELECT state FROM relay_events WHERE event_id=?', { id })
+          if not event then return nil, 'sidecar: ' .. tostring(event_why) end
+          if event[1] then
+            if event[1].state == 'pending' then
+              local changed = exec(db,
+                'UPDATE relay_events SET state=\'delivered\' WHERE event_id=? AND state=\'pending\'',
+                { id })
+              if changed ~= 1 then return nil, 'sidecar_ack' end
+            end
+          else
+            local processed, processed_why = query(db,
+              'SELECT 1 AS present FROM relay_processed WHERE event_id=? LIMIT 1', { id })
+            if not processed then return nil, 'sidecar: ' .. tostring(processed_why) end
+            if not processed[1] then return nil, 'ack_unknown' end
+          end
+        end
+        used = used + len
+      end
+      applied = applied + 1
+      last = tonumber(range.ordinal) or last
+    end
+    return {
+      apply_offset = last,
+      applied_count = (tonumber(p.applied_count) or 0) + applied,
+      count = applied, bytes = used,
+    }
+  end
+
+  local function ingest_phase_step(p, capture, budget)
+    local phase = p.phase
+    if phase == 'HASH' then return ingest_hash(p, capture, budget) end
+    if phase == 'ROOT_HASH' then return ingest_root(p, capture, budget) end
+    if phase == 'JSON_ROOT' then return ingest_json_root(p, capture, budget) end
+    if phase == 'JSON_DUPLICATES' then return ingest_json_duplicates(p, capture, budget) end
+    if phase == 'DISCOVER_FIELD' then return ingest_discover_field(p, capture, budget) end
+    if phase == 'DISCOVER_ROOM' then return ingest_discover_room(p, capture, budget) end
+    if phase == 'ACK_SCAN' then return ingest_ack_scan(p, capture, budget) end
+    if phase == 'ACK_APPLY' then return ingest_ack_apply(p, capture, budget) end
+    if phase == 'READY' then return { phase = 'READY' } end
+    return nil, 'ingest_phase'
+  end
+
+  local function ingest_step_impl(ingest_id, budget)
+    if store.closed then return nil, 'stale_writer' end
+    local ok, owner_why = owner_ok('ingest')
+    if not ok then return nil, owner_why end
+    if store.active then return fail('active') end
+    if store.blocked_reason then return fail('blocked') end
+    local began = begin(db)
+    if not began then return fail('ingest_begin') end
+    local p, p_why = ingest_progress_row(ingest_id)
+    if not p then rollback(db); return fail('ingest_state', p_why) end
+    if p.store_id ~= store.store_id then rollback(db); return fail('ingest_identity') end
+    if p.phase == 'BLOCKED' then
+      rollback(db)
+      return fail(p.block_reason or 'blocked')
+    end
+    if p.phase == 'READY' then
+      local done = commit(db)
+      if not done then rollback(db); return fail('ingest_commit') end
+      return ingest_receipt(p)
+    end
+    local owner_id, epoch = p.owner_id, tonumber(p.epoch) or 0
+    if owner_id ~= store.owner_id or epoch ~= store.epoch then
+      local adopted = exec(db,
+        'UPDATE relay_ingest_progress SET owner_id=?,epoch=? ' ..
+          'WHERE ingest_id=? AND owner_id=? AND epoch=?',
+        { store.owner_id, store.epoch, ingest_id, owner_id, epoch })
+      if adopted ~= 1 then rollback(db); return fail('stale_owner') end
+      p.owner_id, p.epoch = store.owner_id, store.epoch
+    end
+    local capture, c_why = capture_row(ingest_id)
+    if not capture then rollback(db); return fail('capture_missing', c_why) end
+    if capture.store_id ~= p.store_id or capture.source_id ~= p.source_id
+        or capture.kind ~= p.kind then
+      rollback(db); return fail('capture_changed')
+    end
+    local next_fields, code = ingest_phase_step(p, capture, budget)
+    if not next_fields then
+      if code == 'budget_too_small' then
+        rollback(db)
+        return fail(code)
+      end
+      local next_revision = (tonumber(p.revision) or 0) + 1
+      local blocked = exec(db,
+        'UPDATE relay_ingest_progress SET phase=\'BLOCKED\',state=\'blocked\',' ..
+          'block_reason=?,revision=?,updated_at=? WHERE ingest_id=? AND revision=?',
+        { code, next_revision, os.date('!%Y-%m-%dT%H:%M:%SZ'), ingest_id,
+          tonumber(p.revision) or 0 })
+      if blocked ~= 1 then rollback(db); return fail('stale_revision') end
+      if capture.kind == 'source' then
+        pcall(exec, db, 'UPDATE relay_import_source SET status=\'blocked\' WHERE source_id=?',
+          { capture.source_id })
+      end
+      local done = commit(db)
+      if not done then
+        store.blocked_reason = 'unknown_commit'
+        store.active = false
+        pcall(store.close, store)
+        return nil, 'unknown_commit', { ingest_id = ingest_id,
+          expected_revision = p.revision, next_revision = next_revision }
+      end
+      return fail(code)
+    end
+    local next_phase = next_fields.phase or p.phase
+    local next_revision = (tonumber(p.revision) or 0) + 1
+    local sets = { 'phase=?', 'state=?', 'revision=?', 'updated_at=?' }
+    local params = { next_phase, INGEST_STATE[next_phase] or 'blocked',
+      next_revision, os.date('!%Y-%m-%dT%H:%M:%SZ') }
+    for _, column in ipairs({ 'byte_offset', 'chunk_index', 'digest_hex',
+        'cursor_field', 'cursor_key', 'cursor_started', 'scan_offset',
+        'line_start', 'apply_offset', 'applied_count' }) do
+      local value = next_fields[column]
+      if value == false then
+        sets[#sets + 1] = column .. '=NULL'
+      elseif value ~= nil then
+        sets[#sets + 1] = column .. '=?'
+        params[#params + 1] = value
+      end
+    end
+    params[#params + 1] = ingest_id
+    params[#params + 1] = tonumber(p.revision) or 0
+    local saved = exec(db,
+      'UPDATE relay_ingest_progress SET ' .. table.concat(sets, ',') ..
+        ' WHERE ingest_id=? AND revision=?', params)
+    if saved ~= 1 then rollback(db); return fail('stale_revision') end
+    local done = commit(db)
+    if not done then
+      store.blocked_reason = 'unknown_commit'
+      store.active = false
+      pcall(store.close, store)
+      return nil, 'unknown_commit', { ingest_id = ingest_id,
+        expected_revision = p.revision, next_revision = next_revision }
+    end
+    p.phase, p.revision = next_phase, next_revision
+    local receipt = ingest_receipt(p)
+    receipt.count = next_fields.count or 0
+    receipt.bytes = next_fields.bytes or 0
+    receipt.nodes = next_fields.nodes or 0
+    receipt.cursor = next_fields.cursor_key ~= false and next_fields.cursor_key or nil
+    return receipt
+  end
+
   function store:import_source(source_id, raw)
     if store.closed then return nil, 'stale_writer' end
     local ok, owner_why = owner_ok('import_source')
@@ -1133,146 +1747,129 @@ function M.open(opts)
     if store.active then return fail('active') end
     if store.blocked_reason then return fail('blocked') end
     if not identifier(source_id) or type(raw) ~= 'string' then return fail('source') end
-    local hash, hash_why = source_digest(opts, raw)
-    if not hash then return fail('source_digest', hash_why) end
-    local existing, existing_why = query(db,
-      'SELECT source_id,role,stamp,raw_sha256,bytes,status FROM relay_import_source WHERE source_id=?',
-      { source_id })
-    if not existing then return fail('source', existing_why) end
-    if existing[1] then
-      if existing[1].raw_sha256 ~= hash or existing[1].bytes ~= #raw then
+    if #raw > limits.source_bytes then return fail('source_too_large') end
+    local declared, declared_why = known_source(source_id)
+    if not declared then return fail('source_unknown', declared_why) end
+    local ingest_id = ingest_id_for('source', source_id)
+    local existing, existing_why = capture_row(ingest_id)
+    if existing == nil then return fail('source', existing_why) end
+    if existing then
+      if existing.kind ~= 'source' or existing.store_id ~= store.store_id
+          or tonumber(existing.bytes) ~= #raw then
         return fail('source_changed')
       end
-      local witness, witness_why = lookup_witness(source_id, 'source')
-      if witness == nil then return fail('source_witness', witness_why) end
-      if not witness then return fail('source_witness_missing') end
-      if witness.role ~= existing[1].role
-          or (witness.stamp or '') ~= (existing[1].stamp or '')
-          or witness.bytes ~= existing[1].bytes
-          or witness.raw_sha256 ~= existing[1].raw_sha256
-          or witness.chunk_size ~= limits.digest_chunk_bytes then
-        return fail('witness_conflict')
+      local same, same_why = query(db,
+        'SELECT raw=? AS same FROM relay_source_capture WHERE ingest_id=?',
+        { raw, ingest_id })
+      if not same then return fail('source', same_why) end
+      if tonumber(same[1].same) ~= 1 then return fail('source_changed') end
+      if (existing.role or '') ~= (declared.role or 'primary')
+          or (existing.stamp or '') ~= (declared.stamp or '') then
+        return fail('source_changed')
       end
-      return true
+      local progress, progress_why = ingest_progress_row(ingest_id)
+      if not progress then return fail('ingest_state', progress_why) end
+      return ingest_receipt(progress)
     end
-    local declared, declared_why = known_source(source_id)
-    if not declared then return fail('source_unknown', 'declared=' .. type(declared) .. ' why=' .. tostring(declared_why)) end
-    if #raw > limits.source_bytes then return fail('source_too_large') end
-    local root, root_why = query(db,
-      'SELECT json_valid(?) AS valid,json_type(?) AS kind,length(CAST(? AS BLOB)) AS bytes',
-      { raw, raw, raw })
-    if not root then return fail('source', root_why) end
-    if root[1].valid ~= 1 or root[1].kind ~= 'object' then return fail('root_shape') end
-    local duplicates, duplicate_why = query(db,
-      'SELECT count(*) AS n FROM (SELECT n.parent,n.key FROM json_tree(?) n ' ..
-        'WHERE n.parent IS NOT NULL GROUP BY n.parent,n.key HAVING count(*)>1)', { raw })
-    if not duplicates then return fail('source', duplicate_why) end
-    if duplicates[1].n ~= 0 then return fail('duplicate_key') end
-    local fields, field_why = query(db,
-      'SELECT key,type,fullkey FROM json_each(?) ORDER BY CAST(key AS BLOB)', { raw })
-    if not fields then return fail('source', field_why) end
-    local root_by_key = {}
-    for _, field in ipairs(fields) do root_by_key[field.key] = field end
-    for name, expected in pairs(KNOWN) do
-      local field = root_by_key[name]
-      if field then
-        local kind = field.type
-        local valid = false
-        if expected == 'scalar' then valid = kind == 'text' or kind == 'null'
-        elseif expected == 'array' then valid = kind == 'array'
-        elseif expected == 'map' or expected == 'nested_array' or expected == 'nested_map' then
-          valid = kind == 'object'
-        end
-        if not valid then return fail('field_type', name) end
-      end
-    end
-    local role = declared.role or 'primary'
+    local legacy, legacy_why = query(db,
+      'SELECT 1 AS ok FROM relay_import_source WHERE source_id=?', { source_id })
+    if not legacy then return fail('source', legacy_why) end
+    if legacy[1] then return fail('source_capture_missing') end
     local began = begin(db)
     if not began then return fail('source_begin') end
     local inserted = exec(db,
-      'INSERT INTO relay_import_source (source_id,role,stamp,raw,raw_sha256,bytes,status) ' ..
-        'VALUES (?,?,?,?,?,?,?)',
-      { source_id, role, declared.stamp or '', raw, hash, #raw,
-        role == 'primary' and 'importing' or 'evidence' })
-    if inserted ~= 1 then rollback(db); return fail('source_insert') end
-    local auth_now, auth_now_why = current_auth()
-    if not auth_now then rollback(db); return fail('source', auth_now_why) end
-    local witness_id, witness_why = record_witness(source_id, 'source', role,
-      declared.stamp or '', #raw, hash, auth_now.source_stamp)
-    if not witness_id then rollback(db); return fail('witness', witness_why) end
-    local root_added = add_field(source_id, '$', '', 'object', #fields)
-    if root_added ~= 1 then rollback(db); return fail('source_fields') end
-    for _, field in ipairs(fields) do
-      local name, kind = field.key, field.type
-      local path = '$.' .. name
-      if name == 'since' or name == 'messages_since' then
-        if role == 'primary' then
-          local cursor_json, json_why = query(db, 'SELECT ? -> ? AS value', { raw, path })
-          if not cursor_json then rollback(db); return fail('cursor', json_why) end
-          local value_row, value_why = query(db, 'SELECT json_extract(?, ?) AS value', { raw, path })
-          if not value_row then rollback(db); return fail('cursor', value_why) end
-          local scope = name == 'since' and 'sync' or 'messages'
-          local added = exec(db,
-            'INSERT OR REPLACE INTO relay_cursors (scope,present,cursor_json,value) VALUES (?,1,?,?)',
-            { scope, cursor_json[1].value, value_row[1].value or '' })
-          if added ~= 1 then rollback(db); return fail('cursor') end
-        end
-        local field_added = add_field(source_id, path, '', kind, 1)
-        if field_added ~= 1 then rollback(db); return fail('source_fields') end
-      else
-        local expected = KNOWN[name]
-        local count = 0
-        if expected == 'map' or expected == 'array'
-            or expected == 'nested_array' or expected == 'nested_map' then
-          local counted, count_why = query(db,
-            'SELECT count(*) AS n FROM json_each(?, ?)', { raw, path })
-          if not counted then rollback(db); return fail('source', count_why) end
-          count = counted[1].n
-          local field_added = add_field(source_id, path, '', kind, count)
-          if field_added ~= 1 then rollback(db); return fail('source_fields') end
-          if role == 'primary' then
-            if expected == 'nested_array' or expected == 'nested_map' then
-              local rooms, room_why = query(db,
-                'SELECT key,type FROM json_each(?, ?) ORDER BY CAST(key AS BLOB)', { raw, path })
-              if not rooms then rollback(db); return fail('source', room_why) end
-              for _, room in ipairs(rooms) do
-                local child_kind = expected == 'nested_array' and 'array' or 'object'
-                if room.type == child_kind then
-                  -- The room value is addressed by key, never by string-built
-                  -- JSON path; keys are bound parameters below.
-                  local row_count, count_row_why = query(db,
-                    'SELECT count(*) AS n FROM json_each(?, ?) r, json_each(r.value) e ' ..
-                      'WHERE r.key=?', { raw, path, room.key })
-                  if not row_count then rollback(db); return fail('source', count_row_why) end
-                  local n = row_count[1].n
-                  local child_path = path .. '/' .. tostring(room.key)
-                  local child_added = add_field(source_id, child_path, room.key, child_kind, n)
-                  if child_added ~= 1 then rollback(db); return fail('source_fields') end
-                  if n > 0 then
-                    local unit_id, unit_why = add_unit(source_id, name, child_kind, room.key, 1, n)
-                    if not unit_id then rollback(db); return fail('source_unit', unit_why) end
-                  end
-                end
-              end
-            elseif count > 0 then
-              local unit_id, unit_why = add_unit(source_id, name, kind, '', 0, count)
-                    if not unit_id then rollback(db); return fail('source_unit', unit_why) end
-            end
-          end
-        else
-          -- Unknown root field: retain its exact token as one bounded record.
-          local field_added = add_field(source_id, path, '', kind, 1)
-          if field_added ~= 1 then rollback(db); return fail('source_fields') end
-          if role == 'primary' then
-            local unit_id, unit_why = add_unit(source_id, name, 'raw', '', 0, 1)
-                    if not unit_id then rollback(db); return fail('source_unit', unit_why) end
-          end
-        end
-      end
-    end
+      'INSERT INTO relay_source_capture ' ..
+        '(ingest_id,store_id,source_id,kind,role,stamp,bytes,chunk_size,raw,created_at) ' ..
+        'VALUES (?,?,?,?,?,?,?,?,?,?)',
+      { ingest_id, store.store_id, source_id, 'source',
+        declared.role or 'primary', declared.stamp or '', #raw,
+        limits.digest_chunk_bytes, raw, os.date('!%Y-%m-%dT%H:%M:%SZ') })
+    if inserted ~= 1 then rollback(db); return fail('source_insert', inserted) end
+    local now = os.date('!%Y-%m-%dT%H:%M:%SZ')
+    local progress = exec(db,
+      'INSERT INTO relay_ingest_progress ' ..
+        '(ingest_id,store_id,source_id,kind,phase,revision,owner_id,epoch,' ..
+        'chunk_size,state,created_at,updated_at) ' ..
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+      { ingest_id, store.store_id, source_id, 'source', 'HASH', 1,
+        store.owner_id, store.epoch, limits.digest_chunk_bytes, 'hashing', now, now })
+    if progress ~= 1 then rollback(db); return fail('source_progress', progress) end
     local done = commit(db)
-    if not done then rollback(db); return fail('source_commit') end
-    return true
+    if not done then
+      return nil, 'unknown_commit', { ingest_id = ingest_id,
+        expected_revision = 0, next_revision = 1 }
+    end
+    return { accepted = true, done = false, state = 'hashing',
+      source_id = source_id, ingest_id = ingest_id, revision = 1, phase = 'HASH' }
+  end
+
+  function store:import_acks(source_id, raw, stamp)
+    if store.closed then return nil, 'stale_writer' end
+    local ok, owner_why = owner_ok('import_acks')
+    if not ok then return nil, owner_why end
+    if store.active then return fail('active') end
+    if store.blocked_reason then return fail('blocked') end
+    if not identifier(source_id) or type(raw) ~= 'string' then return fail('sidecar') end
+    if #raw > limits.source_bytes then return fail('sidecar_too_large') end
+    local ingest_id = ingest_id_for('sidecar', source_id)
+    local existing, existing_why = capture_row(ingest_id)
+    if existing == nil then return fail('sidecar', existing_why) end
+    if existing then
+      if existing.kind ~= 'sidecar' or existing.store_id ~= store.store_id
+          or tonumber(existing.bytes) ~= #raw
+          or (existing.stamp or '') ~= (stamp or '') then
+        return fail('source_changed')
+      end
+      local same, same_why = query(db,
+        'SELECT raw=? AS same FROM relay_source_capture WHERE ingest_id=?',
+        { raw, ingest_id })
+      if not same then return fail('sidecar', same_why) end
+      if tonumber(same[1].same) ~= 1 then return fail('source_changed') end
+      local progress, progress_why = ingest_progress_row(ingest_id)
+      if not progress then return fail('ingest_state', progress_why) end
+      return ingest_receipt(progress)
+    end
+    local legacy, legacy_why = query(db,
+      'SELECT 1 AS ok FROM relay_sidecar WHERE source_id=?', { source_id })
+    if not legacy then return fail('sidecar', legacy_why) end
+    if legacy[1] then return fail('sidecar_capture_missing') end
+    local began = begin(db)
+    if not began then return fail('sidecar_begin') end
+    local inserted = exec(db,
+      'INSERT INTO relay_source_capture ' ..
+        '(ingest_id,store_id,source_id,kind,role,stamp,bytes,chunk_size,raw,created_at) ' ..
+        'VALUES (?,?,?,?,?,?,?,?,?,?)',
+      { ingest_id, store.store_id, source_id, 'sidecar', source_id, stamp or '',
+        #raw, limits.digest_chunk_bytes, raw, os.date('!%Y-%m-%dT%H:%M:%SZ') })
+    if inserted ~= 1 then rollback(db); return fail('sidecar_insert', inserted) end
+    local now = os.date('!%Y-%m-%dT%H:%M:%SZ')
+    local progress = exec(db,
+      'INSERT INTO relay_ingest_progress ' ..
+        '(ingest_id,store_id,source_id,kind,phase,revision,owner_id,epoch,' ..
+        'chunk_size,state,created_at,updated_at) ' ..
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+      { ingest_id, store.store_id, source_id, 'sidecar', 'HASH', 1,
+        store.owner_id, store.epoch, limits.digest_chunk_bytes, 'hashing', now, now })
+    if progress ~= 1 then rollback(db); return fail('sidecar_progress', progress) end
+    local done = commit(db)
+    if not done then
+      return nil, 'unknown_commit', { ingest_id = ingest_id,
+        expected_revision = 0, next_revision = 1 }
+    end
+    return { accepted = true, done = false, state = 'hashing',
+      source_id = source_id, ingest_id = ingest_id, revision = 1, phase = 'HASH' }
+  end
+
+  function store:ingest_step(ingest_id, options)
+    if store.closed then return nil, 'stale_writer' end
+    local ok, owner_why = owner_ok('ingest')
+    if not ok then return nil, owner_why end
+    if store.active then return fail('active') end
+    if store.blocked_reason then return fail('blocked') end
+    if type(ingest_id) ~= 'string' or ingest_id == '' then return fail('ingest_id') end
+    local budget, budget_why = ingest_budget(options)
+    if not budget then return fail('budget', budget_why) end
+    return ingest_step_impl(ingest_id, budget)
   end
 
   local function select_page(unit, source_id, remaining)
@@ -1294,7 +1891,7 @@ function M.open(opts)
         condition .. (unit.kind == 'array' and '' or ' ORDER BY CAST(e.key AS BLOB)') ..
         ' LIMIT ?) SELECT key,kind,payload,json_extract(payload,\'$\') AS scalar,length(CAST(payload AS BLOB)) AS bytes,' ..
         '(SELECT count(*) FROM json_tree(payload)) AS nodes FROM page'
-      params = { unit.root_field_path or ('$.' .. unit.root_field), source_id, unit.parent_key }
+      params = { unit.root_field_path or json_path(unit.root_field), source_id, unit.parent_key }
       if last ~= nil then params[#params + 1] = unit.kind == 'array' and tonumber(last) or last end
       params[#params + 1] = remaining
     else
@@ -1307,7 +1904,7 @@ function M.open(opts)
         (unit.kind == 'array' and '' or ' ORDER BY CAST(e.key AS BLOB)') ..
         ' LIMIT ?) SELECT key,kind,payload,json_extract(payload,\'$\') AS scalar,length(CAST(payload AS BLOB)) AS bytes,' ..
         '(SELECT count(*) FROM json_tree(payload)) AS nodes FROM page'
-      params = { '$.' .. unit.root_field, source_id }
+      params = { json_path(unit.root_field), source_id }
       if last ~= nil then params[#params + 1] = unit.kind == 'array' and tonumber(last) or last end
       params[#params + 1] = remaining
     end
@@ -1397,6 +1994,30 @@ function M.open(opts)
     if type(limit) ~= 'number' or limit < 1 or limit > limits.page_rows or limit % 1 ~= 0 then
       return fail('batch_limit')
     end
+    local ingest, ingest_why = query(db,
+      'SELECT c.ingest_id AS ingest_id,p.phase AS phase,p.revision AS revision ' ..
+        'FROM relay_source_capture c JOIN relay_ingest_progress p ON p.ingest_id=c.ingest_id ' ..
+        'WHERE c.store_id=? AND c.source_id=? AND c.kind=\'source\'',
+      { store.store_id, source_id })
+    if not ingest then return fail('source', ingest_why) end
+    if not ingest[1] then
+      local legacy, legacy_why = query(db,
+        'SELECT 1 AS ok FROM relay_import_source WHERE source_id=?', { source_id })
+      if not legacy then return fail('source', legacy_why) end
+      if legacy[1] then return fail('source_capture_missing') end
+      return fail('source_unknown')
+    end
+    if ingest[1].phase ~= 'READY' then
+      local stepped, step_why, step_detail = ingest_step_impl(ingest[1].ingest_id,
+        { max_rows = limit, max_bytes = limits.record_bytes,
+          max_nodes = limits.record_nodes })
+      if not stepped then return nil, step_why, step_detail end
+      if stepped.phase ~= 'READY' then
+        return { count = 0, done = false, state = stepped.state,
+          phase = stepped.phase, ingest_id = stepped.ingest_id,
+          revision = stepped.revision, accepted = true }
+      end
+    end
     local source, source_why = query(db,
       'SELECT source_id,role,status,staged_count FROM relay_import_source WHERE source_id=?',
       { source_id })
@@ -1460,69 +2081,6 @@ function M.open(opts)
     return { count = total, done = pending[1].n == 0 }
   end
 
-  function store:import_acks(source_id, raw, stamp)
-    if store.closed then return nil, 'stale_writer' end
-    local ok, owner_why = owner_ok('import_acks')
-    if not ok then return nil, owner_why end
-    if store.active then return fail('active') end
-    if store.blocked_reason then return fail('blocked') end
-    if not identifier(source_id) or type(raw) ~= 'string' then return fail('sidecar') end
-    if #raw > limits.source_bytes then return fail('sidecar_too_large') end
-    local hash, hash_why = source_digest(opts, raw)
-    if not hash then return fail('sidecar_digest', hash_why) end
-    local existing, existing_why = query(db,
-      'SELECT raw_sha256,stamp FROM relay_sidecar WHERE source_id=? AND kind=\'acks\'', { source_id })
-    if not existing then return fail('sidecar', existing_why) end
-    if existing[1] and existing[1].raw_sha256 ~= hash then return fail('source_changed') end
-    if existing[1] then
-      local witness, witness_why = lookup_witness(source_id, 'sidecar')
-      if witness == nil then return fail('sidecar_witness', witness_why) end
-      if not witness then return fail('source_witness_missing') end
-      if witness.raw_sha256 ~= existing[1].raw_sha256
-          or (witness.stamp or '') ~= (existing[1].stamp or '')
-          or witness.chunk_size ~= limits.digest_chunk_bytes then
-        return fail('witness_conflict')
-      end
-    end
-    local began = begin(db)
-    if not began then return fail('sidecar_begin') end
-    if not existing[1] then
-      local auth_now, auth_now_why = current_auth()
-      if not auth_now then rollback(db); return fail('sidecar', auth_now_why) end
-      local witness_id, witness_why = record_witness(source_id, 'sidecar', source_id,
-        stamp or '', #raw, hash, auth_now.source_stamp)
-      if not witness_id then rollback(db); return fail('witness', witness_why) end
-    end
-    local sidecar = exec(db,
-      'INSERT OR REPLACE INTO relay_sidecar (source_id,kind,raw,raw_sha256,stamp) ' ..
-        'VALUES (?,?,?,?,?)', { source_id, 'acks', raw, hash, stamp or '' })
-    if sidecar ~= 1 then rollback(db); return fail('sidecar_insert') end
-    for id in (raw .. '\n'):gmatch('(.-)\n') do
-      id = id:gsub('\r$', '')
-      if id ~= '' then
-        local event, event_why = query(db,
-          'SELECT state FROM relay_events WHERE event_id=?', { id })
-        if not event then rollback(db); return fail('sidecar', event_why) end
-        if event[1] then
-          if event[1].state == 'pending' then
-            local changed = exec(db,
-              'UPDATE relay_events SET state=\'delivered\' WHERE event_id=? AND state=\'pending\'',
-              { id })
-            if changed ~= 1 then rollback(db); return fail('sidecar_ack') end
-          end
-        else
-          local processed, processed_why = query(db,
-            'SELECT 1 AS present FROM relay_processed WHERE event_id=? LIMIT 1', { id })
-          if not processed then rollback(db); return fail('sidecar', processed_why) end
-          if not processed[1] then rollback(db); return fail('ack_unknown', id) end
-        end
-      end
-    end
-    local done = commit(db)
-    if not done then rollback(db); return fail('sidecar_commit') end
-    return true
-  end
-
   local function primary_source()
     local rows, why = query(db,
       'SELECT source_id,status,staged_count FROM relay_import_source WHERE role=\'primary\' ' ..
@@ -1534,7 +2092,7 @@ function M.open(opts)
   -- Metadata-only planning never returns record payload to Lua. The bounded
   -- prefix is then checked by an exact SQL join that returns only counts.
   local function verify_source_meta(unit, source_id, after, limit)
-    local path = '$.' .. unit.root_field
+    local path = json_path(unit.root_field)
     local payload, from, params
     if unit.kind == 'raw' then
       from = 'FROM relay_import_source s,json_each(s.raw) e WHERE s.source_id=? AND e.key=?'
@@ -1570,7 +2128,7 @@ function M.open(opts)
   -- Node counts are computed only for the byte prefix that already fits the
   -- call budget, never for all 64 candidate rows.
   local function verify_source_nodes(unit, source_id, after, limit)
-    local path = '$.' .. unit.root_field
+    local path = json_path(unit.root_field)
     local payload, from, params
     if unit.kind == 'raw' then
       from = 'FROM relay_import_source s,json_each(s.raw) e WHERE s.source_id=? AND e.key=?'
@@ -1604,7 +2162,7 @@ function M.open(opts)
   end
 
   local function verify_source_prefix(unit, source_id, after, limit)
-    local path = '$.' .. unit.root_field
+    local path = json_path(unit.root_field)
     local payload, from, params
     if unit.kind == 'raw' then
       from = 'FROM relay_import_source s,json_each(s.raw) e WHERE s.source_id=? AND e.key=?'
@@ -2003,7 +2561,7 @@ function M.open(opts)
   end
 
   local function structure_unit_ok(primary, unit)
-    local path = '$.' .. unit.root_field
+    local path = json_path(unit.root_field)
     local expected = tonumber(unit.expected) or 0
     if expected < 1 then return nil, 'unit' end
     local domain = KNOWN[unit.root_field]
@@ -2164,7 +2722,7 @@ function M.open(opts)
   end
 
   local function reverse_origin(unit, row)
-    local path = '$.' .. unit.root_field
+    local path = json_path(unit.root_field)
     local found, why
     if unit.kind == 'raw' then
       found, why = query(db,
@@ -2264,7 +2822,7 @@ function M.open(opts)
         if tonumber(counted[1].n) ~= tonumber(unit.expected) then
           return fail('import_incomplete', 'record_coverage')
         end
-        local path = '$.' .. unit.root_field
+        local path = json_path(unit.root_field)
         local found, found_why
         if unit.nested == 1 then
           found, found_why = query(db,
@@ -2462,6 +3020,37 @@ function M.open(opts)
     return invoke(opts.digest.sha256, stamp)
   end
 
+  -- Every admitted source and sidecar must have completed its own bounded
+  -- ingest pipeline before verification or activation can consider the store.
+  local function ingest_ready_gate()
+    local pending, pending_why = query(db,
+      'SELECT count(*) AS n FROM relay_ingest_progress ' ..
+        'WHERE store_id=? AND phase<>\'READY\'', { store.store_id })
+    if not pending then return fail('ingest_state', pending_why) end
+    if tonumber(pending[1].n) ~= 0 then
+      local blocked = query(db,
+        'SELECT count(*) AS n FROM relay_ingest_progress ' ..
+          'WHERE store_id=? AND phase=\'BLOCKED\'', { store.store_id })
+      if blocked and tonumber(blocked[1].n) ~= 0 then return fail('blocked') end
+      return fail('ingest_pending')
+    end
+    local sources, sources_why = query(db,
+      'SELECT count(*) AS n FROM relay_import_source s ' ..
+        'LEFT JOIN relay_source_capture c ON c.store_id=? ' ..
+        'AND c.source_id=s.source_id AND c.kind=\'source\' ' ..
+        'WHERE c.ingest_id IS NULL', { store.store_id })
+    if not sources then return fail('ingest_state', sources_why) end
+    if tonumber(sources[1].n) ~= 0 then return fail('source_capture_missing') end
+    local sidecars, sidecars_why = query(db,
+      'SELECT count(*) AS n FROM relay_sidecar s ' ..
+        'LEFT JOIN relay_source_capture c ON c.store_id=? ' ..
+        'AND c.source_id=s.source_id AND c.kind=\'sidecar\' ' ..
+        'WHERE c.ingest_id IS NULL', { store.store_id })
+    if not sidecars then return fail('ingest_state', sidecars_why) end
+    if tonumber(sidecars[1].n) ~= 0 then return fail('sidecar_capture_missing') end
+    return true
+  end
+
   function store:verify_import(options)
     if options == nil then options = {} end
     if store.closed then return nil, 'stale_writer' end
@@ -2470,6 +3059,8 @@ function M.open(opts)
     if store.blocked_reason then return nil, 'blocked' end
     if store.active then return fail('active') end
     if type(options) ~= 'table' then return fail('options') end
+    local ingest_ready, ingest_why = ingest_ready_gate()
+    if not ingest_ready then return nil, ingest_why end
     local function budget(name, default, ceiling)
       local value = options[name]
       if value == nil then return default end
@@ -2888,6 +3479,8 @@ function M.open(opts)
     if not ok then return nil, owner_why end
     if store.active then return writer() end
     if store.blocked_reason then return fail('blocked') end
+    local ingest_ready, ingest_why = ingest_ready_gate()
+    if not ingest_ready then return nil, ingest_why end
     local auth, auth_why = current_auth()
     if not auth then return fail('import_incomplete', auth_why) end
     if auth.store_id ~= store.store_id then return fail('blocked', 'identity_mismatch') end

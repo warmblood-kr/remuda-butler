@@ -7,7 +7,7 @@ M.version = 1
 M.limits = {source_bytes=32*1024*1024,record_bytes=256*1024,
  record_nodes=8192,page_rows=64,marker_bytes=4096,digest_chunk_bytes=65536,
  db_bytes=256*1024*1024,sql_timeout_ms=2000}
-M.methods = {'import_prepare','import_source','import_batch','import_acks',
+M.methods = {'import_prepare','import_source','import_batch','import_acks','ingest_step',
  'verify_import','activate','writer','cursor','accept_batch','dispatch_page',
  'complete_dispatch','get','put','delete','page','resolve_operation',
  'reply_dispatch_page','claim_reply','complete_reply','fail_reply','status'}

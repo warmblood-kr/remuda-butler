@@ -3,7 +3,7 @@ entry = "packages/butler/init.lua"
 lifecycle = "remuda-module-v1"
 api = "remuda-lua-v1"
 command = "butler"
-assets = ["packages/butler/migrations/inbox/0001_inbox.up.sql", "packages/butler/migrations/inbox/0001_inbox.down.sql", "packages/butler/migrations/relay/0001_reply_receipts.up.sql", "packages/butler/migrations/relay/0001_reply_receipts.down.sql", "packages/butler/migrations/relay/0002_receipt_shadow_hardening.up.sql", "packages/butler/migrations/relay/0002_receipt_shadow_hardening.down.sql", "packages/butler/migrations/relay/0003_relay_store.up.sql", "packages/butler/migrations/relay/0003_relay_store.down.sql"]
+assets = ["packages/butler/migrations/inbox/0001_inbox.up.sql", "packages/butler/migrations/inbox/0001_inbox.down.sql", "packages/butler/migrations/relay/0001_reply_receipts.up.sql", "packages/butler/migrations/relay/0001_reply_receipts.down.sql", "packages/butler/migrations/relay/0002_receipt_shadow_hardening.up.sql", "packages/butler/migrations/relay/0002_receipt_shadow_hardening.down.sql", "packages/butler/migrations/relay/0003_relay_store.up.sql", "packages/butler/migrations/relay/0003_relay_store.down.sql", "packages/butler/migrations/relay/0004_relay_source_ingest.up.sql", "packages/butler/migrations/relay/0004_relay_source_ingest.down.sql"]
 
 # This manifest describes the target independent-install contract. Resolver
 # support and compatibility validation remain responsibilities of Remuda core.

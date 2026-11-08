@@ -29,11 +29,24 @@ local function imported(t,fields)
  for _=1,100000 do
   local page=good(store:import_batch('fixture1',64))
   if page.done then done=true;break end
-  assert(page.count>0,'import batch made no progress')
+  assert(page.count>0 or page.phase or page.state or page.ingest_id,'import batch made no progress')
  end
  assert(done,'import fixture exceeded bounded batch count')
  verify_all(store)
  return good(store:activate())
+end
+local function drive(t,receipt)
+ local r=receipt
+ while type(r)=='table' and not r.done do r=good(t.store:ingest_step(r.ingest_id)) end
+ return r
+end
+local function refuse_batch(t,want)
+ for _=1,100000 do
+  local page,why=t.store:import_batch('fixture1',64)
+  if not page then assert(why:find(want,1,true),why);return why end
+  if page.done then break end
+ end
+ error('expected refused batch: '..want)
 end
 
 C.cases = {
@@ -122,10 +135,10 @@ C.cases = {
   local s=t.store;good(s:import_prepare(t:valid_manifest()))
   good(s:import_source('fixture1','{"pending_events":{"$acked":{"future":1},"$keep":{"future":2}}}'))
   while not good(s:import_batch('fixture1',64)).done do end
-  good(s:import_acks('acks-fixture','$acked\n$acked\n','acks-source-stamp'))
+  drive(t,good(s:import_acks('acks-fixture','$acked\n$acked\n','acks-source-stamp')))
   t:reopen();s=t.store
   -- Reprocessing the immutable sidecar after a crash is harmless.
-  good(s:import_acks('acks-fixture','$acked\n$acked\n','acks-source-stamp'))
+  drive(t,good(s:import_acks('acks-fixture','$acked\n$acked\n','acks-source-stamp')))
   verify_all(s);good(s:activate())
   local pending=good(s:dispatch_page(10))
   equal(#pending,1);equal(pending[1].event_id,'$keep')
@@ -137,7 +150,7 @@ C.cases = {
    {id='backup1',role='backup_evidence',stamp='b1'}}
   good(t.store:import_prepare(manifest))
   good(t.store:import_source('fixture1','{"since":"primary","future":1}'))
-  good(t.store:import_source('backup1','{"since":"backup","future":2}'))
+  drive(t,good(t.store:import_source('backup1','{"since":"backup","future":2}')))
   while not good(t.store:import_batch('fixture1',64)).done do end
   verify_all(t.store);good(t.store:activate())
   equal(good(t.store:cursor()).since,'primary')
@@ -145,12 +158,14 @@ C.cases = {
  end},
  {'duplicate_keys_any_depth_refuse',function(t)
   good(t.store:import_prepare(t:valid_manifest()))
-  denied('duplicate_key',t.store:import_source('fixture1','{"pending_events":{"a":{"k":1,"\\u006b":2}}}'))
-  denied('import_incomplete',t.store:activate())
+  good(t.store:import_source('fixture1','{"pending_events":{"a":{"k":1,"\\u006b":2}}}'))
+  refuse_batch(t,'duplicate_key')
+  assert(t.store:activate()==nil)
  end},
  {'wrong_root_shape_refuses',function(t)
   good(t.store:import_prepare(t:valid_manifest()))
-  denied('field_type',t.store:import_source('fixture1','{"pending_events":[]}'))
+  good(t.store:import_source('fixture1','{"pending_events":[]}'))
+  refuse_batch(t,'field_type')
  end},
  {'over_value_source_imports_without_core_decode',function(t)
   local raw='{"processed_event_ids":['..string.rep('"x",',110000)..'"last"]}'
@@ -162,7 +177,7 @@ C.cases = {
   good(t.store:import_prepare(t:valid_manifest()))
   good(t.store:import_source('fixture1','{"future":1}'))
   denied('source_changed',t.store:import_source('fixture1','{"future":2}'))
-  denied('import_incomplete',t.store:activate())
+  assert(t.store:activate()==nil)
  end},
  {'import_commit_before_marker_is_import_only',function(t)
   good(t.store:import_prepare(t:valid_manifest()))

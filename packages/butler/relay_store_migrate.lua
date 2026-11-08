@@ -41,6 +41,19 @@ local function source_stamp(opts, raw)
   return sha(opts, raw)
 end
 
+-- Advance one admitted artifact (backup evidence or ack sidecar) to READY.
+-- The primary JSON source is driven by import_batch instead.
+local function drive_ingest(store, receipt)
+  local current = receipt
+  for _ = 1, 1000000 do
+    if type(current) ~= 'table' or current.done then return current end
+    local next_receipt, why = store:ingest_step(current.ingest_id)
+    if not next_receipt then return nil, why end
+    current = next_receipt
+  end
+  return nil, 'ingest_call_limit'
+end
+
 -- opts = {
 --   store, exclusive_owner (must come from the owner provider, not a caller
 --   boolean), since_path, ack_path, drain_path (optional), backup_path
@@ -94,8 +107,12 @@ function M.run(opts)
   local imported, import_err = store:import_source('legacy-primary', raw)
   if not imported then return nil, import_err end
   if backup ~= nil then
-    local backup_ok, backup_err = store:import_source('legacy-backup', backup)
-    if not backup_ok then return nil, backup_err end
+    local backup_receipt, backup_err = store:import_source('legacy-backup', backup)
+    if not backup_receipt then return nil, backup_err end
+    if type(backup_receipt) == 'table' and backup_receipt.ingest_id then
+      local driven, drive_err = drive_ingest(store, backup_receipt)
+      if not driven then return nil, drive_err end
+    end
   end
   local limit = tonumber(opts.batch_limit) or 64
   if limit < 1 or limit > 64 or limit % 1 ~= 0 then return nil, 'batch_limit' end
@@ -109,7 +126,10 @@ function M.run(opts)
       return { status = 'paused', batches = batches, rows = rows }
     end
     if page.done then break end
-    if (tonumber(page.count) or 0) == 0 then return nil, 'import_stalled' end
+    if (tonumber(page.count) or 0) == 0
+        and not (page.phase or page.state or page.ingest_id) then
+      return nil, 'import_stalled'
+    end
   end
   -- Sidecar acknowledgements are evidence about already staged events, so they
   -- are applied only after the primary source records exist.
@@ -123,8 +143,12 @@ function M.run(opts)
       if ack_raw ~= nil then
         local ack_stamp = sha(opts, ack_raw)
         if not ack_stamp then return nil, ack.id .. '_digest' end
-        local ack_ok, ack_err = store:import_acks(ack.id, ack_raw, ack_stamp)
-        if not ack_ok then return nil, ack_err end
+        local ack_receipt, ack_err = store:import_acks(ack.id, ack_raw, ack_stamp)
+        if not ack_receipt then return nil, ack_err end
+        if type(ack_receipt) == 'table' and ack_receipt.ingest_id then
+          local driven, drive_err = drive_ingest(store, ack_receipt)
+          if not driven then return nil, drive_err end
+        end
       end
     end
   end
