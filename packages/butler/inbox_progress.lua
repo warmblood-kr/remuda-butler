@@ -323,7 +323,7 @@ function Progress:ready(root, recipient, generation, op)
   local proofs2 = count("SELECT COUNT(*) AS n FROM progress_fileproofs "
     .. "WHERE root = ? AND recipient = ? AND generation = ? AND pass = 2", scope)
   if not proofs2 then return nil, "unavailable" end
-  if proofs1 == 0 or proofs1 ~= proofs2 then return nil, "not_committed" end
+  if proofs1 ~= proofs2 then return nil, "not_committed" end
   -- Both passes must describe the same exact path set and bytes, not just the
   -- same number of rows.
   local mismatched = count(
