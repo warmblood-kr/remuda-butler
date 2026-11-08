@@ -1532,11 +1532,6 @@ function M.open(opts)
     local pos = 1
     local ranges = 0
     local stopped = false
-    local ordinal_row = query(db,
-      'SELECT coalesce(max(ordinal),0) AS n FROM relay_source_ack_range WHERE ingest_id=?',
-      { p.ingest_id })
-    if not ordinal_row then return nil, 'sidecar: range' end
-    local ordinal = tonumber(ordinal_row[1].n) or 0
     while ranges < budget.max_rows do
       local nl = string.find(chunk, '\n', pos, true)
       if not nl then break end
@@ -1551,11 +1546,13 @@ function M.open(opts)
       end
       local len = end_abs - line_start
       if len > limits.record_bytes then return nil, 'ack_oversize' end
-      ordinal = ordinal + 1
+      -- The line start is a stable byte identity: a retry after an unknown
+      -- COMMIT re-inserts the same range without appending a duplicate.
       local added = exec(db,
-        'INSERT INTO relay_source_ack_range (ingest_id,ordinal,start_byte,end_byte) ' ..
-          'VALUES (?,?,?,?)', { p.ingest_id, ordinal, line_start, end_abs })
-      if added ~= 1 then return nil, 'sidecar_range' end
+        'INSERT OR IGNORE INTO relay_source_ack_range ' ..
+          '(ingest_id,ordinal,start_byte,end_byte) VALUES (?,?,?,?)',
+        { p.ingest_id, line_start + 1, line_start, end_abs })
+      if added == nil then return nil, 'sidecar_range' end
       ranges = ranges + 1
       pos = nl + 1
       line_start = scan + (pos - 1)
