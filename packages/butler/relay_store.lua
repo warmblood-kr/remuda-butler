@@ -31,7 +31,35 @@ CREATE TABLE IF NOT EXISTS relay_authority (
   epoch INTEGER NOT NULL CHECK(epoch>0),
   source_stamp TEXT NOT NULL,
   import_verified INTEGER NOT NULL DEFAULT 0 CHECK(import_verified IN(0,1)),
+  data_revision INTEGER NOT NULL DEFAULT 0,
   blocked_reason TEXT
+);
+CREATE TABLE IF NOT EXISTS relay_verify_progress (
+  verification_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0,
+  data_revision INTEGER NOT NULL,
+  unit_id INTEGER,
+  cursor TEXT,
+  state TEXT NOT NULL CHECK(state IN ('backlog','ready')),
+  processed_rows INTEGER NOT NULL DEFAULT 0,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  nodes INTEGER NOT NULL DEFAULT 0,
+  certificate_id TEXT,
+  owner_id TEXT,
+  epoch INTEGER
+);
+CREATE TABLE IF NOT EXISTS relay_verify_certificates (
+  certificate_id TEXT PRIMARY KEY,
+  verification_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  data_revision INTEGER NOT NULL,
+  processed_rows INTEGER NOT NULL,
+  bytes INTEGER NOT NULL,
+  nodes INTEGER NOT NULL,
+  owner_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS relay_manifest (
   source_id TEXT PRIMARY KEY,
@@ -143,6 +171,43 @@ CREATE TABLE IF NOT EXISTS relay_sidecar (
   stamp TEXT,
   PRIMARY KEY(source_id,kind)
 );
+
+-- Every verification-input mutation while importing advances data_revision.
+-- Verify progress/certificate/status bookkeeping is excluded; after ACTIVE the
+-- triggers are inert, so normal runtime mutations do not invalidate the cert.
+CREATE TRIGGER IF NOT EXISTS relay_rev_records_ins AFTER INSERT ON relay_records
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_records_upd AFTER UPDATE ON relay_records
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_records_del AFTER DELETE ON relay_records
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_processed_ins AFTER INSERT ON relay_processed
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_events_ins AFTER INSERT ON relay_events
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_events_upd AFTER UPDATE ON relay_events
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_intents_ins AFTER INSERT ON relay_reply_intents
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_intents_upd AFTER UPDATE ON relay_reply_intents
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_fields_ins AFTER INSERT ON relay_source_fields
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_cursors_ins AFTER INSERT ON relay_cursors
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_cursors_upd AFTER UPDATE ON relay_cursors
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
 ]]
 
 local METHODS = {
@@ -522,7 +587,30 @@ function M.open(opts)
         state, active = 'active', true
       end
     elseif auth.phase == 'importing' then
-      state = 'importing'
+      if proof.epoch < auth.epoch then
+        state, blocked_reason = 'blocked', 'stale_owner'
+      elseif proof.epoch > auth.epoch then
+        -- A proven root-exclusive owner may rebind the importing checkpoint via
+        -- owner/epoch CAS. Verified progress survives because data_revision
+        -- excludes owner/epoch; the final certificate is rebound to this owner.
+        local began = begin(db)
+        if not began then release_all('refused'); return nil, 'blocked: takeover_begin' end
+        local changed = exec(db,
+          'UPDATE relay_authority SET owner_id=?,epoch=? WHERE singleton=1 ' ..
+            'AND phase=\'importing\' AND store_id=? AND owner_id=? AND epoch=?',
+          { proof.owner_id, proof.epoch, store_id, auth.owner_id, auth.epoch })
+        if changed ~= 1 then
+          rollback(db); release_all('refused'); return nil, 'blocked: takeover_cas'
+        end
+        local done = commit(db)
+        if not done then rollback(db); release_all('refused'); return nil, 'blocked: takeover_commit' end
+        auth.owner_id, auth.epoch = proof.owner_id, proof.epoch
+        state = 'importing'
+      elseif proof.owner_id ~= auth.owner_id then
+        state, blocked_reason = 'blocked', 'stale_owner'
+      else
+        state = 'importing'
+      end
     else
       state, blocked_reason = 'blocked', 'phase'
     end
@@ -536,7 +624,7 @@ function M.open(opts)
     epoch = auth and auth.epoch or proof.epoch, limits = limits }
   local function current_auth()
     local rows, read_why = query(db,
-      'SELECT store_id,phase,owner_id,epoch,source_stamp,import_verified,blocked_reason ' ..
+      'SELECT store_id,phase,owner_id,epoch,source_stamp,import_verified,data_revision,blocked_reason ' ..
         'FROM relay_authority WHERE singleton=1')
     if not rows then return nil, read_why end
     if not rows[1] then return nil, 'unprepared' end
@@ -1127,56 +1215,6 @@ function M.open(opts)
     return true
   end
 
-  local function verify_unit(unit, source_id)
-    local namespace = unit.kind == 'raw' and ('unknown:' .. unit.root_field) or unit.root_field
-    local from, payload, source_params
-    if unit.kind == 'raw' then
-      from = 'FROM relay_import_source s,json_each(s.raw) e WHERE s.source_id=? AND e.key=?'
-      payload = 's.raw -> e.fullkey'
-      source_params = { source_id, unit.root_field }
-    elseif unit.nested == 1 then
-      from = 'FROM relay_import_source s,json_each(s.raw,?) r,json_each(r.value) e ' ..
-        'WHERE s.source_id=? AND r.key=?'
-      payload = 'r.value -> e.fullkey'
-      source_params = { '$.' .. unit.root_field, source_id, unit.parent_key }
-    else
-      from = 'FROM relay_import_source s,json_each(s.raw,?) e WHERE s.source_id=?'
-      payload = 's.raw -> e.fullkey'
-      source_params = { '$.' .. unit.root_field, source_id }
-    end
-    local last = nil
-    while true do
-      local condition = last == nil and '' or
-        (unit.kind == 'array' and ' AND CAST(e.key AS INTEGER)>CAST(? AS INTEGER)' or
-          ' AND CAST(e.key AS BLOB)>CAST(? AS BLOB)')
-      local order = unit.kind == 'array' and '' or ' ORDER BY CAST(e.key AS BLOB)'
-      local record_key = unit.kind == 'array' and 'CAST(src.key AS TEXT)' or 'src.key'
-      local sql = 'WITH src AS MATERIALIZED (SELECT e.key AS key,e.type AS kind,' ..
-        payload .. ' AS payload ' .. from .. condition .. order .. ' LIMIT 64) ' ..
-        'SELECT max(src.key) AS last,count(*) AS n,COALESCE(sum(CASE WHEN ' ..
-        'r.record_key IS NULL OR r.json_kind<>src.kind OR r.payload_json<>src.payload ' ..
-        'OR (?=\'array\' AND (r.ordinal IS NULL OR CAST(r.ordinal AS TEXT)<>CAST(src.key AS TEXT))) ' ..
-        'OR (?=\'object\' AND r.ordinal IS NOT NULL) THEN 1 ELSE 0 END),0) AS bad ' ..
-        'FROM src LEFT JOIN relay_records r ON r.namespace=? AND r.parent_key=? ' ..
-        'AND r.record_key=' .. record_key
-      local params = {}
-      for index = 1, #source_params do params[index] = source_params[index] end
-      if last ~= nil then params[#params + 1] = unit.kind == 'array' and tonumber(last) or last end
-      params[#params + 1] = unit.kind
-      params[#params + 1] = unit.kind
-      params[#params + 1] = namespace
-      params[#params + 1] = unit.parent_key or ''
-      local rows, why = query(db, sql, params)
-      if not rows then return nil, why end
-      local row = rows[1]
-      if tonumber(row.n) == 0 then break end
-      if tonumber(row.bad) ~= 0 then return nil, 'identity' end
-      last = row.last
-      if tonumber(row.n) < 64 then break end
-    end
-    return true
-  end
-
   local function primary_source()
     local rows, why = query(db,
       'SELECT source_id,status,staged_count FROM relay_import_source WHERE role=\'primary\' ' ..
@@ -1185,12 +1223,86 @@ function M.open(opts)
     return rows[1]
   end
 
-  function store:verify_import()
+  local function verify_source_page(unit, source_id, after, limit)
+    local path = '$.' .. unit.root_field
+    local payload, from, params
+    if unit.kind == 'raw' then
+      from = 'FROM relay_import_source s,json_each(s.raw) e WHERE s.source_id=? AND e.key=?'
+      payload = 's.raw -> e.fullkey'
+      params = { source_id, unit.root_field }
+    elseif unit.nested == 1 then
+      from = 'FROM relay_import_source s,json_each(s.raw,?) r,json_each(r.value) e ' ..
+        'WHERE s.source_id=? AND r.key=?'
+      payload = 'r.value -> e.fullkey'
+      params = { path, source_id, unit.parent_key }
+    else
+      from = 'FROM relay_import_source s,json_each(s.raw,?) e WHERE s.source_id=?'
+      payload = 's.raw -> e.fullkey'
+      params = { path, source_id }
+    end
+    local condition = ''
+    if unit.kind ~= 'raw' and after ~= nil then
+      if unit.kind == 'array' then
+        condition = ' AND CAST(e.key AS INTEGER)>CAST(? AS INTEGER)'
+      else
+        condition = ' AND CAST(e.key AS BLOB)>CAST(? AS BLOB)'
+      end
+      params[#params + 1] = after
+    end
+    local order = unit.kind == 'array' and '' or ' ORDER BY CAST(e.key AS BLOB)'
+    local sql = 'SELECT e.key AS key,e.type AS kind,' .. payload .. ' AS payload,' ..
+      'length(CAST(' .. payload .. ' AS BLOB)) AS bytes,' ..
+      '(SELECT count(*) FROM json_tree(' .. payload .. ')) AS nodes ' ..
+      from .. condition .. order .. ' LIMIT ?'
+    params[#params + 1] = limit
+    return query(db, sql, params)
+  end
+
+  local function verify_target(unit, row)
+    local namespace = unit.kind == 'raw' and ('unknown:' .. unit.root_field) or unit.root_field
+    local record_key = tostring(row.key)
+    local rows, why = query(db,
+      'SELECT record_key,json_kind,payload_json,ordinal FROM relay_records ' ..
+        'WHERE namespace=? AND parent_key=? AND record_key=?',
+      { namespace, unit.parent_key or '', record_key })
+    if not rows then return nil, why end
+    local target = rows[1]
+    if not target or target.record_key ~= record_key
+        or target.json_kind ~= row.kind or target.payload_json ~= row.payload then
+      return nil, 'identity'
+    end
+    if unit.kind == 'array' then
+      if tonumber(target.ordinal) ~= tonumber(row.key) then return nil, 'identity' end
+    elseif target.ordinal ~= nil then
+      return nil, 'identity'
+    end
+    return true
+  end
+
+  function store:verify_import(options)
+    options = options or {}
     if store.closed then return nil, 'stale_writer' end
     local ok, owner_why = owner_ok('verify')
     if not ok then return nil, owner_why end
+    if store.blocked_reason then return nil, 'blocked' end
     if store.active then return fail('active') end
-    if store.blocked_reason then return fail('blocked') end
+    if type(options) ~= 'table' then return fail('options') end
+    local function budget(name, default, ceiling)
+      local value = options[name]
+      if value == nil then return default end
+      if type(value) ~= 'number' or value % 1 ~= 0 or value < 1 or value > ceiling then
+        return nil
+      end
+      return value
+    end
+    local max_rows = budget('max_rows', 64, 64)
+    local max_units = budget('max_units', 64, 64)
+    local max_bytes = budget('max_bytes', 262144, 262144)
+    local max_nodes = budget('max_nodes', 8192, 8192)
+    if not max_rows then return fail('budget', 'max_rows') end
+    if not max_units then return fail('budget', 'max_units') end
+    if not max_bytes then return fail('budget', 'max_bytes') end
+    if not max_nodes then return fail('budget', 'max_nodes') end
     local primary, primary_why = primary_source()
     if not primary then return fail('import_incomplete', primary_why) end
     if primary.status == 'blocked' then return fail('blocked') end
@@ -1200,77 +1312,196 @@ function M.open(opts)
       { primary.source_id })
     if not incomplete then return fail('verify', incomplete_why) end
     if incomplete[1].n ~= 0 then return fail('import_incomplete') end
-    local last = 0
-    while true do
-      local units, unit_why = query(db,
-        'SELECT unit_id,root_field,kind,parent_key,nested,expected FROM relay_import_units ' ..
-          'WHERE source_id=? AND unit_id>? ORDER BY unit_id LIMIT 1',
-        { primary.source_id, last })
-      if not units then return fail('verify', unit_why) end
-      local unit = units[1]
-      if not unit then break end
-      last = unit.unit_id
-      local namespace = unit.kind == 'raw' and ('unknown:' .. unit.root_field) or unit.root_field
-      local counted, count_why = query(db,
-        'SELECT count(*) AS n FROM relay_records WHERE namespace=? AND parent_key=?',
-        { namespace, unit.parent_key or '' })
-      if not counted then return fail('verify', count_why) end
-      if counted[1].n ~= unit.expected then return fail('import_incomplete', namespace) end
-      local unit_ok, unit_why = verify_unit(unit, primary.source_id)
-      if not unit_ok then return fail('import_incomplete', namespace .. ':' .. tostring(unit_why)) end
-    end
-    local cursor_fields, cursor_field_why = query(db,
-      'SELECT path,kind FROM relay_source_fields WHERE source_id=? ' ..
-        'AND (path=\'$.since\' OR path=\'$.messages_since\') ORDER BY path',
-      { primary.source_id })
-    if not cursor_fields then return fail('verify', cursor_field_why) end
-    for _, field in ipairs(cursor_fields) do
-      local scope = field.path == '$.since' and 'sync' or 'messages'
-      local expected, expected_why = query(db,
-        'SELECT s.raw -> ? AS value FROM relay_import_source s WHERE s.source_id=?',
-        { field.path, primary.source_id })
-      if not expected then return fail('verify', expected_why) end
-      local stored, stored_why = query(db,
-        'SELECT present,cursor_json FROM relay_cursors WHERE scope=?', { scope })
-      if not stored then return fail('verify', stored_why) end
-      if not stored[1] or stored[1].present ~= 1
-          or stored[1].cursor_json ~= expected[1].value then
-        return fail('import_incomplete', 'cursor:' .. scope)
+    local auth, auth_why = current_auth()
+    if not auth then return fail('import_incomplete', auth_why) end
+    if auth.phase ~= 'importing' then return fail('not_active') end
+    local verification_id = 'verify:' .. store.store_id .. ':' .. primary.source_id
+    local progress, progress_why = query(db,
+      'SELECT verification_id,source_id,revision,data_revision,unit_id,cursor,state,' ..
+        'processed_rows,bytes,nodes,certificate_id,owner_id,epoch ' ..
+        'FROM relay_verify_progress WHERE verification_id=?', { verification_id })
+    if not progress then return fail('verify', progress_why) end
+    local p = progress[1]
+    if p and p.state == 'ready' and p.data_revision == auth.data_revision
+        and p.owner_id == store.owner_id and p.epoch == store.epoch then
+      local cert, cert_why = query(db,
+        'SELECT certificate_id,verification_id,source_id,data_revision,processed_rows,bytes,nodes,owner_id,epoch ' ..
+          'FROM relay_verify_certificates WHERE certificate_id=?', { p.certificate_id })
+      if not cert then return fail('verify', cert_why) end
+      local c = cert[1]
+      if c and c.verification_id == verification_id and c.source_id == primary.source_id
+          and c.data_revision == auth.data_revision
+          and c.owner_id == store.owner_id and c.epoch == store.epoch then
+        return { verified = true, done = true, state = 'ready', count = 0,
+          verification_id = verification_id, revision = p.revision,
+          data_revision = auth.data_revision, phase = 'ready',
+          unit_id = p.unit_id, cursor = p.cursor,
+          processed_rows = p.processed_rows, bytes = p.bytes, nodes = p.nodes,
+          certificate_id = p.certificate_id }
       end
     end
-    local records, records_why = query(db, 'SELECT count(*) AS n FROM relay_records')
-    if not records then return fail('verify', records_why) end
-    if records[1].n ~= primary.staged_count then return fail('import_incomplete', 'row_count') end
-    local event_count, event_why = query(db,
-      'SELECT count(*) AS n FROM relay_events')
-    if not event_count then return fail('verify', event_why) end
-    local pending_records, pending_why = query(db,
-      'SELECT count(*) AS n FROM relay_records WHERE namespace=\'pending_events\'')
-    if not pending_records then return fail('verify', pending_why) end
-    if event_count[1].n ~= pending_records[1].n then return fail('import_incomplete', 'pending') end
-    local intent_count, intent_why = query(db,
-      'SELECT count(*) AS n FROM relay_reply_intents WHERE imported=1')
-    if not intent_count then return fail('verify', intent_why) end
-    local outbox_records, outbox_why = query(db,
-      'SELECT count(*) AS n FROM relay_records WHERE namespace=\'matrix_reply_outbox\'')
-    if not outbox_records then return fail('verify', outbox_why) end
-    if intent_count[1].n ~= outbox_records[1].n then return fail('import_incomplete', 'outbox') end
+    local first, first_why = query(db,
+      'SELECT min(unit_id) AS id FROM relay_import_units WHERE source_id=?',
+      { primary.source_id })
+    if not first then return fail('verify', first_why) end
     local began = begin(db)
     if not began then return fail('verify_begin') end
-    local verified = exec(db,
-      'UPDATE relay_import_source SET status=\'verified\',verified_count=staged_count ' ..
-        'WHERE source_id=? AND status IN (\'importing\',\'staged\')', { primary.source_id })
-    if verified ~= 1 then rollback(db); return fail('verify_update') end
-    local authority = exec(db,
-      'UPDATE relay_authority SET import_verified=1,source_stamp=source_stamp ' ..
-        'WHERE singleton=1 AND phase=\'importing\'')
-    if authority ~= 1 then rollback(db); return fail('verify_authority') end
-    local cleared = exec(db, 'DELETE FROM relay_import_queue WHERE source_id=?',
-      { primary.source_id })
-    if cleared == nil then rollback(db); return fail('verify_queue') end
+    local cas_ok, cas_why = exec(db,
+      'UPDATE relay_authority SET epoch=epoch WHERE singleton=1 AND phase=\'importing\' ' ..
+        'AND store_id=? AND owner_id=? AND epoch=?',
+      { store.store_id, store.owner_id, store.epoch })
+    if cas_ok ~= 1 then rollback(db); return fail('stale_writer', cas_why) end
+    if not p or p.data_revision ~= auth.data_revision then
+      -- The proof inputs changed since this checkpoint (or none existed).
+      -- Old certificates for this verification are no longer authority.
+      exec(db, 'DELETE FROM relay_verify_certificates WHERE verification_id=?',
+        { verification_id })
+      p = { verification_id = verification_id, source_id = primary.source_id,
+        revision = 0, data_revision = auth.data_revision, unit_id = first[1].id,
+        cursor = nil, state = 'backlog', processed_rows = 0, bytes = 0, nodes = 0,
+        certificate_id = nil, owner_id = store.owner_id, epoch = store.epoch }
+      local reset_ok, reset_why = exec(db,
+        'INSERT OR REPLACE INTO relay_verify_progress ' ..
+          '(verification_id,source_id,revision,data_revision,unit_id,cursor,state,' ..
+          'processed_rows,bytes,nodes,certificate_id,owner_id,epoch) ' ..
+          'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+        { p.verification_id, p.source_id, p.revision, p.data_revision, p.unit_id,
+          p.cursor, p.state, p.processed_rows, p.bytes, p.nodes,
+          p.certificate_id, p.owner_id, p.epoch })
+      if reset_ok ~= 1 then rollback(db); return fail('verify_reset', reset_why) end
+    else
+      -- A proven exclusive owner may resume the same verified prefix after an
+      -- owner/epoch handoff; proof inputs (data_revision) must still match.
+      p.owner_id, p.epoch = store.owner_id, store.epoch
+    end
+    local expected_revision = tonumber(p.revision) or 0
+    local processed_this, bytes_this, nodes_this = 0, 0, 0
+    local total_rows = tonumber(p.processed_rows) or 0
+    local total_bytes = tonumber(p.bytes) or 0
+    local total_nodes = tonumber(p.nodes) or 0
+    local unit_id, cursor = p.unit_id, p.cursor
+    local finished_all = unit_id == nil
+    local units_this = 0
+    -- A call verifies at most max_rows records and visits at most max_units
+    -- units. It may cross unit boundaries only while the per-call row/byte/node
+    -- budget remains; a large unit is resumed from its durable cursor.
+    while processed_this < max_rows and unit_id ~= nil and units_this < max_units do
+      local units, unit_why = query(db,
+        'SELECT unit_id,root_field,kind,parent_key,nested,expected FROM relay_import_units ' ..
+          'WHERE source_id=? AND unit_id=?', { primary.source_id, unit_id })
+      if not units then rollback(db); return fail('verify_unit', unit_why) end
+      local unit = units[1]
+      if not unit then rollback(db); return fail('import_incomplete', 'unit_missing') end
+      local limit = math.min(max_rows - processed_this, 64)
+      local rows, page_why = verify_source_page(unit, primary.source_id, cursor, limit)
+      if not rows then rollback(db); return fail('verify_page', page_why) end
+      local consumed = 0
+      local budget_stop = false
+      for _, row in ipairs(rows) do
+        local row_bytes, row_nodes = tonumber(row.bytes) or 0, tonumber(row.nodes) or 0
+        if bytes_this + row_bytes > max_bytes or nodes_this + row_nodes > max_nodes then
+          if consumed == 0 then
+            -- The next record cannot fit even in a fresh per-call budget.
+            rollback(db)
+            return fail('budget_too_small')
+          end
+          budget_stop = true
+          break
+        end
+        local target_ok, target_why = verify_target(unit, row)
+        if not target_ok then rollback(db); return fail('import_incomplete', target_why) end
+        processed_this = processed_this + 1
+        consumed = consumed + 1
+        bytes_this = bytes_this + row_bytes
+        nodes_this = nodes_this + row_nodes
+        total_rows = total_rows + 1
+        total_bytes = total_bytes + row_bytes
+        total_nodes = total_nodes + row_nodes
+        cursor = tostring(row.key)
+      end
+      if budget_stop then break end
+      if #rows < limit then
+        -- This unit is exhausted; visit the next unit while budget remains.
+        units_this = units_this + 1
+        local next_unit, next_why = query(db,
+          'SELECT min(unit_id) AS id FROM relay_import_units WHERE source_id=? AND unit_id>?',
+          { primary.source_id, unit_id })
+        if not next_unit then rollback(db); return fail('verify_unit', next_why) end
+        unit_id, cursor = next_unit[1].id, nil
+        if unit_id == nil then finished_all = true end
+      else
+        -- A full page may have more rows in this same unit. Keep the cursor so
+        -- the next call resumes exactly here.
+        break
+      end
+    end
+    p.revision = expected_revision + 1
+    p.data_revision = auth.data_revision
+    p.unit_id, p.cursor = unit_id, cursor
+    p.processed_rows, p.bytes, p.nodes = total_rows, total_bytes, total_nodes
+    p.owner_id, p.epoch = store.owner_id, store.epoch
+    p.state, p.certificate_id = 'backlog', nil
+    if finished_all then
+      if tonumber(primary.staged_count) ~= total_rows then
+        rollback(db)
+        return fail('import_incomplete', 'verified_count')
+      end
+      local cert_stamp = store.store_id .. '\0' .. verification_id .. '\0' ..
+        primary.source_id .. '\0' .. tostring(auth.data_revision) .. '\0' ..
+        tostring(total_rows) .. '\0' .. tostring(total_bytes) .. '\0' ..
+        tostring(total_nodes) .. '\0' .. tostring(store.owner_id) .. '\0' ..
+        tostring(store.epoch)
+      local cert_id, cert_why = invoke(opts.digest.sha256, cert_stamp)
+      if type(cert_id) ~= 'string' then rollback(db); return fail('certificate', cert_why) end
+      local cert_ok, cert_err = exec(db,
+        'INSERT OR REPLACE INTO relay_verify_certificates ' ..
+          '(certificate_id,verification_id,source_id,data_revision,processed_rows,bytes,nodes,owner_id,epoch,created_at) ' ..
+          'VALUES (?,?,?,?,?,?,?,?,?,?)',
+        { cert_id, verification_id, primary.source_id, auth.data_revision, total_rows,
+          total_bytes, total_nodes, store.owner_id, store.epoch,
+          os.date('!%Y-%m-%dT%H:%M:%SZ') })
+      if cert_ok ~= 1 then rollback(db); return fail('certificate', cert_err) end
+      p.state, p.certificate_id = 'ready', cert_id
+    end
+    local saved, save_why = exec(db,
+      'INSERT OR REPLACE INTO relay_verify_progress ' ..
+        '(verification_id,source_id,revision,data_revision,unit_id,cursor,state,' ..
+        'processed_rows,bytes,nodes,certificate_id,owner_id,epoch) ' ..
+        'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      { p.verification_id, p.source_id, p.revision, p.data_revision, p.unit_id,
+        p.cursor, p.state, p.processed_rows, p.bytes, p.nodes,
+        p.certificate_id, p.owner_id, p.epoch })
+    if saved ~= 1 then rollback(db); return fail('verify_save', save_why) end
+    if p.state == 'ready' then
+      local source_ok, source_why = exec(db,
+        'UPDATE relay_import_source SET status=\'verified\',verified_count=staged_count ' ..
+          'WHERE source_id=?', { primary.source_id })
+      if source_ok ~= 1 then rollback(db); return fail('verify_source', source_why) end
+      local authority_ok = exec(db,
+        'UPDATE relay_authority SET import_verified=1 WHERE singleton=1 AND phase=\'importing\'')
+      if authority_ok ~= 1 then rollback(db); return fail('verify_authority') end
+    end
     local done = commit(db)
-    if not done then rollback(db); return fail('verify_commit') end
-    return { verified = true, count = tonumber(primary.staged_count) or 0 }
+    if not done then
+      local detail = { verification_id = verification_id,
+        expected_revision = expected_revision, next_revision = p.revision,
+        data_revision = auth.data_revision }
+      store.blocked_reason = 'unknown_commit'
+      store.active = false
+      -- The commit outcome is ambiguous: discard this connection/lease. A
+      -- reopen rereads the durable checkpoint; it never trusts the in-memory
+      -- result of this call.
+      pcall(store.close, store)
+      return nil, 'unknown_commit', detail
+    end
+    return { verified = p.state == 'ready', done = p.state == 'ready',
+      state = p.state, count = processed_this,
+      verification_id = verification_id, revision = p.revision,
+      data_revision = auth.data_revision,
+      phase = p.state == 'ready' and 'ready' or 'verify',
+      unit_id = p.unit_id, cursor = p.cursor,
+      processed_rows = p.processed_rows, bytes = p.bytes, nodes = p.nodes,
+      certificate_id = p.certificate_id }
   end
 
   function store:activate()
@@ -1296,6 +1527,34 @@ function M.open(opts)
     if not primary or primary.status ~= 'verified' then
       return fail('import_incomplete', primary_why)
     end
+    -- Activation is a constant indexed proof: the durable checkpoint must be
+    -- ready for the current proof inputs and bound to this owner/epoch, and the
+    -- certificate must be the same record. No scan, COUNT or bulk delete.
+    local verification_id = 'verify:' .. store.store_id .. ':' .. primary.source_id
+    local progress, progress_why = query(db,
+      'SELECT state,data_revision,certificate_id,owner_id,epoch ' ..
+        'FROM relay_verify_progress WHERE verification_id=?', { verification_id })
+    if not progress then return fail('import_incomplete', progress_why) end
+    local checkpoint = progress[1]
+    if not checkpoint or checkpoint.state ~= 'ready'
+        or checkpoint.data_revision ~= auth.data_revision
+        or checkpoint.owner_id ~= store.owner_id or checkpoint.epoch ~= store.epoch
+        or type(checkpoint.certificate_id) ~= 'string' then
+      return fail('import_incomplete', 'certificate')
+    end
+    local certificates, cert_why = query(db,
+      'SELECT verification_id,source_id,data_revision,owner_id,epoch ' ..
+        'FROM relay_verify_certificates WHERE certificate_id=?',
+      { checkpoint.certificate_id })
+    if not certificates then return fail('import_incomplete', cert_why) end
+    local certificate = certificates[1]
+    if not certificate or certificate.verification_id ~= verification_id
+        or certificate.source_id ~= primary.source_id
+        or certificate.data_revision ~= auth.data_revision
+        or certificate.owner_id ~= store.owner_id
+        or certificate.epoch ~= store.epoch then
+      return fail('import_incomplete', 'certificate')
+    end
     local raw = marker_encode(store.store_id, store.owner_id, store.epoch, auth.source_stamp)
     if not raw or #raw > limits.marker_bytes then return fail('marker_size') end
     local marker_fault = fault('active_marker_publish', { raw = raw })
@@ -1304,8 +1563,9 @@ function M.open(opts)
     if not began then return fail('activate_begin') end
     local changed = exec(db,
       'UPDATE relay_authority SET phase=\'active\',import_verified=1,blocked_reason=NULL ' ..
-        'WHERE singleton=1 AND phase=\'importing\' AND store_id=? AND owner_id=? AND epoch=?',
-      { store.store_id, store.owner_id, store.epoch })
+        'WHERE singleton=1 AND phase=\'importing\' AND store_id=? AND owner_id=? AND epoch=? ' ..
+        'AND data_revision=? AND import_verified=1',
+      { store.store_id, store.owner_id, store.epoch, auth.data_revision })
     if changed ~= 1 then rollback(db); return fail('stale_writer') end
     local done = commit(db)
     if not done then rollback(db); return fail('activate_commit') end

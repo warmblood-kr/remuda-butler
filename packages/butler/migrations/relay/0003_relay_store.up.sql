@@ -7,7 +7,35 @@ CREATE TABLE IF NOT EXISTS relay_authority (
   epoch INTEGER NOT NULL CHECK(epoch>0),
   source_stamp TEXT NOT NULL,
   import_verified INTEGER NOT NULL DEFAULT 0 CHECK(import_verified IN(0,1)),
+  data_revision INTEGER NOT NULL DEFAULT 0,
   blocked_reason TEXT
+);
+CREATE TABLE IF NOT EXISTS relay_verify_progress (
+  verification_id TEXT PRIMARY KEY,
+  source_id TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0,
+  data_revision INTEGER NOT NULL,
+  unit_id INTEGER,
+  cursor TEXT,
+  state TEXT NOT NULL CHECK(state IN ('backlog','ready')),
+  processed_rows INTEGER NOT NULL DEFAULT 0,
+  bytes INTEGER NOT NULL DEFAULT 0,
+  nodes INTEGER NOT NULL DEFAULT 0,
+  certificate_id TEXT,
+  owner_id TEXT,
+  epoch INTEGER
+);
+CREATE TABLE IF NOT EXISTS relay_verify_certificates (
+  certificate_id TEXT PRIMARY KEY,
+  verification_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  data_revision INTEGER NOT NULL,
+  processed_rows INTEGER NOT NULL,
+  bytes INTEGER NOT NULL,
+  nodes INTEGER NOT NULL,
+  owner_id TEXT NOT NULL,
+  epoch INTEGER NOT NULL,
+  created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS relay_manifest (
   source_id TEXT PRIMARY KEY,
@@ -119,3 +147,40 @@ CREATE TABLE IF NOT EXISTS relay_sidecar (
   stamp TEXT,
   PRIMARY KEY(source_id,kind)
 );
+
+-- Every verification-input mutation while importing advances data_revision.
+-- Verify progress/certificate/status bookkeeping is excluded; after ACTIVE the
+-- triggers are inert, so normal runtime mutations do not invalidate the cert.
+CREATE TRIGGER IF NOT EXISTS relay_rev_records_ins AFTER INSERT ON relay_records
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_records_upd AFTER UPDATE ON relay_records
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_records_del AFTER DELETE ON relay_records
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_processed_ins AFTER INSERT ON relay_processed
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_events_ins AFTER INSERT ON relay_events
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_events_upd AFTER UPDATE ON relay_events
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_intents_ins AFTER INSERT ON relay_reply_intents
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_intents_upd AFTER UPDATE ON relay_reply_intents
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_fields_ins AFTER INSERT ON relay_source_fields
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_cursors_ins AFTER INSERT ON relay_cursors
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_cursors_upd AFTER UPDATE ON relay_cursors
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;

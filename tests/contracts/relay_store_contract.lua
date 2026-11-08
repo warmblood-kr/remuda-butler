@@ -11,6 +11,15 @@ local function denied(want,value,why)
 end
 local function writer(s) return good(s:writer()) end
 local function event(id) return {event_id=id,room_id='!test:invalid',payload_json='{"body":"keep","future":true}'} end
+local function verify_all(store,options)
+ for _=1,1000000 do
+  local page=good(store:verify_import(options))
+  if page.verified==true then return page end
+  assert(page.state=='backlog','verification left backlog without a ready certificate')
+  assert(type(page.count)=='number' and page.count>=0,'verification count missing')
+ end
+ error('verification exceeded bounded call count')
+end
 local function imported(t,fields)
  local store=t.store
  local manifest=t:valid_manifest(fields)
@@ -23,7 +32,7 @@ local function imported(t,fields)
   assert(page.count>0,'import batch made no progress')
  end
  assert(done,'import fixture exceeded bounded batch count')
- good(store:verify_import())
+ verify_all(store)
  return good(store:activate())
 end
 
@@ -117,7 +126,7 @@ C.cases = {
   t:reopen();s=t.store
   -- Reprocessing the immutable sidecar after a crash is harmless.
   good(s:import_acks('acks-fixture','$acked\n$acked\n','acks-source-stamp'))
-  good(s:verify_import());good(s:activate())
+  verify_all(s);good(s:activate())
   local pending=good(s:dispatch_page(10))
   equal(#pending,1);equal(pending[1].event_id,'$keep')
   equal(t.inspect:legacy_sidecar_delete_calls(),0,'store never deletes originals')
@@ -130,7 +139,7 @@ C.cases = {
   good(t.store:import_source('fixture1','{"since":"primary","future":1}'))
   good(t.store:import_source('backup1','{"since":"backup","future":2}'))
   while not good(t.store:import_batch('fixture1',64)).done do end
-  good(t.store:verify_import());good(t.store:activate())
+  verify_all(t.store);good(t.store:activate())
   equal(good(t.store:cursor()).since,'primary')
   equal(t.inspect:backup_evidence_retained(),true)
  end},
@@ -159,7 +168,7 @@ C.cases = {
   good(t.store:import_prepare(t:valid_manifest()))
   good(t.store:import_source('fixture1','{"since":"s"}'))
   while not good(t.store:import_batch('fixture1',64)).done do end
-  good(t.store:verify_import())
+  verify_all(t.store)
   t.faults:once('active_marker_publish','io')
   denied('marker_publish',t.store:activate())
   denied('not_active',t.store:dispatch_page(1))

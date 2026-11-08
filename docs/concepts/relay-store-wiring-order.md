@@ -85,7 +85,13 @@ For each sync/messages response:
 
 1. `init.start_matrix_relay` acquires the store/writer before `relay.start`;
    stop releases only after verified stop. `relay.stop` closes the store lease.
-2. Import/verify/activate is an offline owner maintenance path; activation
-   publishes the marker only after DB commit. Live activation remains an owner
-   decision, not this wiring.
+2. Import/verify/activate is code, not an operator-only tool: on a proven
+   exclusive cold-start owner, `relay_store_migrate.run` stages the immutable
+   legacy primary (plus ack/drain evidence, never `.bak` merge), resumes
+   import batches, loops `verify_import` until `verified==true`, then activates
+   and publishes the marker after the DB commit. Crashes resume from durable
+   checkpoints; a changed source refuses. Unknown COMMIT returns for explicit
+   reopen reconciliation.
+3. Live activation remains an owner decision, and an unknown/orphan live owner
+   stays blocked, not this wiring.
 3. Full reader/writer replacement, not a standalone-store claim, is completion.
