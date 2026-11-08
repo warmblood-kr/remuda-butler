@@ -412,6 +412,164 @@ local function cap_matrix_body(text)
   end
 end
 
+-- File source adapter for Matrix dedup: metadata only. Every historical id is
+-- checked with a real JSON decode and typed shapes; a fragment that merely
+-- looks plausible is corrupt, never a clean negative.
+local function metadata_file(path)
+  local file, err = io.open(path, "rb")
+  if not file then
+    if err and tostring(err):find("No such file", 1, true) then return nil, "missing" end
+    return nil, "unreadable"
+  end
+  local text = file:read("*a")
+  local closed = file:close()
+  if not text or not closed then return nil, "unreadable" end
+  return text
+end
+
+local function metadata_decode(text)
+  local json = remuda.json
+  if type(json) ~= "table" or type(json.decode) ~= "function" then return nil end
+  local ok, value = pcall(json.decode, text)
+  if not ok or type(value) ~= "table" then return nil end
+  return value
+end
+
+-- The id becomes a file name; never one that leaves the messages directory.
+local function metadata_id(id)
+  return type(id) == "string" and id ~= "" and not id:find("[/\\]")
+    and not id:find("..", 1, true)
+end
+
+local function envelope_matrix(id)
+  if not metadata_id(id) then return nil, "invalid_id" end
+  local text, why = metadata_file(config.root .. "/messages/" .. id .. ".json")
+  if not text then return nil, why end
+  local envelope = metadata_decode(text)
+  if not envelope then return nil, "invalid_json" end
+  local body = envelope.body
+  if type(body) ~= "table" or type(body.object_id) ~= "string" or body.object_id == "" then
+    return nil, "invalid_body"
+  end
+  local matrix = envelope.matrix
+  if matrix == nil then return { matrix = nil } end
+  if type(matrix) ~= "table" or #matrix > 0 then return nil, "invalid_matrix" end
+  if type(matrix.room_id) ~= "string" or matrix.room_id == ""
+    or type(matrix.event_id) ~= "string" or matrix.event_id == "" then
+    return nil, "invalid_matrix"
+  end
+  return { matrix = matrix, object_id = body.object_id }
+end
+
+local function metadata_lookup(recipient, room, event, raw_recipient)
+  if type(recipient) ~= "string" or recipient == "" or type(room) ~= "string" or room == ""
+    or type(event) ~= "string" or event == "" then
+    return { state = "unknown", reason = "invalid_key" }
+  end
+  -- Memory-only mail has no files: the in-process delivered set is complete
+  -- because queue caches every message it delivers. The bus is keyed by the
+  -- real recipient id, not its hex file component.
+  if not config.root then
+    local unknown = false
+    for id in pairs(bus.mail_delivered[raw_recipient or recipient] or {}) do
+      local message = bus.messages[id]
+      if not message then
+        unknown = true
+      elseif message.matrix and message.matrix.room_id == room
+        and message.matrix.event_id == event then
+        return { state = "found", message_id = id }
+      end
+    end
+    if unknown then return { state = "unknown", reason = "memory_incomplete" } end
+    return { state = "absent", complete = true }
+  end
+  local text, why = metadata_file(config.root .. "/inboxes/" .. recipient .. ".jsonl")
+  if not text then
+    if why == "missing" then return { state = "absent", complete = true } end
+    return { state = "unknown", reason = "source_unreadable" }
+  end
+  local partial = text ~= "" and text:sub(-1) ~= "\n"
+  local seen = {}
+  for line in text:gmatch("([^\n]*)\n") do
+    local parsed = metadata_decode(line)
+    local id = parsed and parsed.message_id
+    if type(id) ~= "string" or id == "" then
+      partial = true
+    elseif not seen[id] then
+      seen[id] = true
+      local metadata = envelope_matrix(id)
+      if not metadata then
+        partial = true
+      elseif metadata.matrix and metadata.matrix.room_id == room
+        and metadata.matrix.event_id == event then
+        -- The event is delivered even if an unrelated row is corrupt; the
+        -- hit's hydration decides whether it can be returned.
+        return { state = "found", message_id = id }
+      end
+    end
+  end
+  if partial then return { state = "unknown", reason = "source_incomplete" } end
+  return { state = "absent", complete = true }
+end
+
+-- The inbox authority is the single metadata source for Matrix dedup. A
+-- missing Store in a bare file-phase test falls back to the same file adapter;
+-- a Store that failed to open refuses (no stale-file fallback).
+local function authority_store()
+  -- Memory-only mail is answered from the in-process delivered set.
+  if not config.root then return nil end
+  if config.authority then return config.authority end
+  if config.authority_unavailable then return nil end
+  local module = remuda._butler_inbox_authority
+  if type(module) ~= "table" or type(module.open) ~= "function" then return nil end
+  local opened = module.open({ root = config.root, json = remuda.json,
+    source = { lookup_matrix = metadata_lookup } })
+  if type(opened) == "table" then config.authority = opened
+  else config.authority_unavailable = true end
+  return config.authority
+end
+
+-- Dedup needs only (recipient, room, event) metadata. Historical bodies are
+-- never opened; a found hit hydrates that one message. If the event cannot be
+-- proven absent, refuse instead of minting a second id.
+local function dedup_existing(recipient_id, matrix)
+  local event = tostring(matrix and matrix.event_id)
+  local recipient = file_component(recipient_id)
+  local store = authority_store()
+  if not store and config.authority_unavailable then
+    return nil, "cannot prove Matrix event " .. event
+      .. " is absent: inbox authority is unavailable; refusing to deliver a duplicate"
+  end
+  local ok, result
+  if store and type(store.lookup_matrix) == "function" then
+    ok, result = pcall(store.lookup_matrix, store, recipient, matrix and matrix.room_id,
+      matrix and matrix.event_id)
+  else
+    ok, result = pcall(metadata_lookup, recipient, matrix and matrix.room_id,
+      matrix and matrix.event_id, recipient_id)
+  end
+  if not ok or type(result) ~= "table" then
+    return nil, "cannot prove Matrix event " .. event
+      .. " is absent: inbox metadata lookup failed; refusing to deliver a duplicate"
+  end
+  if result.state == "found" then
+    local existing = bus.messages[result.message_id]
+    if not existing then
+      local disk = paths(recipient_id)
+      existing = disk and load_message(disk, result.message_id)
+    end
+    if not existing then
+      return nil, "Matrix event " .. event .. " matches " .. tostring(result.message_id)
+        .. " but its message body is unreadable; refusing to deliver a duplicate"
+    end
+    return existing
+  end
+  if result.state == "absent" and result.complete == true then return nil end
+  return nil, "cannot prove Matrix event " .. event .. " is absent ("
+    .. tostring(result.reason or result.state or "unknown")
+    .. "); refusing to deliver a duplicate"
+end
+
 local function queue(from, to, text, subject, in_reply_to, references, matrix)
   from, to = address(from), address(to)
   if to.id == "" then return nil, "recipient has no Butler ULID" end
@@ -419,14 +577,9 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
   local recipient_id = to.id
   load_inbox(recipient_id)
   if matrix and matrix.event_id then
-    for existing_id in pairs(bus.mail_delivered[recipient_id] or {}) do
-      local existing = bus.messages[existing_id]
-        or (config.root and load_message(paths(recipient_id), existing_id))
-      if existing and existing.matrix and existing.matrix.event_id == matrix.event_id
-        and existing.matrix.room_id == matrix.room_id then
-        return existing
-      end
-    end
+    local existing, why = dedup_existing(recipient_id, matrix)
+    if why then return nil, why end
+    if existing then return existing end
   end
   local id = message_id()
   local object_id = "object-" .. id
@@ -726,5 +879,6 @@ end
 remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, forward = forward, forward_delivery = deliver_forward, inbox = inbox, unread = unread, append = append,
   matrix_header = matrix_header, matrix_target = matrix_target,
   matrix_thread_target = matrix_thread_target,
+  metadata_lookup = metadata_lookup,
   matrix_body_mark = MATRIX_BODY_MARK,
   find_message = find_message, is_unread = is_unread, migrate_legacy = migrate_legacy }

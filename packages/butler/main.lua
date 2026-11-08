@@ -486,9 +486,26 @@ caller_principal = assert(remuda._butler_caller_principal)
 -- The SQLite index is a shadow: mail files remain authoritative.
 remuda._butler_inbox_db_config = { root = mail_root, open = remuda.db and remuda.db.open }
 remuda.exec("butler/inbox_db")
+-- Inbox authority contract v1, file phase: metadata-only Matrix lookup and the
+-- pure certifier. SQL/marker/migration are later slices. mail.lua supplies the
+-- file source adapter and receives the Store after it loads.
 remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_quote,
   inbox_db = remuda._butler_inbox_db }
 remuda.exec("butler/mail")
+remuda._butler_inbox_authority_config = { root = mail_root, json = remuda.json,
+  source = { lookup_matrix = remuda._butler_mail.metadata_lookup } }
+remuda.exec("butler/inbox_authority")
+local inbox_authority, inbox_authority_error =
+  remuda._butler_inbox_authority.open(remuda._butler_inbox_authority_config)
+remuda._butler_mail_config.authority = inbox_authority
+remuda._butler_mail_config.authority_unavailable = inbox_authority == nil
+if not inbox_authority then
+  local diagnostics = remuda._butler_diagnostics
+  if diagnostics and type(diagnostics.record) == "function" then
+    pcall(diagnostics.record, "inbox_authority", "degraded", "authority_open",
+      tostring(inbox_authority_error and inbox_authority_error.code or inbox_authority_error))
+  end
+end
 if remuda._butler_inbox_db then
   local imported_ok, imported, import_why = pcall(remuda._butler_inbox_db.import_all)
   local status = remuda._butler_inbox_db.status()
