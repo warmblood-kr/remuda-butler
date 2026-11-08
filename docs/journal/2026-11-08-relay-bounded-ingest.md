@@ -31,5 +31,14 @@ Evidence on this candidate:
   revision 40/40, case_turns 27/27, domain_priority 15/15, sealed 14/14,
   projection 3/3, upgrade 8/8, long numeric 13/13, long attempts 8/8, scalar
   budget 2/2, plus verify/owner/recovery/domain/scope/migration/protocol.
-- Near-32MiB and the 110,001-row persistent proof are gated separately; record
-  their measured walltimes rather than claiming a range that did not run.
+- 110,001-row persistent proof: 1742 verify calls, max 0.141s, 0 mismatches,
+  27 reopens, certificate and activation true.
+- Ack scan ranges are keyed by original line start and INSERT OR IGNORE, so a
+  lost COMMIT cannot duplicate a range; the first line at byte zero is ordinal
+  one. Large ack E2E reran on this key: 606 verify calls, max 0.865s.
+- COMMIT recovery 5/5: admission lost reply returns the same ingest id; hash
+  lost reply resumes at revision/offset; pre-COMMIT abort leaves revision 1 and
+  offset 0; ACK_SCAN lost reply keeps one range; ACK_APPLY lost reply keeps the
+  delivered event and applies once.
+- Near-32MiB is gated separately; record measured walltime and SQL page work
+  rather than claiming a range that did not finish.
