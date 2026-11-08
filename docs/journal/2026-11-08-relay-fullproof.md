@@ -79,8 +79,7 @@ durable signal on first creation), so an aborted pending publication leaves the
 old trigger fingerprint and retries; certificate ids are recomputed from their
 exact stored inputs plus PROOF_VERSION and require the proof_state store id, so
 an old 646 certificate or a wrong-store version row cannot bless READY; and the
-outbox page bounds attempts in SQL time (short values only, long numeric-looking
-values refuse, long nonnumeric values normalize to NULL), keeps txn and payload
-equality in SQL, and never transfers payload/large scalar strings into Lua.
-PROOF_VERSION is 3. Schema state now stores schema_version + pending and is
+outbox page checks each text attempt's length against max_bytes, fetches it one
+row at a time, and applies the exact Lua tonumber rule; txn/payload equality stay
+in SQL. PROOF_VERSION is 4. Schema state now stores schema_version + pending and is
 written before repair. Table count remains 18.

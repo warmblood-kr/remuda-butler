@@ -359,7 +359,7 @@ local METHODS = {
 -- Bump whenever the verification semantics change. A READY certificate and
 -- activation are bound to this constant through relay_proof_state, so a cert
 -- produced by an older verifier cannot be reused even if triggers match.
-local PROOF_VERSION = 3
+local PROOF_VERSION = 4
 local SCHEMA_VERSION = 1
 
 local KNOWN = {
@@ -2372,48 +2372,22 @@ function M.open(opts)
 
   -- Outbox attempts are normalized in Lua with the exact same tonumber rule as
   -- the importer; SQL GLOB/CAST cannot reproduce 1junk/hex/exponent semantics.
-  local function outbox_step(p, max_rows)
+  local function outbox_step(p, max_rows, max_bytes)
     local cursor = p.phase_cursor and decode(p.phase_cursor) or nil
     if type(cursor) ~= 'table' or cursor.task ~= 'outbox' then
       return fail('derived_state')
     end
-    -- No payload enters Lua. Attempts are classified in SQL and only bounded
-    -- scalars (<=64B trimmed or <=16 significant hex digits) are fetched for
-    -- the exact Lua tonumber rule. Long all-digit values compare by SQL number;
-    -- long nonnumeric values require stored NULL; other long numeric forms are
-    -- an explicit oversize refusal.
-    local trimmed = 'trim(json_extract(r.payload_json,\'$.attempts\'),' ..
-      '\' \'||char(9)||char(10)||char(13))'
-    local tlen = 'length(CAST(' .. trimmed .. ' AS BLOB))'
-    local digits = '(' .. tlen .. '<=308 AND ' .. tlen .. '>0 AND ' ..
-      trimmed .. ' NOT GLOB \'*[^0-9]*\')'
-    local signed = '(' .. tlen .. '<=308 AND substr(' .. trimmed .. ',1,1) IN (\'+\',\'-\') ' ..
-      'AND length(substr(' .. trimmed .. ',2))>0 ' ..
-      'AND substr(' .. trimmed .. ',2) NOT GLOB \'*[^0-9]*\')'
-    local hexsig = 'ltrim(substr(' .. trimmed .. ',3),\'0\')'
-    local hex = '(substr(' .. trimmed .. ',1,2) IN (\'0x\',\'0X\') ' ..
-      'AND substr(' .. trimmed .. ',3) NOT GLOB \'*[^0-9a-fA-F]*\' ' ..
-      'AND length(' .. hexsig .. ')<=16)'
-    local nonnumeric = '(NOT ' .. digits .. ' AND NOT ' .. signed .. ' AND NOT ' .. hex ..
-      ' AND substr(' .. trimmed .. ',1,2) NOT IN (\'0x\',\'0X\') ' ..
-      'AND ' .. trimmed .. ' GLOB \'*[^0-9eE+.-]*\')'
+    -- Metadata first. Text attempts are fetched one row at a time only after
+    -- their byte length is known, so the exact Lua tonumber rule applies to
+    -- every legal value without pulling 64 large scalars into Lua at once.
     local sql = 'SELECT r.record_key AS reply_id,' ..
       'json_type(r.payload_json,\'$.attempts\') AS attempts_type,' ..
-      tlen .. ' AS attempts_trim_len,' ..
-      'CASE WHEN ' .. tlen .. '<=64 THEN ' .. trimmed .. ' ELSE NULL END AS attempts_trim,' ..
-      'CASE WHEN ' .. tlen .. '>64 AND ' .. hex ..
-        ' THEN CASE WHEN (' .. hexsig .. ')=\'\' THEN \'0x0\' ' ..
-          'ELSE \'0x\'||(' .. hexsig .. ') END ELSE NULL END AS attempts_hex,' ..
-      'CASE WHEN ' .. tlen .. '>64 AND (' .. digits .. ' OR ' .. signed .. ') ' ..
-        'AND i.attempts IS CAST(' .. trimmed .. ' AS REAL) THEN 1 ELSE 0 END AS attempts_number_equal,' ..
-      'CASE WHEN ' .. tlen .. '>64 AND ' .. nonnumeric .. ' THEN 1 ELSE 0 END AS attempts_nonnumeric,' ..
-      'CASE WHEN ' .. tlen .. '>64 AND NOT ' .. digits .. ' AND NOT ' .. signed ..
-        ' AND NOT ' .. hex .. ' AND NOT ' .. nonnumeric .. ' THEN 1 ELSE 0 END AS attempts_ambiguous,' ..
+      'length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB)) AS attempts_len,' ..
       'CASE WHEN json_type(r.payload_json,\'$.attempts\')=\'true\' THEN 1 ' ..
         'WHEN json_type(r.payload_json,\'$.attempts\')=\'false\' THEN 0 ' ..
         'WHEN json_type(r.payload_json,\'$.attempts\') IN (\'integer\',\'real\') ' ..
           'THEN json_extract(r.payload_json,\'$.attempts\') ' ..
-        'ELSE NULL END AS attempts_raw,' ..
+        'ELSE NULL END AS attempts_nontext,' ..
       'CASE WHEN i.txn_id IS (CASE WHEN json_type(r.payload_json,\'$.txn_id\')=\'text\' ' ..
         'AND json_extract(r.payload_json,\'$.txn_id\')<>\'\' ' ..
         'THEN json_extract(r.payload_json,\'$.txn_id\') ELSE NULL END) ' ..
@@ -2432,6 +2406,7 @@ function M.open(opts)
     params[#params + 1] = max_rows
     local rows, why = query(db, sql, params)
     if not rows then return fail('derived', why) end
+    local processed, used = 0, 0
     for _, row in ipairs(rows) do
       if row.intent_reply == nil or tonumber(row.payload_equal) ~= 1
           or tonumber(row.imported) ~= 1 or row.state ~= 'uncertain'
@@ -2439,32 +2414,33 @@ function M.open(opts)
         return fail('import_incomplete', 'intent')
       end
       local stored_attempts = row.attempts ~= nil and tonumber(row.attempts) or nil
+      local expected
       if row.attempts_type == 'text' then
-        local tlen = tonumber(row.attempts_trim_len) or 0
-        if tlen <= 64 then
-          if intent_attempts(row.attempts_trim) ~= stored_attempts then
-            return fail('import_incomplete', 'intent')
-          end
-        elseif tonumber(row.attempts_number_equal) == 1 then
-          -- exact SQL numeric comparison already succeeded
-        elseif row.attempts_hex ~= nil then
-          if intent_attempts(row.attempts_hex) ~= stored_attempts then
-            return fail('import_incomplete', 'intent')
-          end
-        elseif tonumber(row.attempts_nonnumeric) == 1 then
-          if stored_attempts ~= nil then
-            return fail('import_incomplete', 'intent')
-          end
-        elseif tonumber(row.attempts_ambiguous) == 1 then
-          return fail('import_incomplete', 'intent_oversize')
-        else
-          return fail('import_incomplete', 'intent')
+        local len = tonumber(row.attempts_len) or 0
+        if len > max_bytes - used then
+          if processed == 0 then return fail('budget_too_small') end
+          break
         end
+        local scalar, scalar_why = query(db,
+          'SELECT json_extract(payload_json,\'$.attempts\') AS value ' ..
+            'FROM relay_records WHERE namespace=\'matrix_reply_outbox\' ' ..
+            'AND parent_key=\'\' AND record_key=?', { row.reply_id })
+        if not scalar then return fail('derived', scalar_why) end
+        if not scalar[1] then return fail('import_incomplete', 'intent') end
+        expected = intent_attempts(scalar[1].value)
+        used = used + len
       else
-        if intent_attempts(row.attempts_raw) ~= stored_attempts then
-          return fail('import_incomplete', 'intent')
-        end
+        expected = intent_attempts(row.attempts_nontext)
       end
+      if expected ~= stored_attempts then
+        return fail('import_incomplete', 'intent')
+      end
+      processed = processed + 1
+    end
+    if processed < #rows then
+      p.phase_cursor = encode({ task = 'outbox', started = true,
+        reply_id = rows[processed].reply_id })
+      return { count = processed }
     end
     if #rows == max_rows then
       p.phase_cursor = encode({ task = 'outbox', started = true,
@@ -2755,7 +2731,7 @@ function M.open(opts)
         result = { count = 0, bytes = 0, nodes = 0, state = 'backlog',
           phase = 'derived' }
       elseif derived_cursor.task == 'outbox' then
-        local stepped, step_why = outbox_step(p, max_rows)
+        local stepped, step_why = outbox_step(p, max_rows, max_bytes)
         if not stepped then rollback(db); return nil, step_why end
         if p.phase_cursor ~= nil then
           result = { count = stepped.count or 0, bytes = 0, nodes = 0,
