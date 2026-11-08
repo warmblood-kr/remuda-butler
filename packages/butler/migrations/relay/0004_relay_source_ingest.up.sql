@@ -55,6 +55,6 @@ CREATE TRIGGER IF NOT EXISTS relay_capture_no_delete BEFORE DELETE ON relay_sour
 BEGIN SELECT RAISE(ABORT,'capture_immutable'); END;
 DROP TRIGGER IF EXISTS relay_capture_no_duplicate;
 CREATE TRIGGER IF NOT EXISTS relay_capture_no_duplicate BEFORE INSERT ON relay_source_capture
-WHEN EXISTS(SELECT 1 FROM relay_source_capture c WHERE c.store_id=NEW.store_id
-  AND c.source_id=NEW.source_id AND c.kind=NEW.kind)
+WHEN EXISTS(SELECT 1 FROM relay_source_capture c WHERE c.ingest_id=NEW.ingest_id
+  OR (c.store_id=NEW.store_id AND c.source_id=NEW.source_id AND c.kind=NEW.kind))
 BEGIN SELECT RAISE(ABORT,'capture_immutable'); END;

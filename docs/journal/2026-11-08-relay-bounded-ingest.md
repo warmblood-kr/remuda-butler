@@ -40,5 +40,9 @@ Evidence on this candidate:
   lost reply resumes at revision/offset; pre-COMMIT abort leaves revision 1 and
   offset 0; ACK_SCAN lost reply keeps one range; ACK_APPLY lost reply keeps the
   delivered event and applies once.
+- QA `ingest_edges.lua` 14/14 after HOLD fixes: the capture trigger now refuses
+  a same-PK REPLACE with a different identity, source/sidecar admission
+  unknown-COMMIT quarantines the lease, and a READY ingest_step returns numeric
+  count/bytes/nodes.
 - Near-32MiB is gated separately; record measured walltime and SQL page work
   rather than claiming a range that did not finish.
