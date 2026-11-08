@@ -184,3 +184,24 @@ BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1
 CREATE TRIGGER IF NOT EXISTS relay_rev_cursors_upd AFTER UPDATE ON relay_cursors
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_source_ins AFTER INSERT ON relay_import_source
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_source_upd AFTER UPDATE ON relay_import_source
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+ AND (OLD.raw IS NOT NEW.raw OR OLD.raw_sha256 IS NOT NEW.raw_sha256
+   OR OLD.stamp IS NOT NEW.stamp OR OLD.bytes IS NOT NEW.bytes
+   OR OLD.role IS NOT NEW.role OR OLD.source_id IS NOT NEW.source_id)
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_source_del AFTER DELETE ON relay_import_source
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_units_ins AFTER INSERT ON relay_import_units
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_units_upd AFTER UPDATE ON relay_import_units
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_units_del AFTER DELETE ON relay_import_units
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;

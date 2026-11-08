@@ -208,6 +208,27 @@ BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1
 CREATE TRIGGER IF NOT EXISTS relay_rev_cursors_upd AFTER UPDATE ON relay_cursors
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_source_ins AFTER INSERT ON relay_import_source
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_source_upd AFTER UPDATE ON relay_import_source
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+ AND (OLD.raw IS NOT NEW.raw OR OLD.raw_sha256 IS NOT NEW.raw_sha256
+   OR OLD.stamp IS NOT NEW.stamp OR OLD.bytes IS NOT NEW.bytes
+   OR OLD.role IS NOT NEW.role OR OLD.source_id IS NOT NEW.source_id)
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_source_del AFTER DELETE ON relay_import_source
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_units_ins AFTER INSERT ON relay_import_units
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_units_upd AFTER UPDATE ON relay_import_units
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_units_del AFTER DELETE ON relay_import_units
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
 ]]
 
 local METHODS = {
@@ -1223,7 +1244,9 @@ function M.open(opts)
     return rows[1]
   end
 
-  local function verify_source_page(unit, source_id, after, limit)
+  -- Metadata-only planning never returns record payload to Lua. The bounded
+  -- prefix is then checked by an exact SQL join that returns only counts.
+  local function verify_source_meta(unit, source_id, after, limit)
     local path = '$.' .. unit.root_field
     local payload, from, params
     if unit.kind == 'raw' then
@@ -1250,7 +1273,7 @@ function M.open(opts)
       params[#params + 1] = after
     end
     local order = unit.kind == 'array' and '' or ' ORDER BY CAST(e.key AS BLOB)'
-    local sql = 'SELECT e.key AS key,e.type AS kind,' .. payload .. ' AS payload,' ..
+    local sql = 'SELECT e.key AS key,e.type AS kind,' ..
       'length(CAST(' .. payload .. ' AS BLOB)) AS bytes,' ..
       '(SELECT count(*) FROM json_tree(' .. payload .. ')) AS nodes ' ..
       from .. condition .. order .. ' LIMIT ?'
@@ -1258,29 +1281,52 @@ function M.open(opts)
     return query(db, sql, params)
   end
 
-  local function verify_target(unit, row)
-    local namespace = unit.kind == 'raw' and ('unknown:' .. unit.root_field) or unit.root_field
-    local record_key = tostring(row.key)
-    local rows, why = query(db,
-      'SELECT record_key,json_kind,payload_json,ordinal FROM relay_records ' ..
-        'WHERE namespace=? AND parent_key=? AND record_key=?',
-      { namespace, unit.parent_key or '', record_key })
-    if not rows then return nil, why end
-    local target = rows[1]
-    if not target or target.record_key ~= record_key
-        or target.json_kind ~= row.kind or target.payload_json ~= row.payload then
-      return nil, 'identity'
+  local function verify_source_prefix(unit, source_id, after, limit)
+    local path = '$.' .. unit.root_field
+    local payload, from, params
+    if unit.kind == 'raw' then
+      from = 'FROM relay_import_source s,json_each(s.raw) e WHERE s.source_id=? AND e.key=?'
+      payload = 's.raw -> e.fullkey'
+      params = { source_id, unit.root_field }
+    elseif unit.nested == 1 then
+      from = 'FROM relay_import_source s,json_each(s.raw,?) r,json_each(r.value) e ' ..
+        'WHERE s.source_id=? AND r.key=?'
+      payload = 'r.value -> e.fullkey'
+      params = { path, source_id, unit.parent_key }
+    else
+      from = 'FROM relay_import_source s,json_each(s.raw,?) e WHERE s.source_id=?'
+      payload = 's.raw -> e.fullkey'
+      params = { path, source_id }
     end
-    if unit.kind == 'array' then
-      if tonumber(target.ordinal) ~= tonumber(row.key) then return nil, 'identity' end
-    elseif target.ordinal ~= nil then
-      return nil, 'identity'
+    local condition = ''
+    if unit.kind ~= 'raw' and after ~= nil then
+      if unit.kind == 'array' then
+        condition = ' AND CAST(e.key AS INTEGER)>CAST(? AS INTEGER)'
+      else
+        condition = ' AND CAST(e.key AS BLOB)>CAST(? AS BLOB)'
+      end
+      params[#params + 1] = after
     end
-    return true
+    local order = unit.kind == 'array' and '' or ' ORDER BY CAST(e.key AS BLOB)'
+    local record_key = unit.kind == 'array' and 'CAST(src.key AS TEXT)' or 'src.key'
+    local sql = 'WITH src AS MATERIALIZED (SELECT e.key AS key,e.type AS kind,' ..
+      payload .. ' AS payload ' .. from .. condition .. order .. ' LIMIT ?) ' ..
+      'SELECT count(*) AS n,COALESCE(sum(CASE WHEN ' ..
+      'r.record_key IS NULL OR r.json_kind<>src.kind OR r.payload_json<>src.payload ' ..
+      'OR (?=\'array\' AND (r.ordinal IS NULL OR CAST(r.ordinal AS TEXT)<>CAST(src.key AS TEXT))) ' ..
+      'OR (?=\'object\' AND r.ordinal IS NOT NULL) THEN 1 ELSE 0 END),0) AS bad ' ..
+      'FROM src LEFT JOIN relay_records r ON r.namespace=? AND r.parent_key=? ' ..
+      'AND r.record_key=' .. record_key
+    params[#params + 1] = limit
+    params[#params + 1] = unit.kind
+    params[#params + 1] = unit.kind
+    params[#params + 1] = (unit.kind == 'raw' and ('unknown:' .. unit.root_field) or unit.root_field)
+    params[#params + 1] = unit.parent_key or ''
+    return query(db, sql, params)
   end
 
   function store:verify_import(options)
-    options = options or {}
+    if options == nil then options = {} end
     if store.closed then return nil, 'stale_writer' end
     local ok, owner_why = owner_ok('verify')
     if not ok then return nil, owner_why end
@@ -1393,34 +1439,9 @@ function M.open(opts)
       local unit = units[1]
       if not unit then rollback(db); return fail('import_incomplete', 'unit_missing') end
       local limit = math.min(max_rows - processed_this, 64)
-      local rows, page_why = verify_source_page(unit, primary.source_id, cursor, limit)
-      if not rows then rollback(db); return fail('verify_page', page_why) end
-      local consumed = 0
-      local budget_stop = false
-      for _, row in ipairs(rows) do
-        local row_bytes, row_nodes = tonumber(row.bytes) or 0, tonumber(row.nodes) or 0
-        if bytes_this + row_bytes > max_bytes or nodes_this + row_nodes > max_nodes then
-          if consumed == 0 then
-            -- The next record cannot fit even in a fresh per-call budget.
-            rollback(db)
-            return fail('budget_too_small')
-          end
-          budget_stop = true
-          break
-        end
-        local target_ok, target_why = verify_target(unit, row)
-        if not target_ok then rollback(db); return fail('import_incomplete', target_why) end
-        processed_this = processed_this + 1
-        consumed = consumed + 1
-        bytes_this = bytes_this + row_bytes
-        nodes_this = nodes_this + row_nodes
-        total_rows = total_rows + 1
-        total_bytes = total_bytes + row_bytes
-        total_nodes = total_nodes + row_nodes
-        cursor = tostring(row.key)
-      end
-      if budget_stop then break end
-      if #rows < limit then
+      local meta, page_why = verify_source_meta(unit, primary.source_id, cursor, limit)
+      if not meta then rollback(db); return fail('verify_page', page_why) end
+      if #meta == 0 then
         -- This unit is exhausted; visit the next unit while budget remains.
         units_this = units_this + 1
         local next_unit, next_why = query(db,
@@ -1430,9 +1451,55 @@ function M.open(opts)
         unit_id, cursor = next_unit[1].id, nil
         if unit_id == nil then finished_all = true end
       else
-        -- A full page may have more rows in this same unit. Keep the cursor so
-        -- the next call resumes exactly here.
-        break
+        local fits, prefix_bytes, prefix_nodes = 0, 0, 0
+        for index, row in ipairs(meta) do
+          local row_bytes, row_nodes = tonumber(row.bytes) or 0, tonumber(row.nodes) or 0
+          if bytes_this + prefix_bytes + row_bytes > max_bytes
+              or nodes_this + prefix_nodes + row_nodes > max_nodes then
+            if processed_this == 0 and index == 1 then
+              -- The next record cannot fit even in a fresh per-call budget.
+              rollback(db)
+              return fail('budget_too_small')
+            end
+            break
+          end
+          fits, prefix_bytes, prefix_nodes = index, prefix_bytes + row_bytes,
+            prefix_nodes + row_nodes
+        end
+        if fits == 0 then break end
+        local checked, check_why = verify_source_prefix(unit, primary.source_id,
+          cursor, fits)
+        if not checked then rollback(db); return fail('verify_page', check_why) end
+        if tonumber(checked[1].n) ~= fits or tonumber(checked[1].bad) ~= 0 then
+          rollback(db); return fail('import_incomplete', 'identity')
+        end
+        for index = 1, fits do
+          local row = meta[index]
+          processed_this = processed_this + 1
+          total_rows = total_rows + 1
+          cursor = tostring(row.key)
+        end
+        bytes_this, nodes_this = bytes_this + prefix_bytes, nodes_this + prefix_nodes
+        total_bytes, total_nodes = total_bytes + prefix_bytes, total_nodes + prefix_nodes
+        if fits < #meta then
+          -- Budget stopped inside the page; keep the cursor at the last
+          -- verified record and resume here on the next call.
+          break
+        end
+        if #meta < limit then
+          -- This unit is exhausted; visit the next unit while budget remains.
+          units_this = units_this + 1
+          local next_unit, next_why = query(db,
+            'SELECT min(unit_id) AS id FROM relay_import_units WHERE source_id=? AND unit_id>?',
+            { primary.source_id, unit_id })
+          if not next_unit then rollback(db); return fail('verify_unit', next_why) end
+          unit_id, cursor = next_unit[1].id, nil
+          if unit_id == nil then finished_all = true end
+        else
+          -- A full page may have more rows in this same unit. Keep the cursor
+          -- so the next call resumes exactly here.
+          break
+        end
       end
     end
     p.revision = expected_revision + 1

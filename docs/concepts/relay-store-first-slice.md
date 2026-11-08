@@ -49,10 +49,12 @@ then `verified=true,state='ready',certificate_id`. A next record that cannot
 fit even a fresh budget returns `budget_too_small` with no advance. Callers
 must loop until `verified==true`; activation refuses a backlog.
 
-It compares every imported row to the staged source (raw token, kind, map
-key/array ordinal, parent). A same-count payload tamper therefore fails:
+Planning reads key/kind/bytes/nodes only; payload never enters Lua before the
+budget filters it, and the bounded prefix is checked by an exact SQL join that
+returns counts. It compares every imported row to the source (raw token, kind, map
+key/array ordinal, parent). A same-count payload tamper fails:
 `data_revision` advances on every importing-time proof-input mutation
-(records/processed/events/intents/source_fields/cursors) and activation
+(records/processed/events/intents/source_fields/cursors/import-source/units) and activation
 requires the certificate, checkpoint and authority data_revision to match by
 indexed equality. Verify progress/certificate/status bookkeeping, authority
 owner/epoch, and post-activation raw retirement/normal mutations are excluded.
