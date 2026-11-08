@@ -784,6 +784,20 @@ end
 local function ensure_tracking(store)
   local row, err = migration_state_row(store)
   if row == nil and err then return nil, err end
+  -- Refuse an offset-only cursor schema instead of issuing SQL that assumes
+  -- captured columns. Migration 0009 performs the real rebuild; a borrowed DB
+  -- that skipped it must not infer capture from the current EOF.
+  local columns = sql_query(store, "PRAGMA table_info(migration_seal_cursor)", {})
+  if not columns then
+    return nil, { code = "unavailable", field = "migration_seal_cursor" }
+  end
+  local capture_ready = false
+  for _, column in ipairs(columns) do
+    if column.name == "cursor_version" then capture_ready = true; break end
+  end
+  if not capture_ready then
+    return nil, { code = "recovery_required", field = "seal_cursor_schema" }
+  end
   local marker = store.marker
   if marker.state == "FILE" then
     if row then return nil, { code = "recovery_required", field = "migration_state" } end
