@@ -265,10 +265,33 @@ overrides it. A missing or empty file means "not loaded", and nothing fails.
 A file over 8 KiB, or one that cannot be read, is not loaded and is reported.
 
 Butler writes the layers into the agent's `AGENTS.md` as the managed block
-`guidance-layers`: a list of every layer with its status and version (the
-first 12 hex digits of the file's sha256), then the text of each loaded layer.
-A new member's welcome mail carries the same text. Edit the files, not the
-block: Butler rewrites it.
+`guidance-layers`: one instruction paragraph for the shared cluster file, a
+list of every layer with its status and version (the first 12 hex digits of the
+file's sha256), then the text of each loaded layer. The block's shared-file
+instructions are the same for the root and for members, and a new member's
+welcome mail carries the same text. Edit the files, not the block: Butler
+rewrites it. A layer whose text contains a `remuda-butler:managed id=` marker is
+withheld as unreadable, so the shared file must not contain one.
+
+The instruction paragraph names the cluster file's one stable location and tells
+the agent to use it for guidance shared across the cluster. Butler's loader
+reads this node's copy automatically when a session starts, relaunches or is
+about to compact, and the cluster layer in the block is that loaded snapshot.
+The shared file is capped at 8 KiB; a larger one is reported, not loaded. When
+the layer is missing, empty, too large or unavailable, the agent continues with
+the layers that loaded, reports the gap when it matters, never invents or
+auto-creates shared rules, and never treats the shared URI as a local
+filesystem path. An
+agent that needs the current source rather than its session's snapshot may
+inspect it read-only with `remuda vfs get remuda:///butler/guidance/cluster.md`
+(add `--local` to read only this node's copy) when the task calls for checking
+the source. That inspection does not bypass a rejected status, does not apply a
+newer file over the block, and never infers the contents from a failed read or
+an unavailable status. An agent publishes shared guidance only when the owner
+or its leader explicitly asks, with
+`remuda vfs put FILE remuda:///butler/guidance/cluster.md`. A put does not
+guarantee every peer has synced it, and running sessions keep the snapshot they
+loaded until they refresh it.
 
 Butler reads the files again when a session starts (a new launch, a relaunch,
 or a daemon restart that starts the root again) and just before it compacts a

@@ -156,6 +156,22 @@ function guidance_layers.render(layers, home)
     "A later layer adds to or overrides an earlier one. Edit the files named here,",
     "not this block: Butler rewrites it on every session start.",
     "",
+    "Use `remuda:///butler/guidance/cluster.md` for guidance shared across every",
+    "node of the cluster: the cluster-shared Remuda VFS file. Butler loads this",
+    "node's copy when a session starts, relaunches or is about to compact (8 KiB",
+    "cap; a larger file is reported, not loaded), and the cluster layer below is",
+    "that loaded snapshot: read it. When the layer is missing, empty, too large or",
+    "unavailable, continue with the layers that loaded and report the gap when it",
+    "matters; never invent or auto-create shared rules. To read the current source",
+    "yourself, run `remuda vfs get remuda:///butler/guidance/cluster.md` (it may ask",
+    "other nodes; `--local` keeps it to this node's copy) when a task calls for",
+    "checking it: do not bypass a rejected status, apply a newer file over the",
+    "block, or infer contents from a failed read or unavailable status. Publish",
+    "only when the owner or your leader explicitly asks, with",
+    "`remuda vfs put FILE remuda:///butler/guidance/cluster.md`; a put does not",
+    "guarantee every peer has synced it, and running sessions keep the snapshot",
+    "they loaded until they refresh it.",
+    "",
   }
   for _, layer in ipairs(layers) do
     local line
