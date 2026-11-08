@@ -86,5 +86,19 @@ if ! isolated_env_cleanup 0; then
 fi
 [[ ! -e "$T" ]] || note "cleanup kept the scratch after the ps-denied process exited"
 
+# An unknown kill failure is not proof of exit; only "No such process" is.
+(
+  function kill() { echo "kill: unknown failure" >&2; return 1; }
+  isolated_env_pid_alive $$
+) || note "an unknown kill failure was treated as gone"
+
+# A reaped, non-child PID positively says "No such process".
+true &
+gone=$!
+wait "$gone" 2>/dev/null || true
+if isolated_env_pid_alive "$gone"; then
+  note "a reaped PID was treated as alive"
+fi
+
 if (( fail )); then exit 1; fi
-echo "ok - private-envelope cleanup preserves late/no-bind and ps-denied daemons"
+echo "ok - private-envelope cleanup preserves late/no-bind, ps-denied and unknown-kill daemons"

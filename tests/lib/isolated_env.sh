@@ -115,11 +115,13 @@ isolated_env_pid_alive() {
   local pid=$1 err
   [[ -n "$pid" ]] || return 1
   if kill -0 "$pid" 2>/dev/null; then return 0; fi
-  err=$(kill -0 "$pid" 2>&1) || true
+  # Only an explicit "No such process" proves exit. Every other failure
+  # (EPERM in a sandbox, an unknown kill error) is retained, never "gone".
+  err=$(LC_ALL=C kill -0 "$pid" 2>&1) || true
   case "$err" in
-    *[Pp]ermission*|*"not permitted"*|*"Operation not permitted"*) return 0 ;;
+    *"No such process"*) return 1 ;;
+    *) return 0 ;;
   esac
-  return 1
 }
 
 # True only when ps positively reports Z. A ps failure (for example EPERM in a
