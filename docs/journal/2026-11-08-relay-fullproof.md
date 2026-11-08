@@ -81,5 +81,7 @@ exact stored inputs plus PROOF_VERSION and require the proof_state store id, so
 an old 646 certificate or a wrong-store version row cannot bless READY; and the
 outbox page checks each text attempt's length against max_bytes, fetches it one
 row at a time, and applies the exact Lua tonumber rule; txn/payload equality stay
-in SQL. PROOF_VERSION is 4. Schema state now stores schema_version + pending and is
-written before repair. Table count remains 18.
+in SQL. PROOF_VERSION is 4. Schema state stores schema_version + pending before repair.
+
+`abee747`: 13/13 long numeric forms, 8/8 long attempts; 110001 rows in 1742
+calls, max 0.144s, 0 mismatches, 26 reopens.
