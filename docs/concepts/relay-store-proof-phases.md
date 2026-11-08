@@ -54,10 +54,12 @@ count. No whole-target COUNT/EXCEPT is used.
 DERIVED checks processed and pending-event directions with indexed aggregate
 passes (not per-row JSON); delivered events require a witnessed CRLF-normalized
 ack and `inbox_mail_id` must stay NULL. Outbox intents are paged metadata-only:
-the query selects attempt/txn scalars and a SQL payload-equality flag (never
-payload JSON into Lua); the first page has no lower bound so an empty reply id
-is checked. Attempts use the importer's Lua `tonumber` rule (1.0/"1"/1e2/0x10
-exact; 1junk/1.5 NULL). Extra or missing rows refuse. Measured: derived ~2ms/2k rows; the 110001-row proof <=0.12s/call. READY creates the certificate only when all phases share the same witness and
+no payload enters Lua; SQL decides payload/txn equality, and only bounded
+attempts (<=64B trimmed or <=16 hex digits) or a long-number comparison enter
+the check. Long junk requires stored NULL; other long numeric forms refuse.
+The first page has no lower bound so an empty reply id is checked. Extra or
+missing rows refuse. Measured: derived ~2ms/2k rows; the 110001-row proof
+<=0.12s/call. READY creates the certificate only when all phases share the same witness and
 `data_revision`. The certificate id is recomputed from its exact inputs plus
 `PROOF_VERSION`; `relay_proof_state` binds the version and store id.
 READY/activation require the recomputation, so an older-verifier or fabricated

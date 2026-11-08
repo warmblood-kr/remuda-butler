@@ -2377,41 +2377,43 @@ function M.open(opts)
     if type(cursor) ~= 'table' or cursor.task ~= 'outbox' then
       return fail('derived_state')
     end
-    -- Scalars are bounded in SQL. Short attempts are fetched for the exact Lua
-    -- tonumber rule; long numeric-looking attempts become an explicit oversize
-    -- refusal, and other long values normalize to NULL without transfer. Txn
-    -- equality and payload equality stay in SQL; no payload enters Lua.
+    -- No payload enters Lua. Attempts are classified in SQL and only bounded
+    -- scalars (<=64B trimmed or <=16 significant hex digits) are fetched for
+    -- the exact Lua tonumber rule. Long all-digit values compare by SQL number;
+    -- long nonnumeric values require stored NULL; other long numeric forms are
+    -- an explicit oversize refusal.
+    local trimmed = 'trim(json_extract(r.payload_json,\'$.attempts\'),' ..
+      '\' \'||char(9)||char(10)||char(13))'
+    local tlen = 'length(CAST(' .. trimmed .. ' AS BLOB))'
+    local digits = '(' .. tlen .. '<=308 AND ' .. tlen .. '>0 AND ' ..
+      trimmed .. ' NOT GLOB \'*[^0-9]*\')'
+    local signed = '(' .. tlen .. '<=308 AND substr(' .. trimmed .. ',1,1) IN (\'+\',\'-\') ' ..
+      'AND length(substr(' .. trimmed .. ',2))>0 ' ..
+      'AND substr(' .. trimmed .. ',2) NOT GLOB \'*[^0-9]*\')'
+    local hexsig = 'ltrim(substr(' .. trimmed .. ',3),\'0\')'
+    local hex = '(substr(' .. trimmed .. ',1,2) IN (\'0x\',\'0X\') ' ..
+      'AND substr(' .. trimmed .. ',3) NOT GLOB \'*[^0-9a-fA-F]*\' ' ..
+      'AND length(' .. hexsig .. ')<=16)'
+    local nonnumeric = '(NOT ' .. digits .. ' AND NOT ' .. signed .. ' AND NOT ' .. hex ..
+      ' AND substr(' .. trimmed .. ',1,2) NOT IN (\'0x\',\'0X\') ' ..
+      'AND ' .. trimmed .. ' GLOB \'*[^0-9eE+.-]*\')'
     local sql = 'SELECT r.record_key AS reply_id,' ..
       'json_type(r.payload_json,\'$.attempts\') AS attempts_type,' ..
-      'length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB)) AS attempts_len,' ..
+      tlen .. ' AS attempts_trim_len,' ..
+      'CASE WHEN ' .. tlen .. '<=64 THEN ' .. trimmed .. ' ELSE NULL END AS attempts_trim,' ..
+      'CASE WHEN ' .. tlen .. '>64 AND ' .. hex ..
+        ' THEN CASE WHEN (' .. hexsig .. ')=\'\' THEN \'0x0\' ' ..
+          'ELSE \'0x\'||(' .. hexsig .. ') END ELSE NULL END AS attempts_hex,' ..
+      'CASE WHEN ' .. tlen .. '>64 AND (' .. digits .. ' OR ' .. signed .. ') ' ..
+        'AND i.attempts IS CAST(' .. trimmed .. ' AS REAL) THEN 1 ELSE 0 END AS attempts_number_equal,' ..
+      'CASE WHEN ' .. tlen .. '>64 AND ' .. nonnumeric .. ' THEN 1 ELSE 0 END AS attempts_nonnumeric,' ..
+      'CASE WHEN ' .. tlen .. '>64 AND NOT ' .. digits .. ' AND NOT ' .. signed ..
+        ' AND NOT ' .. hex .. ' AND NOT ' .. nonnumeric .. ' THEN 1 ELSE 0 END AS attempts_ambiguous,' ..
       'CASE WHEN json_type(r.payload_json,\'$.attempts\')=\'true\' THEN 1 ' ..
         'WHEN json_type(r.payload_json,\'$.attempts\')=\'false\' THEN 0 ' ..
         'WHEN json_type(r.payload_json,\'$.attempts\') IN (\'integer\',\'real\') ' ..
           'THEN json_extract(r.payload_json,\'$.attempts\') ' ..
-        'WHEN json_type(r.payload_json,\'$.attempts\')=\'text\' ' ..
-          'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))<=64 ' ..
-          'THEN json_extract(r.payload_json,\'$.attempts\') ' ..
         'ELSE NULL END AS attempts_raw,' ..
-      'CASE WHEN json_type(r.payload_json,\'$.attempts\')=\'text\' ' ..
-        'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))>64 ' ..
-        'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))<=308 ' ..
-        'AND json_extract(r.payload_json,\'$.attempts\') NOT GLOB \'*[^0-9]*\' ' ..
-        'THEN 1 ELSE 0 END AS attempts_long_digits,' ..
-      'CASE WHEN json_type(r.payload_json,\'$.attempts\')=\'text\' ' ..
-        'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))>64 ' ..
-        'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))<=308 ' ..
-        'AND json_extract(r.payload_json,\'$.attempts\') NOT GLOB \'*[^0-9]*\' ' ..
-        'AND i.attempts IS CAST(json_extract(r.payload_json,\'$.attempts\') AS REAL) ' ..
-        'THEN 1 ELSE 0 END AS attempts_long_digit_equal,' ..
-      'CASE WHEN json_type(r.payload_json,\'$.attempts\')=\'text\' ' ..
-        'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))>64 ' ..
-        'AND substr(json_extract(r.payload_json,\'$.attempts\'),1,2) NOT IN (\'0x\',\'0X\') ' ..
-        'AND json_extract(r.payload_json,\'$.attempts\') NOT GLOB \'*[^0-9eE+.-]*\' ' ..
-        'AND instr(json_extract(r.payload_json,\'$.attempts\'),char(9))=0 ' ..
-        'AND instr(json_extract(r.payload_json,\'$.attempts\'),char(10))=0 ' ..
-        'AND instr(json_extract(r.payload_json,\'$.attempts\'),char(13))=0 ' ..
-        'AND instr(json_extract(r.payload_json,\'$.attempts\'),char(32))=0 ' ..
-        'THEN 1 ELSE 0 END AS attempts_ambiguous,' ..
       'CASE WHEN i.txn_id IS (CASE WHEN json_type(r.payload_json,\'$.txn_id\')=\'text\' ' ..
         'AND json_extract(r.payload_json,\'$.txn_id\')<>\'\' ' ..
         'THEN json_extract(r.payload_json,\'$.txn_id\') ELSE NULL END) ' ..
@@ -2436,18 +2438,30 @@ function M.open(opts)
           or tonumber(row.txn_equal) ~= 1 then
         return fail('import_incomplete', 'intent')
       end
-      if row.attempts_type == 'text' and tonumber(row.attempts_len) > 64 then
-        if tonumber(row.attempts_long_digits) == 1 then
-          if tonumber(row.attempts_long_digit_equal) ~= 1 then
+      local stored_attempts = row.attempts ~= nil and tonumber(row.attempts) or nil
+      if row.attempts_type == 'text' then
+        local tlen = tonumber(row.attempts_trim_len) or 0
+        if tlen <= 64 then
+          if intent_attempts(row.attempts_trim) ~= stored_attempts then
+            return fail('import_incomplete', 'intent')
+          end
+        elseif tonumber(row.attempts_number_equal) == 1 then
+          -- exact SQL numeric comparison already succeeded
+        elseif row.attempts_hex ~= nil then
+          if intent_attempts(row.attempts_hex) ~= stored_attempts then
+            return fail('import_incomplete', 'intent')
+          end
+        elseif tonumber(row.attempts_nonnumeric) == 1 then
+          if stored_attempts ~= nil then
             return fail('import_incomplete', 'intent')
           end
         elseif tonumber(row.attempts_ambiguous) == 1 then
           return fail('import_incomplete', 'intent_oversize')
+        else
+          return fail('import_incomplete', 'intent')
         end
       else
-        local attempts = intent_attempts(row.attempts_raw)
-        local stored_attempts = row.attempts ~= nil and tonumber(row.attempts) or nil
-        if attempts ~= stored_attempts then
+        if intent_attempts(row.attempts_raw) ~= stored_attempts then
           return fail('import_incomplete', 'intent')
         end
       end
