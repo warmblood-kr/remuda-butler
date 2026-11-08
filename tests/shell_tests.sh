@@ -54,12 +54,20 @@ if [[ $mode == policy ]]; then
   run butler_inbox_db.lua luajit "tests/butler_inbox_db.lua"
   run relay_receipts_db.lua luajit "tests/relay_receipts_db.lua"
   run matrix_request_queue.lua luajit "tests/matrix_request_queue.lua"
+  # Inbox authority contract/open are pure Lua and must stay visible on PRs;
+  # the SQL-backed wrappers they support remain in the native SQL 661 lane.
+  run butler_inbox_authority_contract.lua luajit "tests/butler_inbox_authority_contract.lua"
+  run butler_inbox_authority_open.lua luajit "tests/butler_inbox_authority_open.lua"
   # Lifecycle reload rollback is pure Lua; keep it on PRs so a policy run
   # cannot report green without exercising the recovery contract.
   run butler_lifecycle_reload.lua luajit "tests/butler_lifecycle_reload.lua"
   # The private-envelope guard is pure Lua and must run on PRs even though the
   # mutation-heavy wrappers it protects are skipped there.
   run isolated_test_guard_test.lua luajit "tests/isolated_test_guard_test.lua"
+  # Registration and fail-closed checks for the main-only native SQL lane are
+  # cheap and static; keep them on PRs without building 661.
+  run native_sql_lane_guard.sh bash "tests/ci/native_sql_lane_guard_test.sh"
+  run native_sql_tests_selftest.sh bash "tests/ci/native_sql_tests_selftest.sh"
 fi
 if [[ $mode == all ]]; then
 for lua in "$REPO"/tests/*.lua; do
@@ -67,6 +75,11 @@ for lua in "$REPO"/tests/*.lua; do
   # The Matrix relay state tests need core's remuda.json; its shell wrapper
   # runs them inside the pinned daemon instead of standalone LuaJIT.
   [[ $(basename "$lua") == session_tree.lua || $(basename "$lua") == butler_matrix_relay.lua || $(basename "$lua") == butler_diagnostics_matrix.lua || $(basename "$lua") == butler_coordination_config.lua ]] && continue
+  # These inbox contracts need a private daemon and, for SQL, the native 661
+  # lane; their .sh wrappers own them so standalone LuaJIT does not under-test.
+  case $(basename "$lua") in
+    butler_inbox_progress_contract.lua|butler_inbox_source_advance_contract.lua|butler_inbox_source_contract.lua|butler_inbox_store_contract.lua|butler_mail_metadata_contract.lua) continue ;;
+  esac
   case $(basename "$lua") in butler_approve_text.lua|butler_status_hook.lua|butler_guard.lua|butler_adopt.lua|butler_approval_retry.lua|butler_schedule_cli.lua|butler_typed_lines_cli.lua) continue ;; esac # real-parser coverage: lua/butler_cli_unit_test.lua
   run "$(basename "$lua")" luajit "tests/$(basename "$lua")"
 done
@@ -78,8 +91,15 @@ for sh in "$REPO"/tests/*.sh; do
       # Policy tests and identity, file-boundary, isolation and harness
       # security controls stay on PRs, even when they need a private daemon.
       ;;
-    butler_coordination_config_mode.sh | butler_matrix_relay_core_ref.sh | normalize_guidance.sh | lua_tests.sh | butler_coordination_config.sh | butler_diagnostics_matrix.sh | butler_launch_fallback.sh | butler_matrix_follow_cli.sh | butler_matrix_relay.sh | butler_reload_real.sh | butler_seams.sh | close_emits_exit.sh | codex_mcp_mail.sh | live_reload.sh | member_env.sh | old_core_boot.sh | session_tree.sh)
+    butler_coordination_config_mode.sh | butler_matrix_relay_core_ref.sh | normalize_guidance.sh | lua_tests.sh | butler_coordination_config.sh | butler_diagnostics_matrix.sh | butler_launch_fallback.sh | butler_matrix_follow_cli.sh | butler_matrix_relay.sh | butler_reload_real.sh | butler_seams.sh | close_emits_exit.sh | codex_mcp_mail.sh | live_reload.sh | member_env.sh | old_core_boot.sh | session_tree.sh | butler_inbox_source_contract.sh | butler_mail_metadata_contract.sh)
+      # Disk source and metadata wrappers pass on ae9; main pushes run them.
       [[ $mode == policy ]] && continue ;;
+    butler_inbox_progress_contract.sh | butler_inbox_source_advance_contract.sh | butler_inbox_store_contract.sh)
+      # Owned by the native SQL 661 lane (tests/ci/native_sql_tests.sh). That
+      # lane fails closed on missing SQL/migrations; this lane does not run
+      # them and never reports a SKIP as SQL proof.
+      echo "NOTE: $(basename "$sh") runs in the native SQL 661 lane, not here" >&2
+      continue ;;
     *) echo "unclassified shell test: $(basename "$sh")" >&2; exit 2 ;;
   esac
   run "$(basename "$sh")" bash "$sh"

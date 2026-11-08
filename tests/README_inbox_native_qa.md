@@ -60,3 +60,29 @@ published offset-only migration from487decf, used separately for refusal tests.
 
 F.create bootstrap deliberately reports promotion_proof=false. Green prefix
 sealing and SQL acceptance do not certify journal, tail, barrier or callers.
+
+## CI registration
+
+`native-sql-661` is a push-to-main-only job in `.github/workflows/tests.yml`.
+It builds exactly core 661 and runs `tests/ci/native_sql_tests.sh`, which owns
+only the three SQL wrappers (`progress`, `source_advance`, `store`). The runner
+clears `REMUDA_SQL_CASE`/`REMUDA_SQL_TEST_FILE` and forces
+`REMUDA_SQL_CORE_REF` to the exact 661 pin before each suite. It requires
+exactly one progress summary (19), exactly one source-advance summary (13), and
+the Store PASS names to equal the wrapper's exact 36-case set (including
+multiplicity). It prints provenance (core/butler/runner hash), retains named
+manifests and full logs under the runner temp, and uploads them as an artifact
+on every outcome. A wrong pin, missing product file or migration, partial or
+duplicate manifest, suite failure, or timeout fails; there is no SKIP and no
+retry. `tests/ci/native_sql_negative_tests.sh` proves the real 661 binary
+propagates forced `db.open` rejection, owner initialize/start, suite assertion,
+and broken-migration failures (nonzero, no PASS) inside a disposable copy, with
+a per-case bound.
+
+The pure authority contract/open Lua suites run in the default shell lane in
+both `all` and `policy` modes. The source and metadata disk wrappers run only
+in the default ae9 shell lane on main. The five daemon-backed Lua contracts are
+excluded from standalone LuaJIT; their `.sh` wrappers own them. The SQL `.sh`
+wrappers are classified as delegated to this lane in `tests/shell_tests.sh`, so
+an unclassified new script still fails closed. `tests/core_ref.sh` remains
+ae9; only the SQL wrappers use the fixed 661 pin.
