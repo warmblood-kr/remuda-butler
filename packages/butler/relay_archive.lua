@@ -98,6 +98,15 @@ local function inventory(input)
   return plan_files
 end
 
+local function destination(plan, file)
+  local relative = file.relative:match('[^/]+$') or file.relative
+  return plan.archive_root .. '/' .. relative
+end
+
+local function dirname(path)
+  return path:match('^(.*)/[^/]*$') or '.'
+end
+
 -- plan(input) -> durable per-file plan | nil, reason
 -- input = { job_id, cfg, relay_proof, inbox_proof, deps, archive_root }
 function M.plan(input)
@@ -105,24 +114,162 @@ function M.plan(input)
   local proven, proof_why = prove(input)
   if not proven then return nil, proof_why end
   if not identifier(input.job_id) then return nil, 'job_id' end
-  local files, inv_why = inventory(input)
+  local deps = input.deps
+  if deps == nil then
+    deps = M.providers(input.fs or remuda.fs, input.digest or remuda.digest)
+    if deps == nil then return nil, 'deps_missing' end
+  end
+  local files, inv_why = inventory({ deps = deps, cfg = input.cfg,
+    config_path = input.config_path, base_path = input.base_path })
   if not files then return nil, inv_why end
   local archive_root = input.archive_root or
     ((input.cfg and input.cfg.archive_root) or
-      ((input.cfg and input.cfg.config_path or input.base_path) .. '.archive'))
+      (dirname(input.cfg and input.cfg.config_path or input.base_path) ..
+        '/archive/' .. input.job_id))
   local plan = { job_id = input.job_id, phase = 'planned',
-    archive_root = archive_root, files = files,
+    archive_root = archive_root, files = files, deps = deps,
     relay_certificate_id = input.relay_proof.certificate_id,
     relay_verification_id = input.relay_proof.verification_id,
-    inbox_hash = input.inbox_proof.hash, copied = 0, retired = 0,
-    blocked = nil }
+    inbox_hash = input.inbox_proof.compatibility_hash or input.inbox_proof.hash,
+    copied = 0, retired = 0, blocked = nil }
   plans[input.job_id] = plan
   return plan
 end
 
-local function destination(plan, file)
-  local relative = file.relative:gsub('^/+', ''):gsub('%.%./', '')
-  return plan.archive_root .. '/' .. relative
+-- Actual archive providers using the proven shell capabilities only:
+-- fs.write_atomic/mkdir_new/realpath/lock. Bytes are read in bounded chunks and
+-- staged locally; the publish step rewrites the staged bytes through
+-- write_atomic (durable), verifies the exact digest, then retires the source by
+-- rename. Both parents receive a durable write_atomic fence after the rename.
+-- There is no generic fsync/durable_rename and none is invented.
+function M.providers(fs, digest)
+  if type(fs) ~= 'table' or type(fs.write_atomic) ~= 'function'
+      or type(fs.mkdir_new) ~= 'function' then
+    return nil, 'fs'
+  end
+  if type(digest) ~= 'table' or type(digest.sha256) ~= 'function' then
+    return nil, 'digest'
+  end
+  local max_file = 32 * 1024 * 1024
+  local function read_all(path, limit)
+    local file, why = io.open(path, 'rb')
+    if not file then return nil, tostring(why or 'open') end
+    local raw = file:read('*a')
+    file:close()
+    if type(raw) ~= 'string' then return nil, 'read' end
+    if #raw > (limit or max_file) then return nil, 'oversize' end
+    return raw
+  end
+  local function ensure_dir(path)
+    local current = path
+    local missing = {}
+    while current and current ~= '' and current ~= '/' and current ~= '.' do
+      missing[#missing + 1] = current
+      current = dirname(current)
+    end
+    for index = #missing, 1, -1 do
+      local dir = missing[index]
+      local exists = type(fs.realpath) == 'function' and fs.realpath(dir) ~= nil
+      if not exists then
+        local made, make_why = fs.mkdir_new(dir, { private = true })
+        if not made and not tostring(make_why or ''):lower():find('exist', 1, true) then
+          return nil, tostring(make_why or 'mkdir')
+        end
+      end
+    end
+    return true
+  end
+  local function stat(path)
+    local file = io.open(path, 'rb')
+    if not file then return nil, 'missing' end
+    local size = file:seek('end')
+    file:close()
+    return { size = size }
+  end
+  local function digest_file(path)
+    local raw, why = read_all(path)
+    if not raw then return nil, why end
+    local ok, value = pcall(digest.sha256, raw)
+    if not ok or type(value) ~= 'string' or #value ~= 64 then return nil, 'digest' end
+    return value
+  end
+  local function copy_chunk(src, staging, offset, limit)
+    local file, why = io.open(src, 'rb')
+    if not file then return nil, tostring(why or 'open') end
+    local size = file:seek('end')
+    if offset > size then file:close(); return nil, 'offset' end
+    local ok, seek_why = file:seek('set', offset)
+    if not ok then file:close(); return nil, tostring(seek_why or 'seek') end
+    local chunk
+    if offset == size then
+      chunk = ''
+    else
+      chunk = file:read(limit)
+      if chunk == nil then file:close(); return nil, 'read' end
+    end
+    file:close()
+    local target
+    if offset == 0 then
+      target = io.open(staging, 'wb')
+    else
+      local size = stat(staging)
+      if not size or size.size ~= offset then return nil, 'staging_mismatch' end
+      target = io.open(staging, 'ab')
+    end
+    if not target then return nil, 'staging_open' end
+    local wrote, write_why = target:write(chunk)
+    target:close()
+    if not wrote then return nil, tostring(write_why or 'stage_write') end
+    return #chunk
+  end
+  local function close_copy(staging)
+    local size = stat(staging)
+    if not size then return nil, 'staging_missing' end
+    return true
+  end
+  local function publish_verified(staging, verified)
+    local raw, why = read_all(staging)
+    if not raw then return nil, why end
+    local ok, write_why = fs.write_atomic(verified, raw, { private = true })
+    if not ok then return nil, tostring(write_why or 'publish') end
+    return true
+  end
+  local function rename_once(src, verified, retained)
+    local src_digest, src_why = digest_file(src)
+    if not src_digest then return nil, src_why end
+    local verified_digest, verified_why = digest_file(verified)
+    if not verified_digest then return nil, verified_why end
+    if src_digest ~= verified_digest then return nil, 'verified_mismatch' end
+    local existing = stat(retained)
+    if existing then
+      local same, same_why = digest_file(retained)
+      if not same then return nil, same_why end
+      if same ~= src_digest then return nil, 'collision' end
+      -- Exact retained destination is reusable. The source path already has a
+      -- durable identical retained artifact, so it is retired without deleting
+      -- or overwriting either copy.
+      return true
+    end
+    local ok, why = os.rename(src, retained)
+    if not ok then
+      if tostring(why):lower():find('cross', 1, true) then return 'cross_device' end
+      return nil, tostring(why or 'rename')
+    end
+    return true
+  end
+  local function sync_user_parents(src, retained)
+    local token = digest.sha256(tostring(os.time()) .. '\0' .. tostring(src))
+    for _, path in ipairs({ dirname(src), dirname(retained) }) do
+      local fence = path .. '/.relay-archive-fence'
+      local ok, why = fs.write_atomic(fence, tostring(token), { private = true })
+      if not ok then return nil, tostring(why or 'parent_fence') end
+    end
+    return true
+  end
+  return { stat = stat, ensure_dir = ensure_dir, copy_chunk = copy_chunk,
+    close_copy = close_copy, digest_file = digest_file,
+    publish_verified = publish_verified, rename_once = rename_once,
+    sync_user_parents = sync_user_parents, max_file = max_file }
 end
 
 local function next_file(plan)
@@ -150,8 +297,9 @@ function M.advance(job_id, budget)
   local limit = tonumber(budget and budget.max_bytes) or 65536
   if limit < 1 or limit > 65536 then return nil, 'budget' end
   local dest = destination(plan, file)
+  local staging = dest .. '.part'
   local verified = dest .. '.verified'
-  local original = dest .. '.original'
+  local retained = dest .. '.original'
   plan.phase = 'archiving'
   if file.state == 'planned' then
     if type(deps.copy_chunk) ~= 'function' or type(deps.digest_file) ~= 'function'
@@ -159,18 +307,35 @@ function M.advance(job_id, budget)
       plan.blocked = 'copy_provider_missing'
       return nil, 'blocked:' .. plan.blocked
     end
+    if type(deps.ensure_dir) == 'function' then
+      local made, make_why = deps.ensure_dir(dirname(dest))
+      if not made then plan.blocked = 'mkdir:' .. tostring(make_why or file.role)
+        return nil, 'blocked:' .. plan.blocked end
+    end
+    local digest, digest_why = deps.digest_file(file.relative)
+    if not digest then plan.blocked = 'digest:' .. tostring(digest_why or file.role)
+      return nil, 'blocked:' .. plan.blocked end
+    file.digest = digest
     local existing, existing_why = deps.stat(verified)
     if existing ~= nil then
       local same, same_why = deps.digest_file(verified)
       if not same then plan.blocked = 'collision:' .. tostring(same_why or file.role)
         return nil, 'blocked:' .. plan.blocked end
-      if same ~= file.digest then
+      if same ~= digest then
         plan.blocked = 'collision:' .. file.role
         return nil, 'blocked:' .. plan.blocked
       end
-      file.state, file.digest = 'copied_verified', same
+      file.state = 'copied_verified'
     else
       file.state = 'copying'
+      if file.bytes == 0 then
+        -- Create the empty staging artifact once; the next action publishes it.
+        local empty, empty_why = deps.copy_chunk(file.relative, staging, 0, 1)
+        if empty == nil then plan.blocked = 'copy:' .. tostring(empty_why or file.role)
+          return nil, 'blocked:' .. plan.blocked end
+        if empty ~= 0 then plan.blocked = 'source_changed:' .. file.role
+          return nil, 'blocked:' .. plan.blocked end
+      end
     end
     return { job_id = job_id, phase = plan.phase, file = file.relative,
       state = file.state, bytes = file.bytes, offset = file.offset }
@@ -178,21 +343,23 @@ function M.advance(job_id, budget)
   if file.state == 'copying' then
     if file.offset >= file.bytes then
       -- Empty ack/drain sidecars are valid zero-byte artifacts.
-      local copy_done, copy_why = deps.close_copy(original)
+      local copy_done, copy_why = deps.close_copy(staging)
       if copy_done ~= true then plan.blocked = 'copy:' .. tostring(copy_why or file.role)
         return nil, 'blocked:' .. plan.blocked end
-      local digest, digest_why = deps.digest_file(original)
+      local digest, digest_why = deps.digest_file(staging)
       if not digest then plan.blocked = 'digest:' .. tostring(digest_why or file.role)
         return nil, 'blocked:' .. plan.blocked end
-      local moved, move_why = deps.publish_verified(original, verified)
-      if moved ~= true then plan.blocked = 'publish:' .. tostring(move_why or file.role)
+      if digest ~= file.digest then plan.blocked = 'source_changed:' .. file.role
         return nil, 'blocked:' .. plan.blocked end
-      file.digest, file.state = digest, 'copied_verified'
+      local published, publish_why = deps.publish_verified(staging, verified)
+      if published ~= true then plan.blocked = 'publish:' .. tostring(publish_why or file.role)
+        return nil, 'blocked:' .. plan.blocked end
+      file.state = 'copied_verified'
       plan.copied = plan.copied + 1
       return { job_id = job_id, phase = plan.phase, file = file.relative,
         state = file.state, digest = digest, bytes = file.bytes }
     end
-    local copied, copy_why = deps.copy_chunk(file.relative, original,
+    local copied, copy_why = deps.copy_chunk(file.relative, staging,
       file.offset, math.min(limit, file.bytes - file.offset))
     if copied == nil then plan.blocked = 'copy:' .. tostring(copy_why or file.role)
       return nil, 'blocked:' .. plan.blocked end
@@ -210,7 +377,7 @@ function M.advance(job_id, budget)
       state = file.state, verified = verified }
   end
   if file.state == 'retirement_pending' then
-    local retired, retire_why = deps.rename_once(file.relative, verified, original)
+    local retired, retire_why = deps.rename_once(file.relative, verified, retained)
     if retired == 'cross_device' then
       -- Keep the original; no delete, no copy fallback.
       plan.blocked = 'cross_device:' .. file.role
@@ -218,7 +385,7 @@ function M.advance(job_id, budget)
     end
     if retired ~= true then plan.blocked = 'retire:' .. tostring(retire_why or file.role)
       return nil, 'blocked:' .. plan.blocked end
-    local synced, sync_why = deps.sync_user_parents(file.relative, original)
+    local synced, sync_why = deps.sync_user_parents(file.relative, retained)
     if synced ~= true then plan.blocked = 'parent_sync:' .. tostring(sync_why or file.role)
       return nil, 'blocked:' .. plan.blocked end
     file.state = 'complete'
