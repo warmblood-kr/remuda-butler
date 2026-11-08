@@ -57,6 +57,9 @@ if [[ $mode == policy ]]; then
   # Lifecycle reload rollback is pure Lua; keep it on PRs so a policy run
   # cannot report green without exercising the recovery contract.
   run butler_lifecycle_reload.lua luajit "tests/butler_lifecycle_reload.lua"
+  # The private-envelope guard is pure Lua and must run on PRs even though the
+  # mutation-heavy wrappers it protects are skipped there.
+  run isolated_test_guard_test.lua luajit "tests/isolated_test_guard_test.lua"
 fi
 if [[ $mode == all ]]; then
 for lua in "$REPO"/tests/*.lua; do
