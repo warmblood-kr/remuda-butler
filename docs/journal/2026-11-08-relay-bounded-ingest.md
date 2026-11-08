@@ -28,7 +28,7 @@ Evidence on this candidate:
   blank/duplicate preserved; torn EOF `ack_partial_eof`; >256KiB ack
   `ack_oversize`; 100,000B ack spans scan units and applies once.
 - With drivers updated to drive ingestion and expect `ingest_pending`:
-  revision 40/40, case_turns 27/27, domain_priority 15/15, sealed 14/14,
+  revision 37 executed PASS + 3 queue SKIP; case_turns 26 executed PASS + case17 SKIP, domain_priority 15/15, sealed 14/14,
   projection 3/3, upgrade 8/8, long numeric 13/13, long attempts 8/8, scalar
   budget 2/2, plus verify/owner/recovery/domain/scope/migration/protocol.
 - 110,001-row persistent proof: 1742 verify calls, max 0.141s, 0 mismatches,
