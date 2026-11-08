@@ -1,7 +1,6 @@
 # Relay startup, bridge and retained archive plan
 
-Wiring plan for the frozen startup/archive contract: caller paths and driver
-seam before broad implementation.
+Wiring plan for the frozen startup/archive contract.
 
 ## Existing caller and artifact paths
 
@@ -14,9 +13,10 @@ seam before broad implementation.
   `:3058 relay.stop`.
 - Backup/drain candidates are `config_path..".since.bak"` and
   `config_path..".acks.drain"`.
-- `packages/butler/relay_store_migrate.lua:50 M.run` is the bounded migration
-  driver; `relay_store.lua` exposes `import_source`, `import_batch`,
-  `ingest_step`, `import_acks`, `verify_import`, `activate`, `proof`.
+- `packages/butler/relay_store_migrate.lua:50 M.run` loops and is not the
+  startup step; add `M.step` (exactly one store action). `relay_store.lua`
+  exposes import_source/import_batch/ingest_step/import_acks/verify_import/
+  activate/proof.
 - `packages/butler/relay_receipts.lua:417 import_all`, `:487 record`,
   `:497 authority_state` are the legacy receipt bridge surface.
 - `packages/butler/approval.lua:116 attach`, `:188 begin_delivery`, `:205 list`,
@@ -48,8 +48,9 @@ archive.status(job_id) -> manifest refs
 `deps` is explicit: `open_store(opts)`, `db={acquire}`, `owner={acquire,check,
 describe,release}`, `marker={read,publish}` (path
 `cfg.config_path..".relay-authority"`), `anchors={inspect}`, `json=remuda.json`,
-`digest={sha256}`, `fs=remuda.fs`, and `inbox_proof()`. Missing owner proof or
-inbox proof blocks; it is never fabricated.
+`digest={sha256}`, `fs=remuda.fs`, and `inbox_proof()` from the real inbox
+producer (inbox_db is shadow only). Missing owner/inbox proof blocks before
+poll; never fabricated.
 
 ## Startup sequence
 
@@ -57,16 +58,16 @@ inbox proof blocks; it is never fabricated.
 by mail root + relay identity + source generation + protocol and persists
 `INVENTORY -> RELAY_INGEST -> RELAY_VERIFY -> RELAY_SQL_ACTIVE ->
 BOTH_SQL_ACTIVE -> ARCHIVE_PLANNED -> ARCHIVING -> COMPLETE`. Each call advances
-one bounded stage; `relay_store_migrate.run` plus `ingest_step` drive admission,
-sidecars and verify. SQL activates only after relay certificate and inbox
+exactly one admission, one ingest_step, one import_batch page or one verify page;
+no caller loop or whole SHA. SQL activates only after relay certificate and inbox
 proof reread under the current owner. On failure the job blocks, originals
 stay, and the relay never falls back to fresh FILE. Owner/marker/source bytes
 are rechecked; unknown COMMIT quarantines.
 
 ## Legacy bridge and approvals
 
-Before first SQL delivery, an exact account/room/event/destination/payload
-lookup must resolve the ORIGINAL mail id and read state. Unbound, conflicting or failed lookup blocks; no new id is
+Before first delivery, exact account/room/event/destination/payload lookup
+resolves the ORIGINAL mail id/read state. Unbound, conflicting or failed lookup blocks; no new id is
 allocated and no notification is duplicated. The bridge stores handoff intent
 and an idempotent receipt link; it never grants consent.
 
@@ -79,8 +80,7 @@ means unknown/refuse, not an empty approval list.
 
 ## Archive
 
-Plan only the relay artifacts above, bound to the relay proof and the inbox
-proof. Destination is `archive/<jobid>/<relative path>`. States are planned,
+Plan relay artifacts bound to both proofs. Destination is `archive/<jobid>/<relative path>`. States are planned,
 copying, copied_verified, retirement_pending, retired, complete. Copy bounded
 chunks with durable publish, fsync bytes/manifest, verify exact digest, then
 atomically rename the source to the retained destination. Never unlink as
