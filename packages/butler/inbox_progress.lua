@@ -55,9 +55,10 @@ local KINDS = { deliveries = true, reads = true, dependencies = true,
 local GET_KINDS = { delivery = true, read = true, dependency = true,
   fileproof = true, chunkproof = true }
 
-local CURSOR_KEYS = { generation = true, phase = true, log = true, offset = true,
-  parse_offset = true, line_tail = true, after_key = true, chain = true,
-  first_chain = true, next_seq = true, complete = true, witness = true }
+local CURSOR_KEYS = { generation = true, protocol_version = true, phase = true,
+  log = true, offset = true, parse_offset = true, line_tail = true,
+  after_key = true, chain = true, first_chain = true, next_seq = true,
+  complete = true, witness = true }
 local CURSOR_LOGS = { inbox = true, read = true }
 
 local function valid_cursor(cursor, max_line_bytes)
@@ -66,6 +67,9 @@ local function valid_cursor(cursor, max_line_bytes)
     if not CURSOR_KEYS[key] then return false end
   end
   if not nonempty(cursor.generation) then return false end
+  if cursor.protocol_version ~= nil and not is_integer(cursor.protocol_version) then
+    return false
+  end
   if cursor.phase ~= nil and not PHASES[cursor.phase] then return false end
   if cursor.log ~= nil and not CURSOR_LOGS[cursor.log] then return false end
   for _, key in ipairs({ "offset", "parse_offset", "next_seq" }) do

@@ -340,6 +340,9 @@ end
 -- in the injected progress backend; the cursor is bounded and diagnostic.
 local LOG_CHUNK = 64 * 1024
 local MAX_STAGE_ROWS = 256
+-- v2 freezes the current bounded record order; v1/version-less cursors are not
+-- resumed or promoted under this protocol.
+local PROTOCOL = "source-progress-v2"
 local generation_serial = 0
 
 local function frame(parts)
@@ -349,7 +352,7 @@ local function frame(parts)
 end
 
 local function chain_start(self, root, hex)
-  return self.sha256(frame({ "source-progress-v1", root, hex }))
+  return self.sha256(frame({ PROTOCOL, root, hex }))
 end
 
 local function chain_add(self, chain, path, presence, offset, length, digest)
@@ -663,10 +666,10 @@ end
 
 local function invalidate(self, root, hex, state, reason)
   local cursor = state.cursor
-  local next_cursor = { generation = cursor.generation, phase = "invalid",
-    offset = 0, parse_offset = 0, line_tail = "", chain = cursor.chain,
-    first_chain = cursor.first_chain, next_seq = cursor.next_seq or 1,
-    complete = false }
+  local next_cursor = { generation = cursor.generation, protocol_version = 2,
+    phase = "invalid", offset = 0, parse_offset = 0, line_tail = "",
+    chain = cursor.chain, first_chain = cursor.first_chain,
+    next_seq = cursor.next_seq or 1, complete = false }
   local value, err = self.progress.commit(root, hex, state.revision, next_cursor,
     { { op = "invalid", reason = reason } })
   if not value and err and err.code == "unknown_commit" then return nil, err end
@@ -835,11 +838,11 @@ local function file_unit(self, root, hex, state, pass)
     if type(first) ~= "string" or first ~= second then
       return invalidate(self, root, hex, state, "stale_generation")
     end
-    local witness = "source-progress-v1:sha256:" .. second
-    local ready_cursor = { generation = cursor.generation, phase = "ready",
-      offset = 0, parse_offset = 0, line_tail = "", chain = second,
-      first_chain = first, next_seq = cursor.next_seq or 1, complete = true,
-      witness = witness }
+    local witness = PROTOCOL .. ":sha256:" .. second
+    local ready_cursor = { generation = cursor.generation, protocol_version = 2,
+      phase = "ready", offset = 0, parse_offset = 0, line_tail = "",
+      chain = second, first_chain = first, next_seq = cursor.next_seq or 1,
+      complete = true, witness = witness }
     local value, ready_err = self.progress.commit(root, hex, state.revision,
       ready_cursor, { { op = "ready", witness = witness, first_chain = first,
         second_chain = second } })
@@ -900,15 +903,20 @@ function Source:advance(root, hex, budget)
   local state, load_err = self.progress.load(root, hex)
   if state == nil then
     if load_err and load_err.code ~= "not_found" then return nil, load_err end
-    local cursor = { generation = new_generation(self, root, hex), phase = "logs1",
-      log = "inbox", offset = 0, parse_offset = 0, line_tail = "",
-      chain = chain_start(self, root, hex), next_seq = 1, complete = false }
+    local cursor = { generation = new_generation(self, root, hex),
+      protocol_version = 2, phase = "logs1", log = "inbox", offset = 0,
+      parse_offset = 0, line_tail = "", chain = chain_start(self, root, hex),
+      next_seq = 1, complete = false }
     local value, commit_err = self.progress.commit(root, hex, 0, cursor, {})
     if not value then return nil, commit_err end
     return { state = "backlog", complete = false,
       cursor = { generation = cursor.generation, revision = value.revision,
         pass = "logs1", task = "inbox", offset = 0 },
       processed_bytes = 0, processed_tasks = 0, snapshot = nil }
+  end
+  if state.cursor.protocol_version ~= 2 then
+    return nil, { code = "unsupported_protocol", required = 2,
+      found = state.cursor.protocol_version, restart_required = true }
   end
   if state.cursor.phase == "invalid" then return fail("stale_generation") end
   if state.cursor.phase == "ready" or state.cursor.complete == true then
