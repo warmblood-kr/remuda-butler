@@ -180,7 +180,7 @@ local function schema_ready(self)
     "SELECT MAX(version) AS version FROM _remuda_migrations", {})
   if not versions then return nil, "schema_unavailable" end
   local version = versions[1] and tonumber(versions[1].version) or 0
-  if version > 4 then return nil, "schema_too_new" end
+  if version > 5 then return nil, "schema_too_new" end
   return true
 end
 
