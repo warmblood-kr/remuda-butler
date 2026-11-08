@@ -336,6 +336,60 @@ function Source:witness(root, hex)
 end
 
 -- ---------------------------------------------------------------------------
+-- Sealed prefix capture. A sealed end is the byte just after the last complete
+-- newline: appends after it never invalidate the prefix, and a non-newline tail
+-- is recorded as torn rather than skipped or included as a complete line.
+local SEAL_WINDOW = 64 * 1024
+
+local function sealed_log_end(self, path)
+  local ok, size, why = pcall(self.fs.size, path)
+  if not ok then return nil, fail("source_unreadable", "log", path) end
+  if size == nil then
+    if error_code(why) == "not_found" then return 0, 0 end
+    return nil, fail("source_unreadable", "log", path)
+  end
+  if type(size) ~= "number" or size % 1 ~= 0 or size < 0 then
+    return nil, fail("source_unreadable", "log", path)
+  end
+  if size == 0 then return 0, 0 end
+  local offset = size
+  while offset > 0 do
+    local window = math.min(SEAL_WINDOW, offset)
+    local start = offset - window
+    local read_ok, chunk = pcall(self.fs.read_range, path, start, window)
+    if not read_ok or type(chunk) ~= "table" or type(chunk.bytes) ~= "string" then
+      return nil, fail("source_unreadable", "log", path)
+    end
+    local last = chunk.bytes:match(".*()\n")
+    if last then
+      local finish = start + last
+      return finish, finish < size and 1 or 0
+    end
+    offset = start
+  end
+  -- The whole file is one torn line: no complete prefix is safe to seal.
+  return 0, 1
+end
+
+function Source:seal(root, hex)
+  local ok, root_err = check_root(self, root)
+  if not ok then return nil, root_err end
+  ok, root_err = check_recipient(hex)
+  if not ok then return nil, root_err end
+  if type(self.fs.size) ~= "function" or type(self.fs.read_range) ~= "function" then
+    return fail("unavailable", "fs")
+  end
+  local inbox_end, inbox_torn = sealed_log_end(self,
+    self.root .. "/inboxes/" .. hex .. ".jsonl")
+  if not inbox_end then return nil, inbox_torn end
+  local read_end, read_torn = sealed_log_end(self,
+    self.root .. "/read/" .. hex .. ".jsonl")
+  if not read_end then return nil, read_torn end
+  return { recipient = hex, inbox_end = inbox_end, read_end = read_end,
+    inbox_torn = inbox_torn, read_torn = read_torn }
+end
+
+-- ---------------------------------------------------------------------------
 -- Resumable advance v1 (inbox-source-progress.md). The staged generation lives
 -- in the injected progress backend; the cursor is bounded and diagnostic.
 local LOG_CHUNK = 64 * 1024

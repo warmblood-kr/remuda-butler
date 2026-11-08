@@ -770,9 +770,154 @@ function Store:mark_read(intent, ids, snapshot)
   return committed_receipt(self, intent.operation_id, result)
 end
 
-function Store:advance()
-  if self.closed or not owner_token(self) then return close_refusal(self) end
-  return unimplemented("advance")
+-- Phase B: the FILE_TRACKED gate is persisted before any migration work.
+-- Initializing the journal generation and atomically publishing the tracked
+-- marker is admission; a later step may only stage inside those sealed ends.
+local function migration_state_row(store)
+  local rows = sql_query(store,
+    "SELECT generation, epoch, revision FROM migration_state WHERE root = ?",
+    { store.actual_root })
+  if not rows then return nil, { code = "unavailable", field = "migration_state_read" } end
+  return rows[1]
+end
+
+local function ensure_tracking(store)
+  local row, err = migration_state_row(store)
+  if row == nil and err then return nil, err end
+  local marker = store.marker
+  if marker.state == "FILE" then
+    if row then return nil, { code = "recovery_required", field = "migration_state" } end
+    local digest = store_sha(store, frame({ "tracked-file-v1", store.actual_root,
+      tostring(store.epoch) }))
+    if not digest or #digest ~= 64 then
+      return nil, { code = "unavailable", field = "sha256" }
+    end
+    local generation = "tracked-" .. digest
+    local written = sql_exec(store,
+      "INSERT INTO migration_state (root, generation, epoch, protocol, revision) "
+        .. "VALUES (?, ?, ?, 'tracked-file-v1', 0)",
+      { store.actual_root, generation, store.epoch })
+    if not written then return nil, { code = "unavailable", field = "migration_state_write" } end
+    local adapter = store.marker_adapter
+    if type(adapter) ~= "table" or type(adapter.publish) ~= "function" then
+      return nil, { code = "unavailable", field = "marker" }
+    end
+    local next_marker = { format_version = 1, state = "FILE_TRACKED",
+      protocol = "tracked-file-v1", root = store.actual_root,
+      epoch = store.epoch, tracking_epoch = store.epoch, generation = generation }
+    local ok, published = pcall(adapter.publish, next_marker)
+    if not ok or published == nil then
+      return nil, { code = "unknown_publish", field = "marker" }
+    end
+    local read_ok, current = pcall(adapter.read, store.root)
+    if not read_ok or type(current) ~= "table"
+      or current.format_version ~= 1 or current.state ~= "FILE_TRACKED"
+      or current.protocol ~= "tracked-file-v1" or current.root ~= store.actual_root
+      or tonumber(current.epoch) ~= store.epoch
+      or tonumber(current.tracking_epoch) ~= store.epoch
+      or current.generation ~= generation then
+      return nil, { code = "unknown_publish", field = "marker" }
+    end
+    store.marker = current
+    return generation, nil
+  end
+  if marker.state == "FILE_TRACKED" then
+    if not row then return nil, { code = "recovery_required", field = "migration_state" } end
+    if row.generation ~= marker.generation then
+      return nil, { code = "recovery_required", field = "generation" }
+    end
+    return row.generation, nil
+  end
+  return nil, { code = "invalid_snapshot", field = "state" }
+end
+
+local function migration_watermark(store, generation)
+  local rows = sql_query(store,
+    "SELECT watermark FROM migration_tail_state WHERE root = ? AND generation = ?",
+    { store.actual_root, generation })
+  if not rows or #rows == 0 then return 0 end
+  return tonumber(rows[1].watermark) or 0
+end
+
+local function migration_backlog(store, generation, reason, step)
+  return { state = "backlog", complete = false, reason = reason,
+    cursor = { generation = generation, pass = "seal", task = step or "seal", offset = 0 },
+    tail_watermark = migration_watermark(store, generation) }
+end
+
+local function seal_step(store, generation, budget)
+  local source = store.source
+  if type(source) ~= "table" then
+    return migration_backlog(store, generation, "sealed_source_unavailable")
+  end
+  if type(source.recipients) ~= "function" then
+    return migration_backlog(store, generation, "sealed_source_unavailable")
+  end
+  local ok, value, why = pcall(source.recipients, source, store.root)
+  if not ok or type(value) ~= "table" or type(value.recipients) ~= "table" then
+    local code = (type(why) == "table" and why.code) or
+      (type(value) == "table" and value.code) or "source_unreadable"
+    return migration_backlog(store, generation, code)
+  end
+  local sealed = 0
+  for _, hex in ipairs(value.recipients) do
+    if sealed >= budget.max_statements then break end
+    local rows = sql_query(store,
+      "SELECT inbox_end, read_end FROM migration_prefix WHERE root = ? "
+        .. "AND generation = ? AND recipient = ?",
+      { store.actual_root, generation, hex })
+    if not rows then return nil, { code = "unavailable", field = "migration_prefix" } end
+    if #rows == 0 then
+      if type(source.seal) ~= "function" then
+        return migration_backlog(store, generation, "sealed_source_unavailable")
+      end
+      local sealed_ok, sealed_value, sealed_why = pcall(source.seal, source,
+        store.root, hex)
+      if not sealed_ok or type(sealed_value) ~= "table" then
+        local code = (type(sealed_value) == "table" and sealed_value.code)
+          or (type(sealed_why) == "table" and sealed_why.code)
+          or (type(sealed_why) == "string" and sealed_why) or "source_unreadable"
+        return migration_backlog(store, generation, code)
+      end
+      local written = sql_exec(store,
+        "INSERT INTO migration_prefix (root, generation, recipient, inbox_end, "
+          .. "read_end, inbox_torn, read_torn, revision, cursor_json, complete) "
+          .. "VALUES (?, ?, ?, ?, ?, ?, ?, 0, '{}', 0)",
+        { store.actual_root, generation, hex, sealed_value.inbox_end,
+          sealed_value.read_end, sealed_value.inbox_torn, sealed_value.read_torn })
+      if not written then return nil, { code = "unavailable", field = "migration_prefix" } end
+      sealed = sealed + 1
+    end
+  end
+  local cursor = { generation = generation, pass = "seal",
+    task = sealed > 0 and "sealed" or "prefix_pending", offset = 0 }
+  return { state = "backlog", complete = false, reason = "prefix_pending",
+    cursor = cursor, sealed = sealed,
+    tail_watermark = migration_watermark(store, generation) }
+end
+
+function Store:advance(budget)
+  local refusal = close_refusal(self)
+  if refusal then return nil, refusal end
+  if type(budget) ~= "table" then return nil, { code = "invalid_snapshot", field = "budget" } end
+  for _, key in ipairs({ "max_bytes", "max_ms" }) do
+    local value = budget[key]
+    if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
+      return nil, { code = "invalid_snapshot", field = "budget" }
+    end
+  end
+  local statements = budget.max_statements
+  if statements == nil then statements = budget.max_tasks end
+  if type(statements) ~= "number" or statements % 1 ~= 0 or statements < 1 then
+    return nil, { code = "invalid_snapshot", field = "budget" }
+  end
+  if self.marker.state ~= "FILE" and self.marker.state ~= "FILE_TRACKED" then
+    return nil, { code = "invalid_snapshot", field = "state" }
+  end
+  local generation, gate_err = ensure_tracking(self)
+  if not generation then return nil, gate_err end
+  return seal_step(self, generation, { max_bytes = budget.max_bytes,
+    max_statements = statements, max_ms = budget.max_ms })
 end
 
 function Store:transition()
@@ -816,6 +961,8 @@ function M.open(config)
   local store = setmetatable({ root = config.root, actual_root = actual,
     marker = marker, source = config.source, content = config.content,
     json = config.json, sha256 = config.sha256, new_id = config.new_id,
+    progress = config.progress, migration = config.migration,
+    marker_adapter = config.marker,
     decode = decoder(config), read_only = not writable }, Store)
   if writable then
     if OWNER_STATE.owners[actual] then return fail("writer_conflict", "owner") end
@@ -871,6 +1018,10 @@ function M.open(config)
       end
     end
   end
+  -- A FILE store may still need the borrowed inbox DB to initialize the
+  -- durable tracked generation before its first admitted mutation. Attaching an
+  -- explicit handle is not an authority or liveness claim in FILE state.
+  if marker.state == "FILE" and config.db ~= nil then store.db = config.db end
   store.authority = (marker.state == "SQL_ACTIVE" and "sql")
     or (marker.state == "CUTOVER_PREPARED" and "sql_required") or "file"
   store.epoch = marker.epoch

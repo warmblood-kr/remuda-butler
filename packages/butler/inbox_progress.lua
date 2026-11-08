@@ -181,8 +181,8 @@ local function schema_ready(self)
   if not versions then return nil, "schema_unavailable" end
   local version = versions[1] and tonumber(versions[1].version) or 0
   -- The highest inbox schema this progress backend understands. Keep this in
-  -- step with the shipped inbox migration set (currently 0006 authority matrix).
-  if version > 6 then return nil, "schema_too_new" end
+  -- step with the shipped inbox migration set (currently 0007 migration tracked).
+  if version > 7 then return nil, "schema_too_new" end
   return true
 end
 
