@@ -432,6 +432,17 @@ local function seal_driver(self, root, hex, generation, previous, allowance)
       or previous.generation ~= (generation or "") then
       return fail("stale_generation", "cursor_identity")
     end
+    -- A supplied version1 cursor must carry BOTH complete capture records.
+    -- A missing/invalid log is never recaptured from the current EOF.
+    if type(previous.logs) ~= "table" then
+      return fail("invalid_snapshot", "cursor_logs")
+    end
+    for _, name in ipairs(SEAL_LOGS) do
+      local log = previous.logs[name]
+      if not valid_seal_log(log) then
+        return fail("invalid_snapshot", "cursor_capture")
+      end
+    end
   end
   local cursor = { version = 1, root = root,
     generation = generation or (previous and previous.generation) or "",
