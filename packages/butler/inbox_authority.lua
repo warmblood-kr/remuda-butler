@@ -194,6 +194,10 @@ function Store:hydrate(message_id)
   if type(body) ~= "table" or not nonempty(body.object_id) then
     return nil, { code = "corrupt" }
   end
+  -- The object id becomes a file name too; never read outside objects/.
+  if body.object_id:find("[/\\]") or body.object_id:find("..", 1, true) then
+    return nil, { code = "corrupt", field = "object_id" }
+  end
   local content, content_why = read_file(self.root .. "/objects/" .. body.object_id)
   if not content then return nil, { code = content_why or "unavailable" } end
   return { message_id = message_id, envelope = envelope, content = content,
@@ -240,7 +244,11 @@ function M.open(config)
     if capability.root ~= nil and capability.root ~= store.root then
       return fail("writer_conflict", "root")
     end
-    store.writer_state = { owner = capability.owner == true, guarded = capability.guarded == true }
+    -- A supplied capability must be explicit; a false field is a refusal, not
+    -- an optional writer. Only the absence of any writer adapter means FILE.
+    if capability.owner ~= true then return fail("writer_conflict", "owner") end
+    if capability.guarded ~= true then return fail("writer_conflict", "guarded") end
+    store.writer_state = { owner = true, guarded = true }
   end
   return store
 end
