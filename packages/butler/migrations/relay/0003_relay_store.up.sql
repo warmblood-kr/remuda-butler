@@ -191,6 +191,7 @@ CREATE TRIGGER IF NOT EXISTS relay_rev_source_upd AFTER UPDATE ON relay_import_s
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
  AND (OLD.raw IS NOT NEW.raw OR OLD.raw_sha256 IS NOT NEW.raw_sha256
    OR OLD.stamp IS NOT NEW.stamp OR OLD.bytes IS NOT NEW.bytes
+   OR OLD.staged_count IS NOT NEW.staged_count
    OR OLD.role IS NOT NEW.role OR OLD.source_id IS NOT NEW.source_id)
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
 CREATE TRIGGER IF NOT EXISTS relay_rev_source_del AFTER DELETE ON relay_import_source
@@ -203,5 +204,44 @@ CREATE TRIGGER IF NOT EXISTS relay_rev_units_upd AFTER UPDATE ON relay_import_un
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
 CREATE TRIGGER IF NOT EXISTS relay_rev_units_del AFTER DELETE ON relay_import_units
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_manifest_ins AFTER INSERT ON relay_manifest
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_manifest_upd AFTER UPDATE ON relay_manifest
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_manifest_del AFTER DELETE ON relay_manifest
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_fields_upd AFTER UPDATE ON relay_source_fields
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_fields_del AFTER DELETE ON relay_source_fields
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_cursors_del AFTER DELETE ON relay_cursors
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_processed_upd AFTER UPDATE ON relay_processed
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_processed_del AFTER DELETE ON relay_processed
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_events_del AFTER DELETE ON relay_events
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_intents_del AFTER DELETE ON relay_reply_intents
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_sidecar_ins AFTER INSERT ON relay_sidecar
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_sidecar_upd AFTER UPDATE ON relay_sidecar
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_sidecar_del AFTER DELETE ON relay_sidecar
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
