@@ -70,7 +70,7 @@ LUA
   PENV=(env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     HOME="$T/home" XDG_CONFIG_HOME="$T/config" XDG_DATA_HOME="$T/data" \
     XDG_STATE_HOME="$T/state" XDG_CACHE_HOME="$T/cache" \
-    REMUDA_RUNTIME_DIR="$T/runtime" RRF_INIT_SERIAL="$SERIAL")
+    REMUDA_RUNTIME_DIR="$T/runtime" RRF_INIT_SERIAL="$SERIAL" RRF_FAKE_COUNTER="$T/fake-callback")
   return 0
 }
 
@@ -294,7 +294,19 @@ case_b() {
   [[ "$info_after" == "$info_before" ]] || { echo "session changed after a blocked check: $info_before -> $info_after"; return 1; }
   no_candidates || { echo "candidate left behind after a blocked check"; return 1; }
 
-  echo "PASS B: in-process session blocked --check; pid $old, daemon-id and session unchanged; no candidate"
+  local reload
+  if reload=$(runp reload --binary "$BIN" 2>"$T/reload.err"); then
+    echo "actual reload returned success despite the in-process session: $reload"; return 1
+  fi
+  grep -q '^blocked:' <<<"$reload" || { echo "actual reload was not blocked: $reload"; return 1; }
+  grep -q '^blocker: in-process sessions would end: inproc ' <<<"$reload" || { echo "actual reload did not name the in-process session: $reload"; return 1; }
+  [[ "$(daemon_id)" == "$old_id" ]] || { echo "daemon id changed after an actual refusal"; return 1; }
+  [[ "$(daemon_pids)" == "$old" ]] || { echo "daemon PID changed after an actual refusal"; return 1; }
+  same_socket_path || { echo "socket is not connectable after an actual refusal"; return 1; }
+  [[ "$(session_info inproc)" == "$info_before" ]] || { echo "session changed after an actual refusal"; return 1; }
+  no_candidates || { echo "candidate left behind after an actual refusal"; return 1; }
+
+  echo "PASS B: in-process session blocked both --check and actual reload; pid $old, daemon-id, socket and session unchanged; no candidate"
   echo "  blocker: $(grep '^blocker:' <<<"$check")"
 }
 
@@ -322,18 +334,30 @@ case_c() {
     remuda._relay_timers = {}
     remuda._fake_http_timers = {}
     remuda._fixture_fake_calls = 0
+    local counter = os.getenv('RRF_FAKE_COUNTER')
+    local function fake_run()
+      remuda._fixture_fake_calls = (remuda._fixture_fake_calls or 0) + 1
+      if counter then
+        local f = io.open(counter, 'a')
+        if f then f:write('old-fake-callback-invoked\n'); f:close() end
+      end
+    end
     function remuda.schedule(spec)
       local timer = { spec = spec, cancelled = false }
       remuda._relay_timers[#remuda._relay_timers + 1] = timer
       return timer
     end
     function remuda.cancel(timer) if timer then timer.cancelled = true end end
+    -- Register the old fake callback on a fake handle but never invoke it.
+    remuda._fixture_fake_handle = { spec = { run = fake_run }, cancelled = false }
+    remuda._relay_timers[#remuda._relay_timers + 1] = remuda._fixture_fake_handle
     return 'injected'
   " 2>/dev/null | tail -1)
   [[ "$injected" == injected ]] || { echo "fake injection failed: $injected"; return 1; }
   local before_fake
   before_fake=$(runp -e "return tostring(remuda._relay_timers ~= nil)..','..tostring(remuda._fake_http_timers ~= nil)..','..tostring(remuda._fixture_fake_calls)" 2>/dev/null | tail -1)
   [[ "$before_fake" == "true,true,0" ]] || { echo "fake bindings not installed: $before_fake"; return 1; }
+  [[ ! -s "$T/fake-callback" ]] || { echo "old fake callback ran before reload"; return 1; }
 
   if reload=$(runp reload --binary "$BIN" 2>"$T/reload.err"); then
     :
@@ -351,6 +375,7 @@ case_c() {
 
   after_fake=$(runp -e "return tostring(remuda._relay_timers ~= nil)..','..tostring(remuda._fake_http_timers ~= nil)..','..tostring(type(remuda.schedule))..','..tostring(type(remuda.schedules))..','..tostring(type(remuda.clock))" 2>/dev/null | tail -1)
   [[ "$after_fake" == "false,false,function,table,function" ]] || { echo "fresh image did not restore real timer bindings: $after_fake"; return 1; }
+  [[ ! -s "$T/fake-callback" ]] || { echo "old fake callback was replayed across reload: $(cat "$T/fake-callback")"; return 1; }
 
   runp -e "remuda._fixture_after_calls=0; remuda.after(0.2, function() remuda._fixture_after_calls=(remuda._fixture_after_calls or 0)+1 end); return 'after'" >/dev/null 2>&1
   runp -e "remuda._fixture_ticks=0; remuda._fixture_handle=remuda.schedule{every=0.1, after=0.05, name='rrf-probe', run=function() remuda._fixture_ticks=(remuda._fixture_ticks or 0)+1 end}; return 'scheduled'" >/dev/null 2>&1
@@ -370,8 +395,9 @@ case_c() {
   [[ "$info_after" == "$info_before" ]] || { echo "host identity changed across reload: $info_before -> $info_after"; return 1; }
   [[ -n "$(host_line hosted)" ]] || { echo "host missing after reload"; return 1; }
 
-  echo "PASS C: fake schedule gone; real after fired once; real schedule ticked $ticks then stopped after cancel; host survived"
-  echo "  fake before: $before_fake; after: $after_fake"
+  echo "PASS C: core fake schedule gone, old fake callback never replayed; real after fired once; real schedule ticked $ticks then stopped after cancel; host survived"
+  echo "  fake before: $before_fake; after: $after_fake; old fake callback file: empty"
+echo "  C scope: core primitives only; no private Butler install, so real Butler graph recovery is a separate fixture"
 }
 
 run_case() {
