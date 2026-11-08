@@ -132,3 +132,54 @@ jobs:
           fi
           echo "Retrying the contract gate once after the Broken pipe harness race."
           run_gate "$RUNNER_TEMP/butler-contract-retry.log"
+
+  native-sql-661:
+    name: native-sql-661
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    # Native SQLite behavior only exists in core 661; the default ae9 pin cannot
+    # prove it. Independent of rust: it builds exactly one binary and creates
+    # its own private homes/runtime. Unavailable SQL/migrations fail, never SKIP.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Registration and fail-closed guards
+        run: |
+          bash tests/ci/native_sql_lane_guard_test.sh
+          bash tests/ci/native_sql_tests_selftest.sh
+      - uses: actions/checkout@v4
+        with:
+          repository: warmblood-kr/remuda
+          ref: 66138e39db21c8f7d069589c779bf6ac589f777c
+          path: remuda-core
+      - name: Toolchain identity
+        id: toolchain
+        run: echo "version=$(rustc -vV | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ github.workspace }}/remuda-core/target
+          key: native-sql-661-${{ runner.os }}-${{ runner.arch }}-66138e39db21c8f7d069589c779bf6ac589f777c-${{ steps.toolchain.outputs.version }}-${{ hashFiles('remuda-core/Cargo.lock') }}-debug
+      - name: Build native 661 remuda
+        # Restored Cargo output is never trusted as a binary; this always runs.
+        working-directory: remuda-core
+        run: cargo build --manifest-path Cargo.toml -p remuda-native --bin remuda
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/remuda-core/target
+      - name: Run three real native SQL 661 suites
+        env:
+          REMUDA_BIN: ${{ github.workspace }}/remuda-core/target/debug/remuda
+        run: tests/ci/native_sql_tests.sh
+      - name: Real-binary fail-closed negatives
+        env:
+          REMUDA_BIN: ${{ github.workspace }}/remuda-core/target/debug/remuda
+        run: tests/ci/native_sql_negative_tests.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-sql-661-logs-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-sql-661-logs
+          if-no-files-found: ignore
+          retention-days: 7
