@@ -341,39 +341,67 @@ end
 -- is recorded as torn rather than skipped or included as a complete line.
 local SEAL_WINDOW = 64 * 1024
 
-local function sealed_log_end(self, path, allowance)
+-- Plain find, not the backtracking `.*()\n` pattern: a 64 KiB no-newline tail
+-- must stay linear in the C matcher.
+local function last_newline(text)
+  local at, last = 0, nil
+  while true do
+    local found = text:find("\n", at + 1, true)
+    if not found then return last end
+    last = found
+    at = found
+  end
+end
+
+local function sealed_log_end(self, path, allowance, resume)
   local ok, size, why = pcall(self.fs.size, path)
   if not ok then return nil, fail("source_unreadable", "log", path) end
   if size == nil then
-    if error_code(why) == "not_found" then return { end_offset = 0, torn = 0, used = 0 } end
+    if error_code(why) == "not_found" then
+      return { complete = true, end_offset = 0, torn = 0, used = 0 }
+    end
     return nil, fail("source_unreadable", "log", path)
   end
   if type(size) ~= "number" or size % 1 ~= 0 or size < 0 then
     return nil, fail("source_unreadable", "log", path)
   end
-  if size == 0 then return { end_offset = 0, torn = 0, used = 0 } end
-  local offset, used = size, 0
+  if size == 0 then
+    return { complete = true, end_offset = 0, torn = 0, used = 0 }
+  end
+  local offset
+  if resume == nil or resume == -1 then
+    offset = size
+  elseif type(resume) ~= "number" or resume % 1 ~= 0 or resume < 0 or resume > size then
+    return nil, fail("stale_generation", "seal_resume", path)
+  else
+    offset = resume
+  end
+  if offset == 0 then
+    -- A resumed scan that already reached the file start found no newline.
+    return { complete = true, end_offset = 0, torn = 1, used = 0 }
+  end
+  local used = 0
   while offset > 0 do
     local remaining = allowance ~= nil and (allowance - used) or SEAL_WINDOW
     if remaining < 1 then
-      return nil, { code = "partial", field = "seal_budget", path = path, used = used }
+      return { complete = false, offset = offset, used = used }
     end
     local window = math.min(SEAL_WINDOW, offset, remaining)
-    local start = offset - window
-    local read_ok, chunk = pcall(self.fs.read_range, path, start, window)
+    local window_start = offset - window
+    local read_ok, chunk = pcall(self.fs.read_range, path, window_start, window)
     if not read_ok or type(chunk) ~= "table" or type(chunk.bytes) ~= "string" then
       return nil, fail("source_unreadable", "log", path)
     end
     used = used + #chunk.bytes
-    local last = chunk.bytes:match(".*()\n")
+    local last = last_newline(chunk.bytes)
     if last then
-      local finish = start + last
-      return { end_offset = finish, torn = finish < size and 1 or 0, used = used }
+      local finish = window_start + last
+      return { complete = true, end_offset = finish,
+        torn = finish < size and 1 or 0, used = used }
     end
-    offset = start
+    offset = window_start
   end
-  -- The whole file is one torn line: no complete prefix is safe to seal.
-  return { end_offset = 0, torn = 1, used = used }
+  return { complete = true, end_offset = 0, torn = 1, used = used }
 end
 
 function Source:seal(root, hex, budget)
@@ -384,30 +412,62 @@ function Source:seal(root, hex, budget)
   if type(self.fs.size) ~= "function" or type(self.fs.read_range) ~= "function" then
     return fail("unavailable", "fs")
   end
-  local allowance
+  local allowance, resume
   if budget ~= nil then
     if type(budget) ~= "table" or type(budget.max_bytes) ~= "number"
       or budget.max_bytes % 1 ~= 0 or budget.max_bytes < 1 then
       return fail("invalid_snapshot", "budget")
     end
     allowance = budget.max_bytes
+    if budget.resume ~= nil then
+      if type(budget.resume) ~= "table" then return fail("invalid_snapshot", "resume") end
+      resume = budget.resume
+    end
   end
-  -- Each log gets its own bounded backward scan. The inbox tail is usually
-  -- longer than the read tail; spending the whole call budget on the inbox must
-  -- not make an empty/short read log permanently partial. The caller still
-  -- accounts the sum against its turn budget.
-  local inbox, inbox_err = sealed_log_end(self,
-    self.root .. "/inboxes/" .. hex .. ".jsonl", allowance)
-  if not inbox then return nil, inbox_err end
-  local reads, read_err = sealed_log_end(self,
-    self.root .. "/read/" .. hex .. ".jsonl", allowance)
-  if not reads then
-    if type(read_err) == "table" then read_err.used = (read_err.used or 0) + (inbox.used or 0) end
-    return nil, read_err
+  local inbox_done = resume and resume.inbox_done == 1 or false
+  local read_done = resume and resume.read_done == 1 or false
+  local inbox_end = resume and resume.inbox_end or nil
+  local inbox_torn = resume and resume.inbox_torn or nil
+  local read_end = resume and resume.read_end or nil
+  local read_torn = resume and resume.read_torn or nil
+  local inbox_offset = resume and resume.inbox_offset or -1
+  local read_offset = resume and resume.read_offset or -1
+  local used = 0
+  if not inbox_done then
+    local inbox, inbox_err = sealed_log_end(self,
+      self.root .. "/inboxes/" .. hex .. ".jsonl", allowance,
+      tonumber(inbox_offset))
+    if not inbox then return nil, inbox_err end
+    used = used + (inbox.used or 0)
+    if not inbox.complete then
+      return { partial = true, recipient = hex, bytes_read = used,
+        inbox_offset = inbox.offset, read_offset = -1,
+        inbox_done = 0, read_done = 0 }
+    end
+    inbox_done, inbox_end, inbox_torn = true, inbox.end_offset, inbox.torn
   end
-  return { recipient = hex, inbox_end = inbox.end_offset,
-    read_end = reads.end_offset, inbox_torn = inbox.torn, read_torn = reads.torn,
-    bytes_read = (inbox.used or 0) + (reads.used or 0) }
+  if not read_done then
+    -- One total allowance per recipient: the inbox scan must not let the read
+    -- scan exceed the caller's byte budget. A starved read scan resumes from
+    -- its persisted offset on the next call.
+    local remaining
+    if allowance ~= nil then remaining = math.max(allowance - used, 0) end
+    local reads, read_err = sealed_log_end(self,
+      self.root .. "/read/" .. hex .. ".jsonl", remaining, tonumber(read_offset))
+    if not reads then
+      return nil, read_err
+    end
+    used = used + (reads.used or 0)
+    if not reads.complete then
+      return { partial = true, recipient = hex, bytes_read = used,
+        inbox_offset = 0, read_offset = reads.offset,
+        inbox_done = 1, inbox_end = inbox_end, inbox_torn = inbox_torn,
+        read_done = 0 }
+    end
+    read_done, read_end, read_torn = true, reads.end_offset, reads.torn
+  end
+  return { recipient = hex, inbox_end = inbox_end, read_end = read_end,
+    inbox_torn = inbox_torn, read_torn = read_torn, bytes_read = used }
 end
 
 -- ---------------------------------------------------------------------------

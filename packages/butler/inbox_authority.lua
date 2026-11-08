@@ -872,8 +872,16 @@ local function seal_step(store, generation, budget)
       if type(source.seal) ~= "function" then
         return migration_backlog(store, generation, "sealed_source_unavailable")
       end
+      local resume_rows = sql_query(store,
+        "SELECT inbox_offset, read_offset, inbox_done, inbox_end, inbox_torn, "
+          .. "read_done, read_end, read_torn FROM migration_seal_cursor "
+          .. "WHERE root = ? AND generation = ? AND recipient = ?",
+        { store.actual_root, generation, hex })
+      if not resume_rows then
+        return nil, { code = "unavailable", field = "migration_seal_cursor" }
+      end
       local sealed_ok, sealed_value, sealed_why = pcall(source.seal, source,
-        store.root, hex, { max_bytes = remaining })
+        store.root, hex, { max_bytes = remaining, resume = resume_rows[1] })
       if not sealed_ok or type(sealed_value) ~= "table" then
         local code = (type(sealed_value) == "table" and sealed_value.code)
           or (type(sealed_why) == "table" and sealed_why.code)
@@ -881,13 +889,31 @@ local function seal_step(store, generation, budget)
         return migration_backlog(store, generation, code)
       end
       remaining = remaining - (sealed_value.bytes_read or 0)
-      local written = sql_exec(store,
-        "INSERT INTO migration_prefix (root, generation, recipient, inbox_end, "
-          .. "read_end, inbox_torn, read_torn, revision, cursor_json, complete) "
-          .. "VALUES (?, ?, ?, ?, ?, ?, ?, 0, '{}', 0)",
-        { store.actual_root, generation, hex, sealed_value.inbox_end,
-          sealed_value.read_end, sealed_value.inbox_torn, sealed_value.read_torn })
-      if not written then return nil, { code = "unavailable", field = "migration_prefix" } end
+      if sealed_value.partial then
+        local held = sql_exec(store,
+          "INSERT OR REPLACE INTO migration_seal_cursor (root, generation, "
+            .. "recipient, inbox_offset, read_offset, inbox_done, inbox_end, "
+            .. "inbox_torn, read_done, read_end, read_torn) "
+            .. "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+          { store.actual_root, generation, hex,
+            tonumber(sealed_value.inbox_offset) or -1,
+            tonumber(sealed_value.read_offset) or -1,
+            sealed_value.inbox_done or 0, sealed_value.inbox_end or 0,
+            sealed_value.inbox_torn or 0, sealed_value.read_done or 0,
+            sealed_value.read_end or 0, sealed_value.read_torn or 0 })
+        if not held then return nil, { code = "unavailable", field = "migration_seal_cursor" } end
+      else
+        local written = sql_exec(store,
+          "INSERT INTO migration_prefix (root, generation, recipient, inbox_end, "
+            .. "read_end, inbox_torn, read_torn, revision, cursor_json, complete) "
+            .. "VALUES (?, ?, ?, ?, ?, ?, ?, 0, '{}', 0)",
+          { store.actual_root, generation, hex, sealed_value.inbox_end,
+            sealed_value.read_end, sealed_value.inbox_torn, sealed_value.read_torn })
+        if not written then return nil, { code = "unavailable", field = "migration_prefix" } end
+        sql_exec(store,
+          "DELETE FROM migration_seal_cursor WHERE root = ? AND generation = ? "
+            .. "AND recipient = ?", { store.actual_root, generation, hex })
+      end
       sealed = sealed + 1
     end
   end
