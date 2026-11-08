@@ -143,7 +143,7 @@ local Store = {}
 
 -- Forward declarations: the registry lives below the file/read helpers, but
 -- lookup_matrix/hydrate above it must still test ownership.
-local owner_token, close_refusal
+local owner_token, close_refusal, read_refusal
 Store.__index = Store
 
 local function decoder(config)
@@ -279,7 +279,7 @@ end
 -- The file source adapter owns the delivered set and envelope metadata. A
 -- Store without it cannot prove anything and must not guess.
 function Store:lookup_matrix(recipient, room, event)
-  if self.closed or not owner_token(self) then
+  if read_refusal(self) then
     return { state = "unknown", reason = "writer_conflict" }
   end
   if self.authority == "sql" then
@@ -303,7 +303,8 @@ end
 
 -- Content only; membership and read state are never inferred here.
 function Store:hydrate(message_id)
-  if self.closed or not owner_token(self) then return close_refusal(self) end
+  local refusal = read_refusal(self)
+  if refusal then return nil, refusal end
   if not safe_id(message_id) then
     return nil, { code = "invalid_id" }
   end
@@ -480,8 +481,30 @@ local function db_query(db, sql, params)
   return rows
 end
 
+-- Reads (status/lookup/hydrate/page) do not require a writer capability: a
+-- FILE store may be inspected read-only, and a read-only SQL store still has
+-- to prove its authority row. Mutations of any tracked/SQL state require the
+-- actual cross-process guard and the process registry, not the registry alone.
+read_refusal = function(store)
+  if store.closed then
+    return { code = "writer_conflict", field = "closed" }
+  end
+  if not store.read_only and not owner_token(store) then
+    return { code = "writer_conflict", field = "owner" }
+  end
+  return nil
+end
+
 close_refusal = function(store)
-  return nil, { code = "writer_conflict", field = "closed" }
+  if store.closed then return nil, { code = "writer_conflict", field = "closed" } end
+  if store.read_only or not owner_token(store) then
+    return nil, { code = "writer_conflict", field = "owner" }
+  end
+  local writer = store.writer_state
+  if type(writer) ~= "table" or writer.owner ~= true or writer.guarded ~= true then
+    return nil, { code = "writer_conflict", field = "writer" }
+  end
+  return nil
 end
 
 function Store:close()
@@ -506,7 +529,8 @@ function Store:status()
 end
 
 function Store:page(recipient, query, cursor)
-  if self.closed or not owner_token(self) then return close_refusal(self) end
+  local refusal = read_refusal(self)
+  if refusal then return nil, refusal end
   if self.authority ~= "sql" then return nil, { code = "sql_required" } end
   if not is_hex(recipient) then return nil, { code = "invalid_id" } end
   if type(query) ~= "table" then return nil, { code = "invalid_query" } end
@@ -788,16 +812,17 @@ function M.open(config)
   -- Marker inspection precedes every backend and the owner registry.
   local marker, marker_err = read_marker(config, config.root, actual)
   if not marker then return nil, marker_err end
-  if OWNER_STATE.owners[actual] then return fail("writer_conflict", "owner") end
-  OWNER_STATE.serial = (OWNER_STATE.serial or 0) + 1
-  local token = { root = actual, serial = OWNER_STATE.serial }
-  OWNER_STATE.owners[actual] = token
+  local writable = config.writer ~= nil and type(config.writer.claim) == "function"
   local store = setmetatable({ root = config.root, actual_root = actual,
     marker = marker, source = config.source, content = config.content,
     json = config.json, sha256 = config.sha256, new_id = config.new_id,
-    decode = decoder(config) }, Store)
-  OWNER_STATE.tokens[store] = token
-  if config.writer and type(config.writer.claim) == "function" then
+    decode = decoder(config), read_only = not writable }, Store)
+  if writable then
+    if OWNER_STATE.owners[actual] then return fail("writer_conflict", "owner") end
+    OWNER_STATE.serial = (OWNER_STATE.serial or 0) + 1
+    local token = { root = actual, serial = OWNER_STATE.serial }
+    OWNER_STATE.owners[actual] = token
+    OWNER_STATE.tokens[store] = token
     local ok, capability, why = pcall(config.writer.claim, config.root)
     if not ok or type(capability) ~= "table" then
       release_owner(store)
@@ -805,14 +830,18 @@ function M.open(config)
         or (type(why) == "table" and why.code) or "writer_conflict"
       return fail(code, "writer")
     end
-    if capability.root ~= nil and resolve_root(config, capability.root) ~= actual then
+    -- Attach the acquired lease before any validation so every refusal releases
+    -- exactly this capability once, even when the usable fields are malformed.
+    store.release_capability = capability.release
+    local capability_root = capability.root
+    if capability_root ~= nil and resolve_root(config, capability_root) ~= actual then
       release_owner(store)
       return fail("writer_conflict", "root")
     end
     if capability.owner ~= true then release_owner(store); return fail("writer_conflict", "owner") end
     if capability.guarded ~= true then release_owner(store); return fail("writer_conflict", "guarded") end
     store.writer_state = { owner = true, guarded = true }
-    store.release_capability = capability.release
+    store.read_only = false
   end
   if marker.state ~= "FILE" then
     local db, db_why = db_handle(config)
@@ -828,12 +857,15 @@ function M.open(config)
     end
     if marker.state == "SQL_ACTIVE" then
       local rows = db_query(db,
-        "SELECT root, epoch, generation, operation_id, proof_hash FROM auth_authority WHERE id = 1")
+        "SELECT format_version, root, epoch, generation, operation_id, proof_hash, "
+          .. "tail_watermark FROM auth_authority WHERE id = 1")
       local row = rows and rows[1]
-      if not row or row.root ~= actual or tonumber(row.epoch) ~= marker.epoch
+      if not row or tonumber(row.format_version) ~= marker.format_version
+        or row.root ~= actual or tonumber(row.epoch) ~= marker.epoch
         or row.generation ~= marker.generation
         or row.operation_id ~= marker.operation_id
-        or row.proof_hash ~= marker.proof_hash then
+        or row.proof_hash ~= marker.proof_hash
+        or tonumber(row.tail_watermark) ~= marker.tail_watermark then
         release_owner(store)
         return fail("recovery_required", "authority")
       end
