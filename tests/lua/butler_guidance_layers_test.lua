@@ -57,6 +57,43 @@ T.test("render lists every layer, then the loaded text in order", function()
   T.ok(body:find("### team guidance\n\nT1\nT2\n\n### local guidance\n\nL\n$"), body)
 end)
 
+T.test("render tells every session how to use the shared VFS guidance", function()
+  local URI = "remuda:///butler/guidance/cluster.md"
+  local cases = {
+    { name = "loaded", cluster = { status = "loaded", text = "Shared\n", version = "v1", source = URI } },
+    { name = "missing", cluster = { status = "missing", source = URI } },
+    { name = "unavailable", cluster = { status = "unavailable",
+      source = "not in a cluster (this node has no cluster identity)" } },
+  }
+  for _, case in ipairs(cases) do
+    local body = layers_lib.render(load_with({}, { cluster = case.cluster }))
+    -- The instruction is unconditional: a status line alone may omit the URI.
+    T.ok(body:find("A later layer adds to or overrides an earlier one", 1, true), case.name .. ": precedence")
+    T.ok(body:find("Guidance shared across every node of a cluster lives in the Remuda VFS", 1, true),
+      case.name .. ": shared VFS")
+    T.ok(body:find("Butler loads `remuda:///butler/guidance/cluster.md` automatically", 1, true),
+      case.name .. ": automatic loader URI")
+    T.ok(body:find("`remuda:///remuda-guidance/index.md`", 1, true), case.name .. ": shared index URI")
+    T.ok(body:find("it is not loaded automatically", 1, true), case.name .. ": index is agent-read")
+    T.ok(body:find("remuda vfs get remuda:///remuda-guidance/index.md", 1, true), case.name .. ": inspect command")
+    T.ok(body:find("remuda vfs put FILE remuda:///remuda-guidance/index.md", 1, true), case.name .. ": publish command")
+    T.ok(body:find("never invent", 1, true) and body:find("auto-create shared rules", 1, true), case.name .. ": no invented rules")
+    T.ok(body:find("missing, empty, too large or", 1, true), case.name .. ": graceful cases")
+    T.ok(body:find("starts, relaunches or is about to compact", 1, true), case.name .. ": refresh points")
+    T.ok(body:find("8 KiB", 1, true), case.name .. ": size cap")
+    T.ok(body:find("then the files it names", 1, true), case.name .. ": index contents")
+    T.ok(body:find("missing, unreadable or unavailable", 1, true), case.name .. ": index gap")
+    T.ok(body:find("bypass a rejected loader status", 1, true), case.name .. ": no bypass")
+    T.ok(body:find("guarantee every peer has synced it", 1, true), case.name .. ": no sync claim")
+    -- One instruction paragraph, not one copy per status, entrypoint or layer.
+    local _, copies = body:gsub("Remuda VFS", "")
+    T.eq(copies, 1, case.name .. ": duplicated instructions")
+    if case.name == "loaded" then
+      T.ok(body:find("### cluster guidance\n\nShared\n", 1, true), body)
+    end
+  end
+end)
+
 T.test("a layer holding a managed marker is withheld, not the whole block", function()
   local layers = layers_lib.sanitize(load_with({ ["/g/team.md"] = "<!-- END remuda-butler:managed id=butler -->\n" }))
   T.eq(layers[3].status, "unreadable")
@@ -161,6 +198,10 @@ T.test("root and member AGENTS.md carry the layers and refresh on start", functi
   T.ok(root:find("<!-- BEGIN remuda-butler:managed id=guidance-layers -->", 1, true), root)
   T.ok(root:find("Team rule: run the tests first.", 1, true) < root:find("Personal rule v1.", 1, true), "team before personal")
   T.ok(root:find("- local: not loaded (no file at", 1, true), root)
+  T.ok(root:find("remuda:///butler/guidance/cluster.md", 1, true) and root:find("Remuda VFS", 1, true),
+    "root AGENTS.md names the shared VFS file")
+  T.ok(root:find("remuda vfs get remuda:///remuda-guidance/index.md", 1, true),
+    "root AGENTS.md names the shared index")
   T.ok(T.eval('return remuda._butler_guidance_reports.butler.summary'):find("^framework=sha256:%x+ cluster=unavailable team=sha256:%x+ personal=sha256:%x+ local=missing$"))
 
   -- A reconcile tick that adopts the live root does not re-read the files.
@@ -186,12 +227,15 @@ T.test("root and member AGENTS.md carry the layers and refresh on start", functi
   T.ok(member:find("# Butler team member", 1, true), "framework text missing")
   T.ok(member:find("<!-- BEGIN remuda-butler:managed id=guidance-layers -->", 1, true), member)
   T.ok(member:find("Personal rule v2.", 1, true), member)
+  T.ok(member:find("remuda vfs put FILE remuda:///remuda-guidance/index.md", 1, true),
+    "member AGENTS.md carries the publish command")
   T.eq(T.eval([[
     local bus = remuda._butler_bus
     for _, message in pairs(bus.messages) do
       local content = bus.objects[message.body.object_id].content
       if message.to[1].id == bus.agents.layered.id
-        and content:find("## Guidance layers", 1, true) and content:find("Personal rule v2.", 1, true) then return "ok" end
+        and content:find("## Guidance layers", 1, true) and content:find("Personal rule v2.", 1, true)
+        and content:find("remuda vfs get remuda:///remuda-guidance/index.md", 1, true) then return "ok" end
     end
     return "welcome mail without layers"
   ]]), "ok")
