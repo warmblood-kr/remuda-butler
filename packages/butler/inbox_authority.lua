@@ -914,7 +914,8 @@ local function advance_step(store, generation, budget)
   while units < budget.max_statements do
     local rows = sql_query(store,
       "SELECT recipient, inbox_end, read_end FROM migration_prefix WHERE root = ? "
-        .. "AND generation = ? AND complete = 0 ORDER BY recipient LIMIT 1",
+        .. "AND generation = ? AND complete = 0 "
+        .. "ORDER BY revision ASC, recipient ASC LIMIT 1",
       { store.actual_root, generation })
     if not rows then return nil, { code = "unavailable", field = "migration_prefix" } end
     if #rows == 0 then

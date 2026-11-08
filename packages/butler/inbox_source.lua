@@ -392,15 +392,15 @@ function Source:seal(root, hex, budget)
     end
     allowance = budget.max_bytes
   end
+  -- Each log gets its own bounded backward scan. The inbox tail is usually
+  -- longer than the read tail; spending the whole call budget on the inbox must
+  -- not make an empty/short read log permanently partial. The caller still
+  -- accounts the sum against its turn budget.
   local inbox, inbox_err = sealed_log_end(self,
     self.root .. "/inboxes/" .. hex .. ".jsonl", allowance)
   if not inbox then return nil, inbox_err end
-  local remaining = allowance and (allowance - (inbox.used or 0)) or nil
-  if remaining ~= nil and remaining < 1 then
-    return nil, { code = "partial", field = "seal_budget", used = inbox.used }
-  end
   local reads, read_err = sealed_log_end(self,
-    self.root .. "/read/" .. hex .. ".jsonl", remaining)
+    self.root .. "/read/" .. hex .. ".jsonl", allowance)
   if not reads then
     if type(read_err) == "table" then read_err.used = (read_err.used or 0) + (inbox.used or 0) end
     return nil, read_err
