@@ -575,20 +575,22 @@ ordinary mail path. `remuda butler status-commands on|off` turns it off or on
 any value other than `true` or `false` turns it off.
 
 Root posts are delivered from anyone. In the HOME room, every thread reply is
-delivered unless you explicitly unfollowed that thread. In other rooms, thread
-replies are delivered only in followed threads or when a message mentions the
-Butler; replying, sending, and a mention from an allowlisted sender follow
-automatically. Non-allowlisted senders arrive marked as information with
+delivered (HOME defaults to `all`). In other rooms, thread replies are delivered
+only in followed threads or when a message mentions the Butler; replying,
+sending, and a mention from an allowlisted sender follow automatically.
+Non-allowlisted senders arrive marked as information with
 `trusted=false`.
 Use `follow EVENT_ID` and `unfollow EVENT_ID` to manage subscriptions; the
-relay allows up to 5000 followed threads in total. Unfollow is stronger than
-removing a follow: an explicitly unfollowed thread's unmentioned replies stay
-out of the inbox under every room policy, including HOME's `all`. A mention in
-that thread still delivers that one message but does not re-follow the thread;
-`follow` clears the marker and restores delivery. The explicit unfollow markers
-are kept in relay state (at most 5000, oldest dropped first) and survive a
-restart; a message already waiting for context is rechecked and suppressed when
-its thread is unfollowed before delivery. Accepted messages from
+relay allows up to 5000 followed threads in total. `unfollow` removes the
+subscription and records an explicit tombstone, and delivery goes back to the
+room's notification policy: `all` still delivers that thread,
+`mentions-followed` delivers only a direct mention, and `none` delivers
+nothing. The tombstone only blocks an automatic re-follow, so a mention in that
+thread is delivered once without re-following it; only an explicit `follow`
+clears the tombstone. The tombstones are kept in relay state (at most 5000,
+oldest dropped first) and survive a restart; a message already waiting for
+context is rechecked against the current policy and follows before delivery.
+Accepted messages from
 non-allowlisted senders are limited per room in a rolling hour by
 `untrusted_per_room_hour` (default 20). Once the cap is reached, those messages
 are left undelivered, rather than quarantined. The HOME room receives a summary
@@ -618,9 +620,14 @@ on the allowlist, and
 `untrusted_per_room_hour` (default 20) for non-allowlisted messages delivered
 from each room. Consecutive messages from the same Butler count once, so one
 agent's follow-up reports do not consume the limit; a message from a different
-Butler starts a new turn. The Butler's own replies neither increment nor reset
-the peer counter but are a boundary: the other Butler's next message is a new
-turn. Replies to verified
+Butler starts a new turn. The Butler's own replies to an agent or unknown
+target neither increment nor reset the peer counter but are a boundary: the
+other Butler's next message is a new turn. A reply whose target is a verified
+person on the allowlist is owner-directed progress, not a peer boundary: it
+does not change, increment or reset the peer count. That exemption needs the
+exact delivered event: a reply to our own sent event inside a human-root
+thread, or to an agent in that thread, keeps the conservative boundary. Replies
+to verified
 people on the allowlist remain available even when peer replies are paused.
 These counters are held
 in memory and reset when the daemon restarts. `b2b_max_turns` and
@@ -707,15 +714,16 @@ counted.
 Each room has an independent Matrix delivery policy. HOME defaults to `all`;
 ALL-BUTLERS and other joined rooms default to `mentions-followed`. The latter
 delivers a message that mentions this Butler or a reply in a followed thread;
-new unmentioned thread roots and replies to unfollowed threads stay out of the
-Butler inbox. `none` suppresses all room messages. Read or change the policy
+new unmentioned thread roots stay out of the Butler inbox. `none` suppresses all
+room messages. Read or change the policy
 with `remuda butler matrix [--room ROOM] notifications [all|mentions-followed|none]`;
 without a mode, the command shows the current value. This is operator-only.
 Changing it applies to the running relay immediately. `follow` and `unfollow`
-control thread replies; `all` delivers every message except unmentioned replies
-in a thread you explicitly unfollowed. A mention in an unfollowed thread still
-delivers that message but does not re-follow it, so later unmentioned replies
-stay muted until `follow`.
+control thread replies. After `unfollow`, delivery follows the room policy
+(`all` still delivers that thread, `mentions-followed` only a direct mention,
+`none` nothing) and the tombstone only blocks an automatic re-follow. A mention
+in an unfollowed thread still delivers that message but does not re-follow it,
+so later unmentioned replies follow the room policy until `follow`.
 
 Add `deny_room=!ROOM_ID` or `deny_room=#alias:server` for each denied room, and
 `deny_server=host` for each denied server. Room IDs, canonical aliases, room

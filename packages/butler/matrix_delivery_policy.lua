@@ -11,32 +11,30 @@ function policy.accept_mode(mode, mentioned, followed)
   return mode == "all" or (mode == "mentions-followed" and (mentioned or followed))
 end
 
--- An explicit unfollow mutes unmentioned replies in that thread even in mode
--- all. A mention is the sender's direct address, so it still passes; the relay
--- never re-follows the thread on its behalf.
-function policy.accept_thread(mode, mentioned, followed, unfollowed_root)
-  if unfollowed_root and not mentioned then return false end
+-- Delivery follows the room policy. An explicit unfollow removes the
+-- subscription and leaves a tombstone that only blocks an implicit re-follow:
+-- it is not a delivery filter. So `all` keeps delivering that thread,
+-- `mentions-followed` still delivers a direct mention, and `none` delivers
+-- nothing; only an explicit `follow` clears the tombstone.
+function policy.accept_thread(mode, mentioned, followed)
   return policy.accept_mode(mode, mentioned, followed)
 end
 
-function policy.accept_received(cfg, room, subscriptions, event, unfollowed_root)
-  local mentioned = event.is_room_mention == true or event.is_mention == true
-  return policy.accept_thread(matrix.notification_mode(cfg, room), mentioned,
-    policy.followed(subscriptions, event.thread_root), unfollowed_root)
+local function mentioned(event)
+  return event.is_room_mention == true or event.is_mention == true
 end
 
-function policy.accept_pending(cfg, room, subscriptions, event, unfollowed_root)
-  -- An accepted trusted mention may have created a follow. Explicitly removing
-  -- that follow while mail waits also revokes the mention's pending eligibility.
-  -- Old persisted events without mention_follow_root retain the original rule.
-  -- A permitted structured room mention is not a follow-dependent mention.
-  -- On an explicitly unfollowed thread the follow no longer gates the mention:
-  -- the mention itself is still delivered, and the relay does not re-follow.
-  local mentioned = event.is_room_mention == true
-    or (event.is_mention == true and (unfollowed_root or event.mention_follow_root == nil
-      or policy.followed(subscriptions, event.mention_follow_root)))
-  return policy.accept_thread(matrix.notification_mode(cfg, room), mentioned,
-    policy.followed(subscriptions, event.thread_root), unfollowed_root)
+function policy.accept_received(cfg, room, subscriptions, event)
+  return policy.accept_thread(matrix.notification_mode(cfg, room), mentioned(event),
+    policy.followed(subscriptions, event.thread_root))
+end
+
+-- Pending mail follows the same contract as receive: an explicit mention is
+-- still the sender's direct address, so removing a follow does not revoke it,
+-- and the unfollowed marker is not a delivery input at delivery time.
+function policy.accept_pending(cfg, room, subscriptions, event)
+  return policy.accept_thread(matrix.notification_mode(cfg, room), mentioned(event),
+    policy.followed(subscriptions, event.thread_root))
 end
 
 -- Publish the complete interface at once. Refactored relay closures look it up
