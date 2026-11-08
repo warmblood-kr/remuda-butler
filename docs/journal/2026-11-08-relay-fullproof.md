@@ -43,3 +43,17 @@ Outbox attempts are compared with the import normalization: integer tokens and
 integral real/numeric-text tokens (1.0, "1") become the same integer, while
 1.5/"x" normalize to NULL. A direct test confirms 1.0 and "1" verify as 1 and a
 later mismatch refuses with import_incomplete:intent.
+
+## 646b static correction
+
+The next candidate adds: started cursors so an empty original root/room key is
+not skipped; raw units require parent='' nested=0 in both structure and reverse;
+sealed baselines are checked one per call; domain keys/rooms and structure
+units/fields advance one per call; source rows advance at most one unit per
+call. Outbox attempts are checked in a bounded Lua page using the importer's
+`tonumber` rule, which fixes 1junk/1e2/0x10. Schema open compares installed
+trigger SQL with the recreated SQL and bumps data_revision on any difference,
+invalidating a READY certificate made under a weak trigger. Field paths require
+one canonical interpretation, parent identity is part of the match, and `$` is
+mandatory. The many-domain and node-rich scope probe is
+`/private/tmp/relay-sqlite-qa/scope_limits.lua`.
