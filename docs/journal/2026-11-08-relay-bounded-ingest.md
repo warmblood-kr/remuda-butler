@@ -47,5 +47,9 @@ Evidence on this candidate:
 - Discovery reads a key length before fetching it: a 100,000B key under a
   1024B call budget returns budget_too_small without advancing; 300,000B is
   field_oversize; the capture remains.
+- Cursor projection: a 100,000B since value is inserted by SQL (`raw -> path`,
+  `json_extract(raw -> path,'$')`) without returning token+value to Lua; the
+  step reports and charges the 100,002B token. Cursor parity also compares in
+  SQL. QA cursor budget 1/1.
 - Near-32MiB is gated separately; record measured walltime and SQL page work
   rather than claiming a range that did not finish.

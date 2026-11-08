@@ -1433,17 +1433,17 @@ function M.open(opts)
       local added = add_field(capture.source_id, field_path, '', kind, 1)
       if added ~= 1 then return nil, 'source_fields' end
       if capture.role == 'primary' then
-        local cursor_json, cursor_why = query(db,
-          'SELECT raw -> ? AS token, json_extract(raw,?) AS value ' ..
-            'FROM relay_source_capture WHERE ingest_id=?', { path, path, p.ingest_id })
-        if not cursor_json then return nil, 'cursor: ' .. tostring(cursor_why) end
         local scope = name == 'since' and 'sync' or 'messages'
+        -- Projection stays in SQL: the raw token and its decoded value never
+        -- both enter Lua, and the caller is charged the token bytes.
         local added_cursor = exec(db,
           'INSERT OR REPLACE INTO relay_cursors (scope,present,cursor_json,value) ' ..
-            'VALUES (?,1,?,?)',
-          { scope, cursor_json[1].token, cursor_json[1].value or '' })
+            'SELECT ?,1, raw -> ?, json_extract(raw -> ?, \'$\') ' ..
+            'FROM relay_source_capture WHERE ingest_id=?',
+          { scope, path, path, p.ingest_id })
         if added_cursor ~= 1 then return nil, 'cursor' end
       end
+      next_fields.bytes = n
       return next_fields
     end
     if expected == 'map' or expected == 'array'
@@ -2561,22 +2561,26 @@ function M.open(opts)
     local scopes = { { scope = 'sync', path = '$.since' },
       { scope = 'messages', path = '$.messages_since' } }
     for _, item in ipairs(scopes) do
+      -- Compare token and decoded value inside SQL so a large cursor does not
+      -- return two large projected cells to Lua.
       local source, why = query(db,
-        'SELECT json_type(raw,?) AS kind,raw->? AS token,json_extract(raw,?) AS value ' ..
-          'FROM relay_import_source WHERE source_id=?', { item.path, item.path, item.path, primary.source_id })
+        'SELECT json_type(s.raw,?) AS kind,' ..
+          '(SELECT count(*) FROM relay_cursors c WHERE c.scope=? AND c.present=1 ' ..
+            'AND c.cursor_json = s.raw -> ? ' ..
+            'AND COALESCE(c.value,\'\') = COALESCE(json_extract(s.raw,?),\'\')) AS matches ' ..
+          'FROM relay_import_source s WHERE s.source_id=?',
+        { item.path, item.scope, item.path, item.path, primary.source_id })
       if not source then return nil, why end
-      local row, row_why = query(db,
-        'SELECT scope,present,cursor_json,value FROM relay_cursors WHERE scope=?', { item.scope })
-      if not row then return nil, row_why end
       local present = source[1] and source[1].kind ~= nil
       if present then
-        if not row[1] or tonumber(row[1].present) ~= 1
-            or row[1].cursor_json ~= source[1].token
-            or (row[1].value or '') ~= (source[1].value or '') then
+        if not source[1] or tonumber(source[1].matches) ~= 1 then
           return nil, 'cursor'
         end
-      elseif row[1] then
-        return nil, 'cursor'
+      else
+        local extra, extra_why = query(db,
+          'SELECT 1 AS ok FROM relay_cursors WHERE scope=? LIMIT 1', { item.scope })
+        if not extra then return nil, extra_why end
+        if extra[1] then return nil, 'cursor' end
       end
     end
     local extra, extra_why = query(db,
