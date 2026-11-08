@@ -51,28 +51,27 @@ Evidence on this candidate:
   `json_extract(raw -> path,'$')`) without returning token+value to Lua; the
   step reports and charges the 100,002B token. Cursor parity also compares in
   SQL. QA cursor budget 1/1.
-- Near-32MiB source: 32,630,025B / 65,000 x 500B ids, every advance its own
-  native turn with 23 reopen checkpoints; 1,530 verify calls, max 4.092s,
-  total 2,318.6s, 65,000 processed, verified and activated. The max call is
-  SQL re-reading the 32MB raw to return 64 rows; no raw enters Lua and the
-  result is not a universal byte-bound claim.
-- Startup/archive caller RED fixtures added under `tests/red/`: blocked
-  authority must stop `matrix.relay.start`, a single bounded `migrate.step`,
-  a real inbox producer for `authority.start`, and archive planning only with
-  both proofs.
-- Static RED cleared: step is one store action (acks/drain are sidecars, not
-  manifest rows), authority refuses without the real producer proof, archive
-  requires both proofs, and relay.start/new plus boot use the gate.
+- Near-32MiB source: 32,630,025B / 65,000 ids, own native turn per advance,
+  23 reopens; 1,530 verify calls, max 4.092s, total 2,318.6s, activated. Max
+  is SQL re-reading 32MB to return 64 rows; not a universal bound.
+- Caller RED fixtures: blocked authority must stop relay.start, one bounded
+  `migrate.step`, real inbox producer before start, archive needs both proofs.
+- Static RED cleared: step is one action (acks/drain are sidecars), authority
+  needs the real producer proof, archive needs both proofs, relay.start/new
+  and boot use the gate.
 - Native gate: 61 bounded advances, max 1 action each, changed stamp refused,
-  producer shape accepted, tampered/blocked refused, restart resumes, adapter
-  binds, archive plans 4 files with 0B ack/drain.
-- Inbox producer `9cb44ef` supplies the flat identities plus the exact NUL
-  `butler-inbox-compat-v1` tuple; store_id may be `config.store_id`,
-  data_revision is frozen, verification_id is the final proof hash.
+  tampered/blocked refused, restart resumes, adapter binds, 4-file archive.
+- Producer `9cb44ef` returns flat identities plus the exact NUL tuple; store_id
+  may be config.store_id, data_revision frozen, verification_id final hash.
 - `authority.adapter(providers)` binds once, then start(cfg,{inbox_proof=fn})/
   advance/certificate/status/inventories for the inbox coordinator.
-- `relay_archive.providers` copies <=64KiB chunks to durable `.part.NNNN`,
-  writes a digest manifest, re-reads one part per call, then renames and
-  fences both parents; no whole-file SHA/publish. Native: 200KB -> 4 parts,
-  max 65536B/call, manifest reopen resumes verification.
+- Archive HOLD6: providers copy <=64KiB chunks to durable `.part.NNNN`, write
+  a digest manifest and a durable per-file plan (chunk/verify/retire cursors),
+  re-check BOTH proofs + current owner before each advance, inspect unknown
+  renames, and treat live-source+identical-retained as retire_conflict. Native:
+  200KB 4 parts, max 65536B/call, mid-flight reload keeps offset 65536,
+  proof drift/missing owner refuse, conflict blocks.
+- `approval_record_sql` mirrors one exact approval through store:put with an
+  idempotent operation id and bounded page/get; no writer -> refusal. Native
+  open/retry/update/page pass. Remaining HOLD: streaming admission.
 

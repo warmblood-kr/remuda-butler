@@ -12,9 +12,9 @@
   exactly one store action via import_prepare/import_source/import_acks/
   ingest_step/import_batch/verify_import/activate/proof.
 - `relay_receipts.lua:417 import_all`, `:487 record`, `:497 authority_state`.
-- `approval.lua:116 attach(state,persist,post,room,home)` (writer is not
-  state), `:188 begin_delivery`, `:205 list`, `:226 reply`, `:306 request`,
-  `:460 answer`, `:546 sweep`.
+- `approval.lua:116 attach(state,persist,post,room,home[,record])`, `:188
+  begin_delivery`, `:205 list`, `:226 reply`, `:306 request`, `:460 answer`,
+  `:546 sweep`.
 - `inbox_db.lua` is shadow only; the producer proof is injected.
 
 ## New modules
@@ -25,6 +25,7 @@
 - `matrix_relay.relay.authority_gate` is the single gate in `relay.start` and
   `relay.new`, so `matrix_cli` setup/restart and the boot path share admission.
 - Extend receipts/approval only through existing seams; never replace the FIFO.
+  `approval_record_sql` mirrors one record through `store:put` under the writer.
 
 ## Driver interface
 
@@ -64,23 +65,20 @@ required; pending/blocked/missing refuses.
 
 ## Legacy bridge and approvals
 
-For the first delivery, exact account/room/event/destination/payload lookup
-resolves the ORIGINAL mail id and read state (`reconcile_legacy_bridge`);
-conflict/unbound blocks. The Inbox receipt `result.message_id` maps to the relay
+Before the first delivery, exact account/room/event/destination/payload lookup
+resolves the ORIGINAL mail id/read state; conflict/unbound blocks. The Inbox receipt `result.message_id` maps to the relay
 receipt `mail_id`; no new id is allocated and no notification duplicates.
 `complete_reply` needs an atomic HTTP result receipt; `complete_dispatch` needs
 the route/subscription+delivered change in one transaction.
 
-`approval.attach` keeps its five existing arguments; add a SQL record adapter
-through that seam. Request fields, answer who/time, delivery_started and
-recovery notices persist. Expiry and prepared-delivery uncertainty recover only
+`approval.attach` keeps its five arguments plus an optional record adapter. Request fields, answer who/time, delivery and recovery notices persist. Expiry and prepared-delivery uncertainty recover only
 after raw import proof. SQL down means unknown/refuse, never an empty list.
 
 ## Archive
 
 Plan config_path since/since.bak/acks/acks.drain bound to both proofs to
-`archive/<jobid>/<relative>`; states planned, copying, copied_verified,
-retirement_pending, retired, complete. `remuda.fs` has
+`archive/<jobid>/<basename>`; states planned, copying, verifying,
+copied_verified, retirement_pending, retired, complete. `remuda.fs` has
 write_atomic/mkdir_new/realpath/is_symlink/lock but no generic read/fsync/
 durable_rename: copy, publish-verified, rename-once and both-parent sync are
 injected providers, never invented. Distinct `*.verified`/`*.original`
@@ -93,5 +91,5 @@ excluded.
 
 RED first: ingest/verify crash stages, owner/marker gaps, inbox proof
 missing/blocked/tampered, legacy unbound/read state, approval restart/one-shot,
-copy/rename/manifest faults, collision, cross-device, SQL-down refusal. No live
-archive, cutover, reload, network send or source deletion.
+copy/rename/manifest faults, collision, cross-device, SQL-down refusal. No
+live archive/cutover/reload/send/delete.

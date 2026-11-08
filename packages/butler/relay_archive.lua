@@ -63,6 +63,13 @@ local function prove(input)
   if relay_now ~= true then return nil, 'relay_proof_' .. tostring(relay_err or 'stale') end
   local inbox_now, inbox_err = deps.reread_proof('inbox', input.inbox_proof)
   if inbox_now ~= true then return nil, 'inbox_proof_' .. tostring(inbox_err or 'stale') end
+  if type(deps.current_owner) ~= 'function' then
+    return nil, 'owner_provider_missing'
+  end
+  local owner_now, owner_why = deps.current_owner()
+  if owner_now ~= true then
+    return nil, 'owner_' .. tostring(owner_why or 'stale')
+  end
   return true
 end
 
@@ -109,7 +116,7 @@ end
 
 local function destination(plan, file)
   local relative = file.relative:match('[^/]+$') or file.relative
-  return plan.archive_root .. '/' .. relative
+  return plan.archive_root .. '/' .. plan.job_id .. '/' .. relative
 end
 
 local function part_path(dest, index)
@@ -244,12 +251,13 @@ function M.providers(fs, digest)
     if existing then
       local prior, prior_why = read_manifest(retained_manifest)
       if not prior then return nil, 'collision:' .. tostring(prior_why) end
-      if prior.root ~= root or tonumber(prior.bytes) ~= tonumber(bytes) then
-        return nil, 'collision'
+      if prior.root == root and tonumber(prior.bytes) == tonumber(bytes) then
+        -- The live source and an identical retained copy both exist. This is a
+        -- retire conflict, not completion: never claim the source was retired
+        -- while it is still present.
+        return nil, 'retire_conflict'
       end
-      -- Exact retained identity is reusable; neither copy is overwritten and
-      -- nothing is deleted.
-      return true
+      return nil, 'collision'
     end
     local ok, why = os.rename(src, retained)
     if not ok then
@@ -271,10 +279,57 @@ function M.providers(fs, digest)
     end
     return true
   end
+  local function write_plan(path, plan)
+    local json = remuda and remuda.json
+    if type(json) ~= 'table' or type(json.encode) ~= 'function' then
+      return nil, 'json'
+    end
+    local files = {}
+    for _, file in ipairs(plan.files or {}) do
+      local parts = {}
+      for _, part in ipairs(file.parts or {}) do
+        parts[#parts + 1] = part
+      end
+      files[#files + 1] = { relative = file.relative, role = file.role,
+        bytes = file.bytes, state = file.state, offset = file.offset,
+        verify_index = file.verify_index, root = file.root,
+        rename_attempted = file.rename_attempted == true,
+        parts = json.array and json.array(parts) or parts }
+    end
+    local encoded = { version = 1, job_id = plan.job_id, phase = plan.phase,
+      archive_root = plan.archive_root, copied = plan.copied,
+      retired = plan.retired, blocked = plan.blocked,
+      relay_certificate_id = plan.relay_certificate_id,
+      relay_verification_id = plan.relay_verification_id,
+      inbox_hash = plan.inbox_hash,
+      files = json.array and json.array(files) or files }
+    local ok, text = pcall(json.encode, encoded)
+    if not ok then return nil, 'plan_encode' end
+    local wrote, why = fs.write_atomic(path, text, { private = true })
+    if not wrote then return nil, tostring(why or 'plan_write') end
+    return true
+  end
+  local function read_plan(path)
+    local file = io.open(path, 'rb')
+    if not file then return nil, 'missing' end
+    local raw = file:read(262144)
+    file:close()
+    if type(raw) ~= 'string' or #raw > 262144 then return nil, 'plan_read' end
+    local json = remuda and remuda.json
+    if type(json) ~= 'table' or type(json.decode) ~= 'function' then
+      return nil, 'json'
+    end
+    local ok, value = pcall(json.decode, raw)
+    if not ok or type(value) ~= 'table' or value.version ~= 1 then
+      return nil, 'plan_decode'
+    end
+    return value
+  end
   return { stat = stat, ensure_dir = ensure_dir, copy_chunk = copy_chunk,
     verify_part = verify_part, manifest_root = manifest_root,
     write_manifest = write_manifest, read_manifest = read_manifest,
     rename_once = rename_once, sync_user_parents = sync_user_parents,
+    write_plan = write_plan, read_plan = read_plan,
     max_chunk = MAX_CHUNK, max_parts = MAX_PARTS }
 end
 
@@ -291,20 +346,58 @@ function M.plan(input)
       input.digest or (remuda and remuda.digest))
     if deps == nil then return nil, 'deps_missing' end
   end
+  local archive_root = input.archive_root or
+    ((input.cfg and input.cfg.archive_root) or
+      (dirname(input.cfg and input.cfg.config_path or input.base_path) .. '/archive'))
+  local plan_path = input.plan_path or (archive_root .. '/' .. input.job_id .. '/plan.json')
+  if input.resume ~= false and type(deps.read_plan) == 'function' then
+    local saved, saved_why = deps.read_plan(plan_path)
+    if saved then
+      if saved.job_id ~= input.job_id
+          or saved.relay_certificate_id ~= input.relay_proof.certificate_id
+          or saved.relay_verification_id ~= input.relay_proof.verification_id
+          or saved.inbox_hash ~= (input.inbox_proof.compatibility_hash
+            or input.inbox_proof.hash) then
+        return nil, 'plan_conflict'
+      end
+      local plan = { job_id = saved.job_id, phase = saved.phase,
+        archive_root = saved.archive_root, files = saved.files or {}, deps = deps,
+        relay_proof = input.relay_proof, inbox_proof = input.inbox_proof,
+        plan_path = plan_path, relay_certificate_id = saved.relay_certificate_id,
+        relay_verification_id = saved.relay_verification_id,
+        inbox_hash = saved.inbox_hash, copied = tonumber(saved.copied) or 0,
+        retired = tonumber(saved.retired) or 0, blocked = saved.blocked }
+      for _, file in ipairs(plan.files) do
+        file.parts = file.parts or {}
+        file.offset = tonumber(file.offset) or 0
+        file.verify_index = tonumber(file.verify_index) or 1
+      end
+      plans[input.job_id] = plan
+      return plan
+    elseif saved_why ~= 'missing' then
+      return nil, 'plan_' .. tostring(saved_why)
+    end
+  end
   local files, inv_why = inventory({ deps = deps, cfg = input.cfg,
     config_path = input.config_path, base_path = input.base_path })
   if not files then return nil, inv_why end
-  local archive_root = input.archive_root or
-    ((input.cfg and input.cfg.archive_root) or
-      (dirname(input.cfg and input.cfg.config_path or input.base_path) ..
-        '/archive/' .. input.job_id))
   local plan = { job_id = input.job_id, phase = 'planned',
     archive_root = archive_root, files = files, deps = deps,
+    relay_proof = input.relay_proof, inbox_proof = input.inbox_proof,
+    plan_path = plan_path,
     relay_certificate_id = input.relay_proof.certificate_id,
     relay_verification_id = input.relay_proof.verification_id,
     inbox_hash = input.inbox_proof.compatibility_hash or input.inbox_proof.hash,
     copied = 0, retired = 0, blocked = nil }
   plans[input.job_id] = plan
+  if type(deps.write_plan) == 'function' then
+    if type(deps.ensure_dir) == 'function' then
+      local made, make_why = deps.ensure_dir(archive_root .. '/' .. input.job_id)
+      if not made then return nil, 'mkdir:' .. tostring(make_why) end
+    end
+    local persisted, persist_why = deps.write_plan(plan_path, plan)
+    if persisted ~= true then return nil, 'plan_' .. tostring(persist_why) end
+  end
   return plan
 end
 
@@ -317,7 +410,7 @@ end
 
 -- advance(job_id, budget) -> exactly one bounded per-file transition.
 -- Copy/verify reads and writes at most `budget.max_bytes` (<=64KiB) per call.
-function M.advance(job_id, budget)
+local function advance_impl(job_id, budget)
   local plan = plans[job_id]
   if not plan then return nil, 'plan_missing' end
   if plan.blocked then return nil, 'blocked:' .. tostring(plan.blocked) end
@@ -429,6 +522,26 @@ function M.advance(job_id, budget)
       state = file.state, manifest = manifest_path }
   end
   if file.state == 'retirement_pending' then
+    local source = deps.stat(file.relative)
+    if source == nil then
+      -- A previous rename may have succeeded and then failed at the retained
+      -- manifest or a parent fence. Inspect the actual destination instead of
+      -- retrying blind or planning from scratch.
+      local prior = deps.read_manifest(retained_manifest)
+      if not prior or prior.root ~= file.root
+          or tonumber(prior.bytes) ~= file.bytes then
+        return nil, 'retire_unknown'
+      end
+      local synced, sync_why = deps.sync_user_parents(file.relative, retained)
+      if synced ~= true then return nil, 'fence_retry:' .. tostring(sync_why or file.role) end
+      file.state = 'complete'
+      plan.retired = plan.retired + 1
+      if next_file(plan) == nil then plan.phase = 'complete' end
+      return { job_id = job_id, phase = plan.phase, file = file.relative,
+        state = file.state, done = plan.phase == 'complete',
+        copied = plan.copied, retired = plan.retired }
+    end
+    file.rename_attempted = true
     local retired, retire_why = deps.rename_once(file.relative, manifest_path,
       retained, retained_manifest, file.root, file.bytes)
     if retired == 'cross_device' then
@@ -436,11 +549,15 @@ function M.advance(job_id, budget)
       plan.blocked = 'cross_device:' .. file.role
       return nil, 'blocked:' .. plan.blocked
     end
-    if retired ~= true then plan.blocked = 'retire:' .. tostring(retire_why or file.role)
-      return nil, 'blocked:' .. plan.blocked end
+    if retired ~= true then
+      if retire_why == 'retire_conflict' then
+        plan.blocked = 'retire_conflict:' .. file.role
+        return nil, 'blocked:' .. plan.blocked
+      end
+      return nil, 'retire_unknown:' .. tostring(retire_why or file.role)
+    end
     local synced, sync_why = deps.sync_user_parents(file.relative, retained)
-    if synced ~= true then plan.blocked = 'parent_sync:' .. tostring(sync_why or file.role)
-      return nil, 'blocked:' .. plan.blocked end
+    if synced ~= true then return nil, 'fence_retry:' .. tostring(sync_why or file.role) end
     file.state = 'complete'
     plan.retired = plan.retired + 1
     if next_file(plan) == nil then plan.phase = 'complete' end
@@ -451,9 +568,44 @@ function M.advance(job_id, budget)
   return nil, 'file_state:' .. tostring(file.state)
 end
 
--- status(job_id) -> manifest refs, never mailbox content.
-function M.status(job_id)
+-- Public advance: re-check BOTH proofs and the current owner before every
+-- side effect, then persist the per-file plan so a reload resumes the same
+-- chunk/verify/retire cursors instead of resetting.
+function M.advance(job_id, budget)
   local plan = plans[job_id]
+  if not plan then return nil, 'plan_missing' end
+  if plan.relay_proof and plan.inbox_proof then
+    local proven, proof_why = prove(plan)
+    if not proven then return nil, proof_why end
+  end
+  local result, why, detail = advance_impl(job_id, budget)
+  local active = plans[job_id]
+  if active and type(active.deps.write_plan) == 'function' then
+    local wrote, write_why = active.deps.write_plan(active.plan_path, active)
+    if wrote ~= true then return nil, 'plan_' .. tostring(write_why) end
+  end
+  return result, why, detail
+end
+
+-- status(job_id) -> manifest refs, never mailbox content.
+function M.status(job_id, options)
+  local plan = plans[job_id]
+  if not plan and type(options) == 'table' and options.plan_path then
+    local deps = options.deps
+    if type(deps) == 'table' and type(deps.read_plan) == 'function' then
+      local saved, _ = deps.read_plan(options.plan_path)
+      if type(saved) == 'table' then
+        saved.deps = deps
+        saved.plan_path = options.plan_path
+        for _, file in ipairs(saved.files or {}) do
+          file.parts = file.parts or {}
+          file.offset = tonumber(file.offset) or 0
+          file.verify_index = tonumber(file.verify_index) or 1
+        end
+        plan = saved
+      end
+    end
+  end
   if not plan then return nil, 'plan_missing' end
   local files = {}
   for _, file in ipairs(plan.files) do
