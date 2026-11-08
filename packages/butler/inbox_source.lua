@@ -441,55 +441,78 @@ local function sha_of(self, text, path)
   return digest
 end
 
-local function find_file_task(self, root, hex, state, pass)
-  local deliveries, err = scan_pages(self, root, hex, state.generation, "deliveries")
-  if not deliveries then return nil, err end
-  for _, delivery in ipairs(deliveries) do
-    local id = delivery.message_id
-    local env_path = "messages/" .. id .. ".json"
-    local env_proof, proof_err = progress_get(self, root, hex, state.generation,
-      "fileproof", { pass = pass, path = env_path })
-    if env_proof == nil then return nil, proof_err end
-    if env_proof == false then
-      return { kind = "envelope", delivery = delivery, path = env_path }
+local function delivery_task(self, root, hex, state, delivery, pass)
+  local id = delivery.message_id
+  local env_path = "messages/" .. id .. ".json"
+  local env_proof, proof_err = progress_get(self, root, hex, state.generation,
+    "fileproof", { pass = pass, path = env_path })
+  if env_proof == nil then return nil, proof_err end
+  if env_proof == false then
+    return { kind = "envelope", delivery = delivery, path = env_path }
+  end
+  local body_dep, dep_err = progress_get(self, root, hex, state.generation,
+    "dependency", { owner = id, role = "body" })
+  if body_dep == nil then return nil, dep_err end
+  if body_dep == false then
+    if pass == 1 then return { kind = "envelope", delivery = delivery, path = env_path } end
+    return fail("source_unreadable", "dependency", env_path)
+  end
+  local body_proof, body_err = progress_get(self, root, hex, state.generation,
+    "fileproof", { pass = pass, path = body_dep.path })
+  if body_proof == nil then return nil, body_err end
+  if body_proof == false then
+    return { kind = "body", delivery = delivery, path = body_dep.path }
+  end
+  local note_path, note_err = note_object_path(self, delivery)
+  if not note_path and note_err then return nil, note_err end
+  local note_dep, note_dep_err = progress_get(self, root, hex, state.generation,
+    "dependency", { owner = id, role = "note" })
+  if note_dep == nil then return nil, note_dep_err end
+  if note_path and note_dep == false then
+    if pass == 1 then
+      return { kind = "note", delivery = delivery, path = note_path }
     end
-    local body_dep, dep_err = progress_get(self, root, hex, state.generation,
-      "dependency", { owner = id, role = "body" })
-    if body_dep == nil then return nil, dep_err end
-    if body_dep == false then
-      if pass == 1 then return { kind = "envelope", delivery = delivery, path = env_path } end
-      return fail("source_unreadable", "dependency", env_path)
-    end
-    local body_proof, body_err = progress_get(self, root, hex, state.generation,
-      "fileproof", { pass = pass, path = body_dep.path })
-    if body_proof == nil then return nil, body_err end
-    if body_proof == false then
-      return { kind = "body", delivery = delivery, path = body_dep.path }
-    end
-    local note_path, note_err = note_object_path(self, delivery)
-    if not note_path and note_err then return nil, note_err end
-    local note_dep, note_dep_err = progress_get(self, root, hex, state.generation,
-      "dependency", { owner = id, role = "note" })
-    if note_dep == nil then return nil, note_dep_err end
-    if note_path and note_dep == false then
-      if pass == 1 then
-        return { kind = "note", delivery = delivery, path = note_path }
-      end
-      return fail("source_unreadable", "dependency", note_path)
-    end
-    if note_dep and note_dep ~= false then
-      local note_proof, note_proof_err = progress_get(self, root, hex, state.generation,
-        "fileproof", { pass = pass, path = note_dep.path })
-      if note_proof == nil then return nil, note_proof_err end
-      if note_proof == false then
-        return { kind = "note", delivery = delivery, path = note_dep.path }
-      end
-    end
-    if pass == 1 and delivery.metadata == nil then
-      return { kind = "metadata", delivery = delivery }
+    return fail("source_unreadable", "dependency", note_path)
+  end
+  if note_dep and note_dep ~= false then
+    local note_proof, note_proof_err = progress_get(self, root, hex, state.generation,
+      "fileproof", { pass = pass, path = note_dep.path })
+    if note_proof == nil then return nil, note_proof_err end
+    if note_proof == false then
+      return { kind = "note", delivery = delivery, path = note_dep.path }
     end
   end
+  if pass == 1 and delivery.metadata == nil then
+    return { kind = "metadata", delivery = delivery }
+  end
   return nil
+end
+
+-- One bounded delivery page per call. `after_key` is the last seq fully
+-- checked; a delivery with unfinished work keeps the key at seq-1 so the next
+-- unit rechecks it. This never scans the whole mailbox to find one task.
+local function find_file_task(self, root, hex, state, pass)
+  local cursor = state.cursor
+  local after = tonumber(cursor.after_key) or 0
+  local page, page_err = self.progress.scan(root, hex, state.generation,
+    "deliveries", tostring(after), MAX_STAGE_ROWS)
+  if not page then return nil, page_err end
+  for _, delivery in ipairs(page.rows) do
+    local task, task_err = delivery_task(self, root, hex, state, delivery, pass)
+    if task_err then return nil, task_err end
+    if task then
+      cursor.after_key = tostring((tonumber(delivery.seq) or 1) - 1)
+      return task
+    end
+    after = tonumber(delivery.seq) or after
+    cursor.after_key = tostring(after)
+  end
+  if page.complete then
+    cursor.after_key = nil
+    return nil
+  end
+  cursor.after_key = tostring(after)
+  return "more"
 end
 
 local function first_proof(self, root, hex, generation, path)
@@ -717,8 +740,9 @@ local function log_unit(self, root, hex, state)
   local line_tail = cursor.line_tail or ""
   local ok, chunk, range_err = pcall(self.fs.read_range,
     self.root .. "/" .. path, offset, LOG_CHUNK)
-  if not ok or chunk == nil then
-    if error_code(not ok and range_err or chunk) ~= "not_found" then
+  if not ok then return fail("source_unreadable", "log", path) end
+  if chunk == nil then
+    if error_code(range_err) ~= "not_found" then
       return fail("source_unreadable", "log", path)
     end
     local digest = assert(self.sha256(""))
@@ -731,13 +755,8 @@ local function log_unit(self, root, hex, state)
   local bytes = chunk.bytes
   local eof = chunk.eof == true
   if eof and #bytes == 0 and parse_offset == 0 and line_tail ~= "" then
-    -- Torn tail at EOF: no new bytes can complete it. Persist nothing new.
-    return { revision = state.revision, cursor = cursor, bytes = 0 }
-  end
-  if parse_offset == 0 then
-    local digest = assert(self.sha256(bytes))
-    cursor.chain = chain_add(self, cursor.chain, path, "present", offset, #bytes,
-      digest)
+    -- The tail was already persisted by the previous unit.
+    return fail("partial")
   end
   local buffer = line_tail .. bytes
   local position = parse_offset
@@ -760,6 +779,24 @@ local function log_unit(self, root, hex, state)
     return commit_log(self, root, hex, state, cursor, delta, #bytes)
   end
   local remainder = buffer:sub(position + 1)
+  if eof and remainder ~= "" then
+    -- Torn tail: rewind to this chunk's fixed boundary. Only the prefix that
+    -- came from earlier folded chunks is carried; this chunk is re-read after
+    -- the append, so its bytes are not duplicated and pass2 sees the same
+    -- chunk boundaries.
+    cursor.parse_offset = 0
+    cursor.line_tail = line_tail
+    if #line_tail > self.max_line_bytes then
+      return fail("source_oversize", "line", path)
+    end
+    local committed, commit_err = commit_log(self, root, hex, state, cursor,
+      delta, #bytes)
+    if not committed then return nil, commit_err end
+    return fail("partial")
+  end
+  -- The whole fixed chunk is consumed: fold its record exactly once.
+  cursor.chain = chain_add(self, cursor.chain, path, "present", offset, #bytes,
+    assert(self.sha256(bytes)))
   cursor.parse_offset = 0
   cursor.offset = offset + #bytes
   cursor.line_tail = remainder
@@ -767,9 +804,6 @@ local function log_unit(self, root, hex, state)
     return fail("source_oversize", "line", path)
   end
   if eof then
-    if remainder ~= "" then
-      return commit_log(self, root, hex, state, cursor, delta, #bytes)
-    end
     cursor.chain = chain_add(self, cursor.chain, path, "eof", offset + #bytes, 0,
       assert(self.sha256("")))
     return finish_log(self, root, hex, state, cursor, delta, #bytes)
@@ -780,6 +814,9 @@ end
 local function file_unit(self, root, hex, state, pass)
   local task, task_err = find_file_task(self, root, hex, state, pass)
   if task_err then return nil, task_err end
+  if task == "more" then
+    return commit_log(self, root, hex, state, state.cursor, {}, 0)
+  end
   if not task then
     local cursor = state.cursor
     if pass == 1 then
@@ -789,6 +826,7 @@ local function file_unit(self, root, hex, state, pass)
       cursor.offset = 0
       cursor.parse_offset = 0
       cursor.line_tail = ""
+      cursor.after_key = nil
       cursor.chain = chain_start(self, root, hex)
       return commit_log(self, root, hex, state, cursor, {}, 0)
     end
