@@ -25,6 +25,28 @@ local function safe_component(value)
   return nonempty(value) and not value:find("[/\\]") and not value:find("..", 1, true)
 end
 
+-- Bound root is an absolute canonical path, never a relative name.
+local function is_canonical_root(value)
+  if type(value) ~= "string" or value == "" or value:sub(1, 1) ~= "/" then return false end
+  if value == "/" or value:sub(-1) == "/" then return false end
+  if value:find("//", 1, true) then return false end
+  if value:find("/./", 1, true) or value:sub(-2) == "/." then return false end
+  if value:find("/../", 1, true) or value:sub(-3) == "/.." then return false end
+  return true
+end
+
+-- fs.list is a dense array of basenames; extra or hole keys are not ignored.
+local function dense_length(values)
+  local count, maximum = 0, 0
+  for key in pairs(values) do
+    if type(key) ~= "number" or key % 1 ~= 0 or key < 1 then return nil end
+    count = count + 1
+    if key > maximum then maximum = key end
+  end
+  if count ~= maximum then return nil end
+  return count
+end
+
 local function error_code(err)
   if type(err) == "table" and nonempty(err.code) then return err.code end
   if type(err) == "string" and err:find("No such file", 1, true) then return "not_found" end
@@ -52,6 +74,13 @@ local function list(self, path)
     return nil, { code = "source_unreadable", path = path }
   end
   if type(names) ~= "table" then return nil, { code = "source_unreadable", path = path } end
+  local length = dense_length(names)
+  if not length then return nil, { code = "source_unreadable", path = path } end
+  for index = 1, length do
+    if type(names[index]) ~= "string" then
+      return nil, { code = "source_unreadable", path = path }
+    end
+  end
   return names, nil
 end
 
@@ -102,7 +131,7 @@ local function parse_inbox(self, hex, text)
     local id = value.message_id
     if not safe_component(id) then return fail("source_unreadable", "message_id", path) end
     local resent = value.resent
-    if resent ~= nil and (type(resent) ~= "table" or #resent > 0) then
+    if resent ~= nil and type(resent) ~= "table" then
       return fail("source_unreadable", "resent", path)
     end
     local row = index[id]
@@ -113,7 +142,11 @@ local function parse_inbox(self, hex, text)
     end
     if resent ~= nil then
       local encoded, encode_err = canonical(self, resent, path)
-      if not encoded then return nil, encode_err end
+      -- `resent` must be a JSON object. An empty Lua table cannot tell [] from
+      -- {} by #, so the canonical encoding decides the wire shape.
+      if not encoded or encoded:sub(1, 1) ~= "{" then
+        return fail("source_unreadable", "resent", path)
+      end
       row.resent = encoded
       row.resent_value = resent
     end
@@ -304,7 +337,7 @@ end
 
 function M.open(config)
   if type(config) ~= "table" then return fail("invalid_snapshot", "config") end
-  if not nonempty(config.root) then return fail("invalid_snapshot", "root") end
+  if not is_canonical_root(config.root) then return fail("invalid_snapshot", "root") end
   local fs = config.fs
   if type(fs) ~= "table" or type(fs.list) ~= "function" or type(fs.read) ~= "function" then
     return fail("unavailable", "fs")
