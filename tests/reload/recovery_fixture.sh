@@ -35,7 +35,7 @@ note() { echo "fixture: $*" >&2; }
 
 new_case() {
   local tag=$1
-  S="rrf$tag"
+  S="rrf${tag}-$$"
   T=$(mktemp -d "/tmp/rrf-${tag}.XXXXXX") || return 1
   trap 'case_rc=$?; case_cleanup || exit 1; exit "$case_rc"' EXIT
   T=$(cd "$T" && pwd -P) || return 1
@@ -64,6 +64,8 @@ end
 remuda._fixture_init_serial = serial
 LUA
   SERIAL="$T/init-serial"
+  HOST_MARKER="$T/host-$tag"
+  : >"$HOST_MARKER" || return 1
   SOCK="$T/runtime/remuda/$S.sock"
   LOG="$T/daemon.log"
   DAEMON_PID=
@@ -92,34 +94,112 @@ start_o() {
   return 1
 }
 
-daemon_pids() {
-  local pid
-  for pid in $(pgrep -f "$BIN -s $S daemon" 2>/dev/null); do
-    if ps eww -p "$pid" 2>/dev/null | tr ' ' '\n' | grep -qx "REMUDA_RUNTIME_DIR=$T/runtime"; then
-      printf '%s\n' "$pid"
+# --- fail-closed process inspection -----------------------------------------
+# kill -0 is authoritative for a process we own. Only an explicit
+# "No such process" proves exit; every other failure is unknown and retained.
+pid_may_be_alive() {
+  local pid=$1 err
+  [[ -n "$pid" ]] || return 1
+  if kill -0 "$pid" 2>/dev/null; then return 0; fi
+  err=$(LC_ALL=C kill -0 "$pid" 2>&1) || true
+  case "$err" in
+    *"No such process"*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+pid_is_zombie() {
+  local state
+  state=$(ps -o stat= -p "$1" 2>/dev/null) || return 1
+  [[ "$state" == Z* ]]
+}
+
+# Reap one of our own children with a bounded wait. Never `wait` a live PID:
+# only call wait after it is gone or positively a zombie.
+reap_old() {
+  local pid=$1 limit=${2:-120} i
+  for i in $(seq "$limit"); do
+    if ! pid_may_be_alive "$pid"; then
+      wait "$pid" 2>/dev/null || true
+      return 0
     fi
+    if pid_is_zombie "$pid"; then
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 0.1
   done
+  return 1
+}
+
+# 0 = completed (the list may be empty), 2 = inspection failed. Callers must
+# not read an empty list on 2 as proven absence.
+daemon_pids() {
+  # The server name is unique to this fixture run. The daemon's argv carries
+  # it, so this works even where ps cannot show another process's environment.
+  local out rc
+  out=$(pgrep -f "$BIN -s $S daemon" 2>/dev/null); rc=$?
+  (( rc > 1 )) && return 2
+  [[ -z "$out" ]] || printf '%s\n' "$out"
+  return 0
 }
 
 candidate_pids() {
-  local pid envs
-  for pid in $(pgrep -f '_reload-candidate' 2>/dev/null) $(pgrep -f "$BIN -s $S daemon" 2>/dev/null); do
-    envs=$(ps eww -p "$pid" 2>/dev/null | tr ' ' '\n')
-    if grep -qx "REMUDA_RUNTIME_DIR=$T/runtime" <<<"$envs" &&
-       grep -q '^REMUDA_RELOAD_CANDIDATE=' <<<"$envs"; then
-      printf '%s\n' "$pid"
-    fi
-  done | sort -u
+  # The candidate argv names this case's socket. A re-exec'd candidate that
+  # hangs before serving would also appear as a second daemon in daemon_pids,
+  # which the exact-one-daemon assertions catch. The environment check is not
+  # relied on because macOS ps does not expose another process's environment.
+  local out rc
+  out=$(pgrep -f "$BIN _reload-candidate $SOCK" 2>/dev/null); rc=$?
+  (( rc > 1 )) && return 2
+  [[ -z "$out" ]] || printf '%s\n' "$out"
+  return 0
 }
 
 # Every process whose environment names this case's runtime, including a host
-# whose argv does not. This is the orphan check for `sleep 300` hosts.
+# whose argv does not. Capture ps before awk so the scan cannot match itself.
 runtime_env_pids() {
-  # Do not put the searched token in this pipeline's own argv: ps would match
-  # the awk command itself. The awk environment carries only EXPECT_RUNTIME.
-  EXPECT_RUNTIME="$T/runtime" ps eww -ax 2>/dev/null |
+  local raw
+  raw=$(ps eww -ax 2>/dev/null) || return 2
+  printf '%s\n' "$raw" |
     EXPECT_RUNTIME="$T/runtime" awk 'BEGIN { rt = "REMUDA_RUNTIME_DIR=" ENVIRON["EXPECT_RUNTIME"] } index($0, rt) { print $1 }' |
     sort -u
+  return 0
+}
+
+# macOS ps does not expose another process's environment, so the host command
+# carries a unique argv path under the case scratch. This is the authoritative
+# host-orphan check here; the environment scan above is a Linux extra.
+host_marker_pids() {
+  local out rc
+  out=$(pgrep -f "$HOST_MARKER" 2>/dev/null); rc=$?
+  (( rc > 1 )) && return 2
+  [[ -z "$out" ]] || printf '%s\n' "$out"
+  return 0
+}
+
+# 0 = proven gone, 1 = still present, 2 = inspection unknown.
+private_procs_gone() {
+  local out
+  if ! out=$(daemon_pids); then return 2; fi
+  [[ -z "$out" ]] || return 1
+  if ! out=$(candidate_pids); then return 2; fi
+  [[ -z "$out" ]] || return 1
+  if ! out=$(runtime_env_pids); then return 2; fi
+  [[ -z "$out" ]] || return 1
+  if ! out=$(host_marker_pids); then return 2; fi
+  [[ -z "$out" ]] || return 1
+  return 0
+}
+
+check_absent() {
+  local label=$1 fn=$2 out
+  if ! out=$($fn); then
+    note "cannot inspect $label (ps/pgrep failed); treating as present"
+    return 1
+  fi
+  [[ -z "$out" ]] || { note "$label still present: $out"; return 1; }
+  return 0
 }
 
 daemon_id() {
@@ -133,7 +213,7 @@ init_serial() {
 
 create_session() {
   local name=$1
-  runph -e "local n,i=remuda.session.new('$name',{'sleep','300'}); return tostring(n)..'|'..tostring(i)" 2>/dev/null | tail -1
+  runph -e "local n,i=remuda.session.new('$name',{'tail','-f','$HOST_MARKER'}); return tostring(n)..'|'..tostring(i)" 2>/dev/null | tail -1
 }
 
 close_session() {
@@ -153,15 +233,7 @@ host_line() {
 }
 
 wait_old_gone() {
-  local old=$1 i
-  for i in $(seq 120); do
-    if ! kill -0 "$old" 2>/dev/null; then
-      wait "$old" 2>/dev/null || true
-      return 0
-    fi
-    sleep 0.1
-  done
-  return 1
+  reap_old "$1" 120
 }
 
 same_socket_path() {
@@ -170,28 +242,25 @@ same_socket_path() {
 }
 
 no_candidates() {
-  [[ -z "$(candidate_pids)" ]]
+  check_absent candidates candidate_pids
 }
 
 case_cleanup() {
   [[ -n ${T:-} && -d "$T" ]] || return 0
   if [[ -n ${DAEMON_PID:-} && ${PENV+x} ]]; then
     runp stop -f >/dev/null 2>&1 || true
-    wait "$DAEMON_PID" 2>/dev/null || true
+    reap_old "$DAEMON_PID" 80 || { note "old daemon not proven exited; keeping $T"; return 1; }
   fi
-  local i
+  local i state
   for i in $(seq 80); do
-    if [[ -z "$(daemon_pids)" && -z "$(candidate_pids)" && -z "$(runtime_env_pids)" ]]; then
-      break
-    fi
+    if private_procs_gone; then state=0; else state=$?; fi
+    if (( state == 0 )); then break; fi
+    if (( state == 2 )); then note "cannot inspect private processes; keeping $T"; return 1; fi
     sleep 0.1
   done
-  if [[ -n "$(daemon_pids)" || -n "$(candidate_pids)" || -n "$(runtime_env_pids)" ]]; then
-    note "private daemon/candidate/host still up; keeping $T"
-    return 1
-  fi
+  private_procs_gone || { note "private daemon/candidate/host still up or unproven; keeping $T"; return 1; }
   local leftovers
-  leftovers=$(ps -axo pid,command 2>/dev/null | grep -F "$T/runtime" | grep -v grep || true)
+  leftovers=$(ps -axo pid,command 2>/dev/null | grep -F "$T/" | grep -v grep || true)
   if [[ -n "$leftovers" ]]; then
     note "runtime path still referenced by a process; keeping $T: $leftovers"
     return 1
@@ -205,19 +274,20 @@ stop_case() {
   close_session inproc >/dev/null 2>&1 || true
   if [[ -n ${DAEMON_PID:-} ]]; then
     runp stop -f >/dev/null 2>&1 || true
-    wait "$DAEMON_PID" 2>/dev/null || true
+    reap_old "$DAEMON_PID" 80 || { note "old daemon not proven exited"; return 1; }
   fi
-  local i hosts
+  local i state
   for i in $(seq 80); do
-    if [[ -z "$(daemon_pids)" && -z "$(candidate_pids)" && -z "$(runtime_env_pids)" ]]; then
-      break
-    fi
+    if private_procs_gone; then state=0; else state=$?; fi
+    if (( state == 0 )); then break; fi
+    if (( state == 2 )); then note "cannot inspect private processes"; return 1; fi
     sleep 0.1
   done
-  [[ -z "$(daemon_pids)" ]] || { note "daemon still up"; return 1; }
-  [[ -z "$(candidate_pids)" ]] || { note "candidate still up"; return 1; }
-  hosts=$(runtime_env_pids)
-  [[ -z "$hosts" ]] || { note "host/runtime-env orphan: $hosts"; return 1; }
+  private_procs_gone || { note "private daemon/candidate/host still up or unproven"; return 1; }
+  check_absent daemons daemon_pids || return 1
+  check_absent candidates candidate_pids || return 1
+  check_absent hosts host_marker_pids || return 1
+  check_absent runtime-env runtime_env_pids || return 1
   return 0
 }
 
@@ -264,7 +334,8 @@ case_a() {
   grep -q '^init.lua: loaded' <<<"$reload" || { echo "reload did not load init.lua: $reload"; return 1; }
 
   wait_old_gone "$old" || { echo "old daemon PID $old is still alive"; return 1; }
-  new_pids=$(daemon_pids)
+  if ! new_pids=$(daemon_pids); then echo "cannot inspect daemon PIDs after reload"; return 1; fi
+  [[ "$(wc -l <<<"$new_pids" | tr -d ' ')" == 1 ]] || { echo "expected exactly one daemon after reload, got: $new_pids"; return 1; }
   new_pid=$(head -1 <<<"$new_pids")
   [[ -n "$new_pid" && "$new_pid" != "$old" ]] || { echo "no fresh daemon PID (old=$old, new=$new_pids)"; return 1; }
   same_socket_path || { echo "socket is not connectable after reload"; return 1; }
@@ -306,8 +377,8 @@ case_b() {
   grep -q '^blocker: in-process sessions would end: inproc ' <<<"$check" || { echo "check did not name the in-process session: $check"; return 1; }
 
   [[ "$(daemon_id)" == "$old_id" ]] || { echo "daemon id changed after a blocked check"; return 1; }
-  pids_after=$(daemon_pids)
-  [[ "$pids_after" == "$old" ]] || { echo "daemon PID changed after a blocked check: old=$old now=$pids_after"; return 1; }
+  if ! pids_after=$(daemon_pids); then echo "cannot inspect daemon PIDs after a blocked check"; return 1; fi
+  [[ "$(wc -l <<<"$pids_after" | tr -d ' ')" == 1 && "$pids_after" == "$old" ]] || { echo "daemon PID changed after a blocked check: old=$old now=$pids_after"; return 1; }
   same_socket_path || { echo "socket is not connectable after a blocked check"; return 1; }
   info_after=$(session_info inproc)
   [[ "$info_after" == "$info_before" ]] || { echo "session changed after a blocked check: $info_before -> $info_after"; return 1; }
@@ -320,7 +391,8 @@ case_b() {
   grep -q '^blocked:' <<<"$reload" || { echo "actual reload was not blocked: $reload"; return 1; }
   grep -q '^blocker: in-process sessions would end: inproc ' <<<"$reload" || { echo "actual reload did not name the in-process session: $reload"; return 1; }
   [[ "$(daemon_id)" == "$old_id" ]] || { echo "daemon id changed after an actual refusal"; return 1; }
-  [[ "$(daemon_pids)" == "$old" ]] || { echo "daemon PID changed after an actual refusal"; return 1; }
+  if ! pids_after=$(daemon_pids); then echo "cannot inspect daemon PIDs after an actual refusal"; return 1; fi
+  [[ "$(wc -l <<<"$pids_after" | tr -d ' ')" == 1 && "$pids_after" == "$old" ]] || { echo "daemon PID changed after an actual refusal: old=$old now=$pids_after"; return 1; }
   same_socket_path || { echo "socket is not connectable after an actual refusal"; return 1; }
   [[ "$(session_info inproc)" == "$info_before" ]] || { echo "session changed after an actual refusal"; return 1; }
   no_candidates || { echo "candidate left behind after an actual refusal"; return 1; }
@@ -388,7 +460,9 @@ case_c() {
   grep -q '^sessions: all 1 host-backed listed' <<<"$reload" || { echo "reload did not list the host: $reload"; return 1; }
 
   wait_old_gone "$old" || { echo "old daemon PID $old is still alive"; return 1; }
-  [[ -n "$(daemon_pids)" ]] || { echo "no daemon serves after reload"; return 1; }
+  local daemons
+  if ! daemons=$(daemon_pids); then echo "cannot inspect daemon PIDs after reload"; return 1; fi
+  [[ "$(wc -l <<<"$daemons" | tr -d ' ')" == 1 ]] || { echo "expected exactly one daemon after reload, got: $daemons"; return 1; }
   [[ "$(daemon_id)" == "$old_id" ]] || { echo "daemon id changed across reload"; return 1; }
   after_serial=$(init_serial)
   [[ "$after_serial" == 2 ]] || { echo "init serial after reload is $after_serial, expected 2"; return 1; }

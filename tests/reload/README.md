@@ -11,7 +11,12 @@ REMUDA_BIN=/path/to/reload-capable/remuda tests/reload/recovery_fixture.sh
 
 Every daemon and client runs with `env -i` in a fresh, owned, 0700 scratch
 tree. The fixture refuses the default runtime, uses a private `init.lua` serial
-as a fresh-image marker, and keeps its scratch on an unclean failure.
+as a fresh-image marker, and keeps its scratch on an unclean failure. The
+hosted session command is `tail -f <scratch>/host-<tag>`, so the host always
+has a unique argv token even where `ps` does not expose another process's
+environment. The host-orphan check is argv-based on macOS; the environment
+scan is an extra on Linux. A ps/pgrep failure is treated as unknown, never as
+proven absence, and the old daemon is reaped with a bounded wait.
 
 - **A**: creates a host-backed session (`REMUDA_EXPERIMENTAL_SESSION_HOST=1`),
   requires `version --hosts` to report it, requires `reload --check` to be
