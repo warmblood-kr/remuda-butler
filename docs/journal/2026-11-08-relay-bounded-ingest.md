@@ -72,7 +72,7 @@ Evidence on this candidate:
 - `authority.adapter(providers)` binds once, then start(cfg,{inbox_proof=fn})/
   advance/certificate/status/inventories for the inbox coordinator.
 - `relay_archive.providers` copies <=64KiB chunks to durable `.part.NNNN`,
-  writes a small digest manifest, re-reads one part per call, then renames the
-  source and fences both parents; no whole-file SHA/publish or unlink. Native:
-  200KB -> 4 parts, max 65536B/call, manifest reopen resumes verification.
+  writes a digest manifest, re-reads one part per call, then renames and
+  fences both parents; no whole-file SHA/publish. Native: 200KB -> 4 parts,
+  max 65536B/call, manifest reopen resumes verification.
 
