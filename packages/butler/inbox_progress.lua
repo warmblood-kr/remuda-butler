@@ -180,7 +180,9 @@ local function schema_ready(self)
     "SELECT MAX(version) AS version FROM _remuda_migrations", {})
   if not versions then return nil, "schema_unavailable" end
   local version = versions[1] and tonumber(versions[1].version) or 0
-  if version > 5 then return nil, "schema_too_new" end
+  -- The highest inbox schema this progress backend understands. Keep this in
+  -- step with the shipped inbox migration set (currently 0006 authority matrix).
+  if version > 6 then return nil, "schema_too_new" end
   return true
 end
 

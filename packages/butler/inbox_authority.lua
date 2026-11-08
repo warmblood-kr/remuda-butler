@@ -140,6 +140,10 @@ function M.certify(source, actual, context)
 end
 
 local Store = {}
+
+-- Forward declarations: the registry lives below the file/read helpers, but
+-- lookup_matrix/hydrate above it must still test ownership.
+local owner_token, close_refusal
 Store.__index = Store
 
 local function decoder(config)
@@ -167,9 +171,126 @@ local function read_file(path)
   return text
 end
 
+
+local function sql_query(store, sql, params)
+  if not store.db then return nil, "unavailable" end
+  local ok, rows, err = pcall(store.db.query, store.db, sql, params or {})
+  if not ok then return nil, tostring(rows) end
+  if rows == nil then return nil, tostring(err or "unavailable") end
+  return rows
+end
+
+local function sql_exec(store, sql, params)
+  if not store.db then return nil, "unavailable" end
+  local ok, result, err = pcall(store.db.exec, store.db, sql, params or {})
+  if not ok then return nil, tostring(result) end
+  if not result then return nil, tostring(err or "unavailable") end
+  return true
+end
+
+local function canonical_json(store, value)
+  if type(store.json) ~= "table" then return nil end
+  if type(store.json.canonical) == "function" then
+    local ok, text = pcall(store.json.canonical, value)
+    if ok and type(text) == "string" then return text end
+  end
+  if type(store.json.encode) == "function" then
+    local ok, text = pcall(store.json.encode, value)
+    if ok and type(text) == "string" then return text end
+  end
+  return nil
+end
+
+local function frame(values)
+  local out = {}
+  for index = 1, #values do out[index] = #values[index] .. ":" .. values[index] end
+  return table.concat(out)
+end
+
+local function store_sha(store, text)
+  if type(store.sha256) ~= "function" then return nil end
+  local ok, digest = pcall(store.sha256, text)
+  if not ok or type(digest) ~= "string" or #digest ~= 64 then return nil end
+  return digest
+end
+
+local function new_mail_id(store)
+  if type(store.new_id) == "function" then
+    local ok, id = pcall(store.new_id)
+    if ok and nonempty(id) then return id end
+  end
+  if type(remuda) == "table" and type(remuda._butler_new_ulid) == "function" then
+    local ok, id = pcall(remuda._butler_new_ulid)
+    if ok and nonempty(id) then return id end
+  end
+  return nil
+end
+
+local function valid_external_key(key)
+  if type(key) ~= "table" then return false, "key" end
+  for _, field in ipairs({ "account", "room", "event", "destination" }) do
+    if not nonempty(key[field]) then return false, field end
+  end
+  local destination = key.destination
+  if not is_hex(destination) or destination ~= destination:lower() then
+    return false, "destination"
+  end
+  return true
+end
+
+local function verified_payload(store, payload)
+  if type(payload) ~= "table" or type(payload.content) ~= "string"
+    or type(payload.metadata) ~= "string"
+    or type(payload.payload_hash) ~= "string" then
+    return false, "payload"
+  end
+  local digest = store_sha(store, frame({ "butler-external-payload-v1",
+    payload.content, payload.metadata }))
+  if not digest or digest ~= payload.payload_hash then
+    return false, "payload_hash"
+  end
+  local decoded = decode(store, payload.metadata)
+  if not decoded then return false, "metadata" end
+  if canonical_json(store, decoded) ~= payload.metadata then
+    return false, "metadata"
+  end
+  return true
+end
+
+local function committed_receipt(store, operation_id, result)
+  return { state = "committed", operation_id = operation_id, result = result }
+end
+
+local function operation_row(store, operation_id)
+  local rows, err = sql_query(store,
+    "SELECT state, payload_hash, result_json FROM auth_operations WHERE operation_id = ?",
+    { operation_id })
+  if not rows then return nil, err end
+  return rows[1]
+end
+
+local function receipt_result(store, row)
+  if not row or row.state ~= "committed" then return nil end
+  local decoded = decode(store, row.result_json)
+  if not decoded or type(decoded.result) ~= "table" then return nil end
+  return decoded.result
+end
+
 -- The file source adapter owns the delivered set and envelope metadata. A
 -- Store without it cannot prove anything and must not guess.
 function Store:lookup_matrix(recipient, room, event)
+  if self.closed or not owner_token(self) then
+    return { state = "unknown", reason = "writer_conflict" }
+  end
+  if self.authority == "sql" then
+    local rows, err = sql_query(self,
+      "SELECT message_id FROM auth_matrix WHERE recipient = ? AND room = ? AND event = ?",
+      { recipient, room, event })
+    if not rows then return { state = "unknown", reason = "unavailable" } end
+    if #rows == 0 then return { state = "absent", complete = true } end
+    if #rows > 1 then return { state = "unknown", reason = "ambiguous_matrix_key" } end
+    return { state = "found", message_id = rows[1].message_id }
+  end
   if not (self.source and type(self.source.lookup_matrix) == "function") then
     return { state = "unknown", reason = "metadata_source_unavailable" }
   end
@@ -182,9 +303,35 @@ end
 
 -- Content only; membership and read state are never inferred here.
 function Store:hydrate(message_id)
+  if self.closed or not owner_token(self) then return close_refusal(self) end
   if not safe_id(message_id) then
     return nil, { code = "invalid_id" }
   end
+  if self.authority == "sql" then
+    local rows, err = sql_query(self,
+      "SELECT metadata, envelope_ref, object_ref FROM auth_membership "
+        .. "WHERE message_id = ? LIMIT 1", { message_id })
+    if not rows then return nil, { code = "unavailable" } end
+    local row = rows[1]
+    if not row then return nil, { code = "not_found" } end
+    local envelope = decode(self, row.metadata)
+    if not envelope then return nil, { code = "corrupt", field = "metadata" } end
+    local content
+    if self.content and type(self.content.hydrate) == "function" then
+      local ok, hydrated, why = pcall(self.content.hydrate, message_id)
+      if not ok or type(hydrated) ~= "table" or type(hydrated.content) ~= "string" then
+        return nil, { code = (type(why) == "table" and why.code) or "unavailable" }
+      end
+      content = hydrated.content
+    else
+      local text, why = read_file(self.root .. "/" .. row.object_ref)
+      if not text then return nil, { code = why or "unavailable" } end
+      content = text
+    end
+    return { message_id = message_id, envelope = envelope, content = content,
+      envelope_ref = row.envelope_ref, object_ref = row.object_ref }
+  end
+  if self.authority == "sql_required" then return nil, { code = "sql_required" } end
   if not self.root then return nil, { code = "unavailable" } end
   local text, why = read_file(self.root .. "/messages/" .. message_id .. ".json")
   if not text then return nil, { code = why or "unavailable" } end
@@ -232,7 +379,7 @@ local function resolve_root(config, root)
   return root
 end
 
-local function owner_token(store)
+owner_token = function(store)
   local token = OWNER_STATE.tokens[store]
   if not token or token.released then return nil end
   if OWNER_STATE.owners[token.root] ~= token then return nil end
@@ -333,7 +480,7 @@ local function db_query(db, sql, params)
   return rows
 end
 
-local function close_refusal(store)
+close_refusal = function(store)
   return nil, { code = "writer_conflict", field = "closed" }
 end
 
@@ -358,33 +505,277 @@ function Store:status()
     migration = migration, closed = self.closed == true, error = self.open_error }
 end
 
-function Store:page()
+function Store:page(recipient, query, cursor)
   if self.closed or not owner_token(self) then return close_refusal(self) end
-  return unimplemented("page")
+  if self.authority ~= "sql" then return nil, { code = "sql_required" } end
+  if not is_hex(recipient) then return nil, { code = "invalid_id" } end
+  if type(query) ~= "table" then return nil, { code = "invalid_query" } end
+  local limit = query.limit
+  if not is_integer(limit) or limit < 1 or limit > 256 then
+    return nil, { code = "invalid_query", field = "limit" }
+  end
+  if query.unread_only ~= nil and type(query.unread_only) ~= "boolean" then
+    return nil, { code = "invalid_query", field = "unread_only" }
+  end
+  local after, upper = 0, nil
+  if cursor ~= nil then
+    if type(cursor) ~= "string" then return nil, { code = "stale_generation" } end
+    local seq, bound = cursor:match("^(%d+)|(%d+)$")
+    if not seq then return nil, { code = "stale_generation" } end
+    after, upper = tonumber(seq), tonumber(bound)
+  end
+  if upper == nil then
+    local bound_rows, bound_err = sql_query(self,
+      "SELECT COALESCE(MAX(seq), 0) AS upper FROM auth_membership WHERE recipient = ?",
+      { recipient })
+    if not bound_rows then return nil, { code = "unavailable" } end
+    upper = tonumber(bound_rows[1].upper) or 0
+  end
+  local sql = "SELECT m.message_id, m.seq, m.resent_json, m.metadata, "
+    .. "m.envelope_ref, m.object_ref, (r.message_id IS NOT NULL) AS is_read "
+    .. "FROM auth_membership m LEFT JOIN reads r ON r.recipient = m.recipient "
+    .. "AND r.message_id = m.message_id WHERE m.recipient = ? AND m.seq > ? "
+    .. "AND m.seq <= ? "
+  if query.unread_only then sql = sql .. "AND r.message_id IS NULL " end
+  sql = sql .. "ORDER BY m.seq LIMIT ?"
+  local rows, err = sql_query(self, sql, { recipient, after, upper, limit + 1 })
+  if not rows then return nil, { code = "unavailable" } end
+  local out, more = {}, false
+  for index = 1, math.min(#rows, limit) do
+    local row = rows[index]
+    out[index] = { message_id = row.message_id, seq = tonumber(row.seq),
+      resent = row.resent_json, metadata = row.metadata,
+      envelope_ref = row.envelope_ref, object_ref = row.object_ref,
+      unread = tonumber(row.is_read) == 0 }
+  end
+  if #rows > limit then more = true end
+  local unread_rows = sql_query(self,
+    "SELECT COUNT(*) AS n FROM auth_membership m LEFT JOIN reads r "
+      .. "ON r.recipient = m.recipient AND r.message_id = m.message_id "
+      .. "WHERE m.recipient = ? AND r.message_id IS NULL", { recipient })
+  local unread = unread_rows and tonumber(unread_rows[1].n) or nil
+  local next_cursor
+  if more and #out > 0 then next_cursor = tostring(out[#out].seq) .. "|" .. tostring(upper) end
+  return { rows = out, snapshot = { root = self.actual_root, recipient = recipient,
+      epoch = self.epoch, generation = self.marker and self.marker.generation,
+      upper_seq = upper }, next_cursor = next_cursor, unread = unread }
 end
+
 function Store:deliver()
   if self.closed or not owner_token(self) then return close_refusal(self) end
   return unimplemented("deliver")
 end
-function Store:mark_read()
+
+function Store:accept_external(key, payload)
   if self.closed or not owner_token(self) then return close_refusal(self) end
-  return unimplemented("mark_read")
+  if self.authority ~= "sql" then return nil, { code = "sql_required" } end
+  local ok, field = valid_external_key(key)
+  if not ok then return nil, { code = "invalid_key", field = field } end
+  ok, field = verified_payload(self, payload)
+  if not ok then return nil, { code = "operation_conflict", field = field } end
+  local key_hash = store_sha(self, frame({ "butler-external-key-v1", key.account,
+    key.room, key.event, key.destination }))
+  if not key_hash then return nil, { code = "unavailable", field = "sha256" } end
+  local operation_id = "external-v1-" .. key_hash
+  local existing, existing_err = sql_query(self,
+    "SELECT payload_hash, operation_id, message_id FROM auth_external "
+      .. "WHERE account = ? AND room = ? AND event = ? AND destination = ?",
+    { key.account, key.room, key.event, key.destination })
+  if not existing then return nil, { code = "unavailable" } end
+  if #existing > 0 then
+    local row = existing[1]
+    if row.payload_hash ~= payload.payload_hash then
+      return nil, { code = "operation_conflict", field = "payload_hash" }
+    end
+    local receipt = operation_row(self, row.operation_id)
+    local result = receipt_result(self, receipt)
+    if result then return committed_receipt(self, row.operation_id, result) end
+    return nil, { code = "recovery_required", field = "receipt" }
+  end
+  local prior = operation_row(self, operation_id)
+  if prior then
+    if prior.payload_hash ~= payload.payload_hash then
+      return nil, { code = "operation_conflict", field = "payload_hash" }
+    end
+    local result = receipt_result(self, prior)
+    if result then return committed_receipt(self, operation_id, result) end
+    return { state = "unknown", operation_id = operation_id, reason = "unknown_commit" }
+  end
+  local message_id = new_mail_id(self)
+  if not message_id then return nil, { code = "unavailable", field = "new_id" } end
+  if not (self.content and type(self.content.publish) == "function") then
+    return nil, { code = "unavailable", field = "content" }
+  end
+  local published, publish_err = self.content.publish({ message_id = message_id,
+    content = payload.content, metadata = payload.metadata,
+    operation_id = operation_id, key = key })
+  if not published then
+    return nil, (type(publish_err) == "table" and publish_err) or { code = "unavailable" }
+  end
+  local envelope_ref = published.envelope_ref or ("messages/" .. message_id .. ".json")
+  local object_ref = published.object_ref
+  if not nonempty(object_ref) then return nil, { code = "unavailable", field = "object_ref" } end
+  local content_hash = published.content_hash
+    or store_sha(self, payload.content) or payload.payload_hash
+  local result = { message_id = message_id, recipients = { key.destination },
+    receipt_id = operation_id }
+  local result_json = canonical_json(self, { state = "committed",
+    operation_id = operation_id, result = result })
+  if not result_json then return nil, { code = "unavailable", field = "canonical" } end
+  local began, begin_why = sql_exec(self, "BEGIN IMMEDIATE")
+  if not began then return nil, { code = "unavailable" } end
+  local function rollback()
+    return sql_exec(self, "ROLLBACK")
+  end
+  local raced, raced_err = sql_query(self,
+    "SELECT payload_hash, operation_id, message_id FROM auth_external "
+      .. "WHERE account = ? AND room = ? AND event = ? AND destination = ?",
+    { key.account, key.room, key.event, key.destination })
+  if not raced then rollback(); return nil, { code = "unavailable" } end
+  if #raced > 0 then
+    local row = raced[1]
+    local receipt = operation_row(self, row.operation_id)
+    local raced_result = receipt_result(self, receipt)
+    rollback()
+    if row.payload_hash ~= payload.payload_hash then
+      return nil, { code = "operation_conflict", field = "payload_hash" }
+    end
+    if raced_result then return committed_receipt(self, row.operation_id, raced_result) end
+    return nil, { code = "recovery_required", field = "receipt" }
+  end
+  -- Allocate the delivered-order slot while the write lock is held so two
+  -- concurrent acceptances for one recipient cannot collide.
+  local seq_rows = sql_query(self,
+    "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM auth_membership WHERE recipient = ?",
+    { key.destination })
+  if not seq_rows then rollback(); return nil, { code = "unavailable" } end
+  local seq = tonumber(seq_rows[1].next)
+  local statements = {
+    { "INSERT INTO auth_external (account, room, event, destination, key_hash, "
+        .. "payload_hash, operation_id, message_id, epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      { key.account, key.room, key.event, key.destination, key_hash,
+        payload.payload_hash, operation_id, message_id, self.epoch } },
+    { "INSERT INTO auth_operations (operation_id, kind, payload_hash, state, "
+        .. "message_id, result_json, epoch) VALUES (?, 'accept_external', ?, "
+        .. "'committed', ?, ?, ?)",
+      { operation_id, payload.payload_hash, message_id, result_json, self.epoch } },
+    { "INSERT INTO auth_membership (recipient, message_id, seq, resent_json, "
+        .. "metadata, envelope_ref, object_ref, content_hash, epoch) "
+        .. "VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+      { key.destination, message_id, seq, payload.metadata, envelope_ref,
+        object_ref, content_hash, self.epoch } },
+    { "INSERT INTO auth_matrix (recipient, room, event, message_id) "
+        .. "VALUES (?, ?, ?, ?)",
+      { key.destination, key.room, key.event, message_id } },
+  }
+  for _, statement in ipairs(statements) do
+    local written, why = sql_exec(self, statement[1], statement[2])
+    if not written then
+      rollback()
+      return nil, { code = "unavailable", field = tostring(why) }
+    end
+  end
+  local committed, commit_why = sql_exec(self, "COMMIT")
+  if not committed then
+    return { state = "unknown", operation_id = operation_id, reason = "unknown_commit" }
+  end
+  return committed_receipt(self, operation_id, result)
 end
-function Store:accept_external()
+
+function Store:mark_read(intent, ids, snapshot)
   if self.closed or not owner_token(self) then return close_refusal(self) end
-  return unimplemented("accept_external")
+  if self.authority ~= "sql" then return nil, { code = "sql_required" } end
+  if type(intent) ~= "table" or not nonempty(intent.operation_id)
+    or type(intent.payload_hash) ~= "string" or #intent.payload_hash ~= 64 then
+    return nil, { code = "invalid_intent" }
+  end
+  if type(ids) ~= "table" or type(snapshot) ~= "table" then
+    return nil, { code = "invalid_snapshot" }
+  end
+  if snapshot.root ~= self.actual_root or snapshot.recipient == nil
+    or tonumber(snapshot.epoch) ~= self.epoch
+    or (self.marker and snapshot.generation ~= self.marker.generation)
+    or not is_integer(tonumber(snapshot.upper_seq)) then
+    return nil, { code = "stale_generation", field = "snapshot" }
+  end
+  local upper = tonumber(snapshot.upper_seq)
+  local prior = operation_row(self, intent.operation_id)
+  if prior then
+    if prior.payload_hash ~= intent.payload_hash then
+      return nil, { code = "operation_conflict", field = "payload_hash" }
+    end
+    local result = receipt_result(self, prior)
+    if result then return committed_receipt(self, intent.operation_id, result) end
+    return { state = "unknown", operation_id = intent.operation_id, reason = "unknown_commit" }
+  end
+  for index = 1, #ids do
+    local id = ids[index]
+    if not safe_id(id) then return nil, { code = "invalid_id" } end
+    local rows = sql_query(self,
+      "SELECT seq FROM auth_membership WHERE recipient = ? AND message_id = ?",
+      { snapshot.recipient, id })
+    if not rows or #rows == 0 or tonumber(rows[1].seq) > upper then
+      return nil, { code = "parity_mismatch", field = "ack", id = id }
+    end
+  end
+  local result = { ids = ids, snapshot = snapshot }
+  local result_json = canonical_json(self, { state = "committed",
+    operation_id = intent.operation_id, result = result })
+  if not result_json then return nil, { code = "unavailable", field = "canonical" } end
+  local began = sql_exec(self, "BEGIN IMMEDIATE")
+  if not began then return nil, { code = "unavailable" } end
+  for index = 1, #ids do
+    local written = sql_exec(self,
+      "INSERT OR IGNORE INTO reads (recipient, message_id) VALUES (?, ?)",
+      { snapshot.recipient, ids[index] })
+    if not written then
+      sql_exec(self, "ROLLBACK")
+      return nil, { code = "unavailable" }
+    end
+  end
+  local written = sql_exec(self,
+    "INSERT INTO auth_operations (operation_id, kind, payload_hash, state, "
+      .. "message_id, result_json, epoch) VALUES (?, 'mark_read', ?, 'committed', "
+      .. "NULL, ?, ?)",
+    { intent.operation_id, intent.payload_hash, result_json, self.epoch })
+  if not written then sql_exec(self, "ROLLBACK"); return nil, { code = "unavailable" } end
+  local committed = sql_exec(self, "COMMIT")
+  if not committed then
+    return { state = "unknown", operation_id = intent.operation_id, reason = "unknown_commit" }
+  end
+  return committed_receipt(self, intent.operation_id, result)
 end
+
 function Store:advance()
   if self.closed or not owner_token(self) then return close_refusal(self) end
   return unimplemented("advance")
 end
+
 function Store:transition()
   if self.closed or not owner_token(self) then return close_refusal(self) end
   return unimplemented("transition")
 end
-function Store:reconcile()
+
+function Store:reconcile(operation_id)
   if self.closed or not owner_token(self) then return close_refusal(self) end
-  return unimplemented("reconcile")
+  if not nonempty(operation_id) then return nil, { code = "invalid_id" } end
+  if self.authority ~= "sql" and self.authority ~= "sql_required" then
+    return { state = "unknown", operation_id = operation_id,
+      reason = "recovery_required" }
+  end
+  local row, err = operation_row(self, operation_id)
+  if row == nil and err then
+    return { state = "unknown", operation_id = operation_id, reason = "unavailable" }
+  end
+  if row == nil then return { state = "not_committed", operation_id = operation_id } end
+  if row.state ~= "committed" then
+    return { state = "unknown", operation_id = operation_id, reason = "unknown_commit" }
+  end
+  local result = receipt_result(self, row)
+  if not result then
+    return { state = "unknown", operation_id = operation_id, reason = "corrupt" }
+  end
+  return committed_receipt(self, operation_id, result)
 end
 
 function M.open(config)
@@ -403,6 +794,7 @@ function M.open(config)
   OWNER_STATE.owners[actual] = token
   local store = setmetatable({ root = config.root, actual_root = actual,
     marker = marker, source = config.source, content = config.content,
+    json = config.json, sha256 = config.sha256, new_id = config.new_id,
     decode = decoder(config) }, Store)
   OWNER_STATE.tokens[store] = token
   if config.writer and type(config.writer.claim) == "function" then
