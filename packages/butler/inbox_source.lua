@@ -340,68 +340,164 @@ end
 -- newline: appends after it never invalidate the prefix, and a non-newline tail
 -- is recorded as torn rather than skipped or included as a complete line.
 local SEAL_WINDOW = 64 * 1024
+local SEAL_DEFAULT_BYTES = 65536
+local SEAL_MAX_BYTES = 1024 * 1024
+local SEAL_LOGS = { "inbox", "read" }
 
--- Plain find, not the backtracking `.*()\n` pattern: a 64 KiB no-newline tail
--- must stay linear in the C matcher.
-local function last_newline(text)
-  local at, last = 0, nil
-  while true do
-    local found = text:find("\n", at + 1, true)
-    if not found then return last end
-    last = found
-    at = found
+-- Backward byte scan, never an unanchored pattern: a 64 KiB no-newline tail
+-- must stay linear in the number of bytes actually read.
+local function last_newline_byte(text)
+  for index = #text, 1, -1 do
+    if text:byte(index) == 10 then return index end
   end
+  return nil
 end
 
-local function sealed_log_end(self, path, allowance, resume)
+local function seal_log_path(self, hex, name)
+  local directory = name == "inbox" and "inboxes" or "read"
+  return self.root .. "/" .. directory .. "/" .. hex .. ".jsonl"
+end
+
+-- Size/presence for BOTH logs is captured once, before reading either log.
+-- Not-found is a real captured state (a later file is tail), not an error.
+local function observe_log(self, path)
   local ok, size, why = pcall(self.fs.size, path)
   if not ok then return nil, fail("source_unreadable", "log", path) end
   if size == nil then
-    if error_code(why) == "not_found" then
-      return { complete = true, end_offset = 0, torn = 0, used = 0 }
-    end
+    if error_code(why) == "not_found" then return false, 0 end
     return nil, fail("source_unreadable", "log", path)
   end
   if type(size) ~= "number" or size % 1 ~= 0 or size < 0 then
     return nil, fail("source_unreadable", "log", path)
   end
-  if size == 0 then
-    return { complete = true, end_offset = 0, torn = 0, used = 0 }
+  return true, size
+end
+
+local function valid_seal_log(log)
+  if type(log) ~= "table" or type(log.present) ~= "boolean" then return false end
+  for _, key in ipairs({ "captured_size", "offset" }) do
+    local value = log[key]
+    if type(value) ~= "number" or value % 1 ~= 0 or value < 0 then return false end
   end
-  local offset
-  if resume == nil or resume == -1 then
-    offset = size
-  elseif type(resume) ~= "number" or resume % 1 ~= 0 or resume < 0 or resume > size then
-    return nil, fail("stale_generation", "seal_resume", path)
+  if log.offset > log.captured_size then return false end
+  if type(log.done) ~= "boolean" then return false end
+  if log.done then
+    if type(log.end_offset) ~= "number" or log.end_offset % 1 ~= 0
+      or log.end_offset < 0 or log.end_offset > log.captured_size then
+      return false
+    end
+    if log.torn ~= 0 and log.torn ~= 1 then return false end
   else
-    offset = resume
+    -- A partial cursor still has bytes to inspect and no claimed boundary.
+    if log.offset < 1 then return false end
+    if log.end_offset ~= nil or log.torn ~= nil then return false end
   end
-  if offset == 0 then
-    -- A resumed scan that already reached the file start found no newline.
-    return { complete = true, end_offset = 0, torn = 1, used = 0 }
+  return true
+end
+
+local function copy_seal_log(log)
+  local copy = { present = log.present, captured_size = log.captured_size,
+    offset = log.offset, done = log.done }
+  if log.done then
+    copy.end_offset, copy.torn = log.end_offset, log.torn
+  end
+  return copy
+end
+
+-- Convert the persisted flat row into the versioned cursor. Unknown/legacy
+-- rows are refused explicitly; capture is never re-derived from the live EOF.
+local function resume_log(resume, name)
+  local present = tonumber(resume[name .. "_present"])
+  local captured = tonumber(resume[name .. "_captured_size"])
+  local offset = tonumber(resume[name .. "_offset"])
+  local done = tonumber(resume[name .. "_done"])
+  if present == nil or captured == nil or offset == nil or done == nil then
+    return nil
+  end
+  if (present ~= 0 and present ~= 1) or (done ~= 0 and done ~= 1) then return nil end
+  local log = { present = present == 1, captured_size = captured,
+    offset = offset, done = done == 1 }
+  if log.done then
+    log.end_offset = tonumber(resume[name .. "_end"]) or 0
+    log.torn = tonumber(resume[name .. "_torn"]) or 0
+  end
+  if not valid_seal_log(log) then return nil end
+  return log
+end
+
+local function seal_driver(self, root, hex, generation, previous, allowance)
+  if previous ~= nil then
+    if previous.version ~= 1 or previous.root ~= root
+      or previous.recipient ~= hex
+      or previous.generation ~= (generation or "") then
+      return fail("stale_generation", "cursor_identity")
+    end
+  end
+  local cursor = { version = 1, root = root,
+    generation = generation or (previous and previous.generation) or "",
+    recipient = hex, logs = {} }
+  -- Both metadata observations happen before either log is read.
+  for _, name in ipairs(SEAL_LOGS) do
+    local path = seal_log_path(self, hex, name)
+    local present, size = observe_log(self, path)
+    if present == nil then return nil, size end
+    local old = previous and previous.logs and previous.logs[name]
+    local log
+    if old ~= nil then
+      if not valid_seal_log(old) then return fail("invalid_snapshot", "cursor") end
+      if old.present and (not present or size < old.captured_size) then
+        return fail("stale_generation", name)
+      end
+      -- Appends beyond captured_size are tail, never a new seal scan.
+      log = copy_seal_log(old)
+    else
+      log = { present = present, captured_size = size, offset = size,
+        done = size == 0, end_offset = size == 0 and 0 or nil,
+        torn = size == 0 and 0 or nil }
+    end
+    cursor.logs[name] = log
   end
   local used = 0
-  while offset > 0 do
-    local remaining = allowance ~= nil and (allowance - used) or SEAL_WINDOW
-    if remaining < 1 then
-      return { complete = false, offset = offset, used = used }
+  for _, name in ipairs(SEAL_LOGS) do
+    local log = cursor.logs[name]
+    while not log.done and used < allowance do
+      local want = math.min(SEAL_WINDOW, log.offset, allowance - used)
+      local path = seal_log_path(self, hex, name)
+      local start = log.offset - want
+      local read_ok, chunk = pcall(self.fs.read_range, path, start, want)
+      if not read_ok or type(chunk) ~= "table" or type(chunk.bytes) ~= "string"
+        or #chunk.bytes ~= want then
+        return fail("source_unreadable", "short_read", path)
+      end
+      used = used + want
+      local last = last_newline_byte(chunk.bytes)
+      log.offset = start
+      if last then
+        log.done, log.end_offset = true, start + last
+        log.torn = log.end_offset < log.captured_size and 1 or 0
+      elseif start == 0 then
+        log.done, log.end_offset, log.torn = true, 0, 1
+      end
     end
-    local window = math.min(SEAL_WINDOW, offset, remaining)
-    local window_start = offset - window
-    local read_ok, chunk = pcall(self.fs.read_range, path, window_start, window)
-    if not read_ok or type(chunk) ~= "table" or type(chunk.bytes) ~= "string" then
-      return nil, fail("source_unreadable", "log", path)
-    end
-    used = used + #chunk.bytes
-    local last = last_newline(chunk.bytes)
-    if last then
-      local finish = window_start + last
-      return { complete = true, end_offset = finish,
-        torn = finish < size and 1 or 0, used = used }
-    end
-    offset = window_start
   end
-  return { complete = true, end_offset = 0, torn = 1, used = used }
+  return { cursor = cursor, bytes_read = used,
+    partial = not (cursor.logs.inbox.done and cursor.logs.read.done) }
+end
+
+local function flatten_seal(cursor, used, partial)
+  local inbox, reads = cursor.logs.inbox, cursor.logs.read
+  local out = { recipient = cursor.recipient, cursor_version = 1,
+    generation = cursor.generation,
+    inbox_present = inbox.present and 1 or 0,
+    inbox_captured_size = inbox.captured_size,
+    inbox_offset = inbox.offset, inbox_done = inbox.done and 1 or 0,
+    read_present = reads.present and 1 or 0,
+    read_captured_size = reads.captured_size,
+    read_offset = reads.offset, read_done = reads.done and 1 or 0,
+    bytes_read = used, partial = partial, cursor = cursor }
+  if inbox.done then out.inbox_end, out.inbox_torn = inbox.end_offset, inbox.torn end
+  if reads.done then out.read_end, out.read_torn = reads.end_offset, reads.torn end
+  return out
 end
 
 function Source:seal(root, hex, budget)
@@ -412,62 +508,56 @@ function Source:seal(root, hex, budget)
   if type(self.fs.size) ~= "function" or type(self.fs.read_range) ~= "function" then
     return fail("unavailable", "fs")
   end
-  local allowance, resume
+  local allowance, generation, resume = SEAL_DEFAULT_BYTES, nil, nil
   if budget ~= nil then
-    if type(budget) ~= "table" or type(budget.max_bytes) ~= "number"
-      or budget.max_bytes % 1 ~= 0 or budget.max_bytes < 1 then
-      return fail("invalid_snapshot", "budget")
+    if type(budget) ~= "table" then return fail("invalid_snapshot", "budget") end
+    if budget.max_bytes ~= nil then
+      local max_bytes = budget.max_bytes
+      if type(max_bytes) ~= "number" or max_bytes % 1 ~= 0
+        or max_bytes < 0 or max_bytes > SEAL_MAX_BYTES then
+        return fail("invalid_snapshot", "budget")
+      end
+      allowance = max_bytes
     end
-    allowance = budget.max_bytes
+    if budget.generation ~= nil then
+      if not nonempty(budget.generation) then return fail("invalid_snapshot", "generation") end
+      generation = budget.generation
+    end
     if budget.resume ~= nil then
       if type(budget.resume) ~= "table" then return fail("invalid_snapshot", "resume") end
-      resume = budget.resume
+      if budget.resume.cursor_version == nil and budget.resume.version == 1 then
+        -- A caller may pass the nested version1 cursor returned by seal(),
+        -- including its captured sizes. Validate its identity in the driver;
+        -- a shrink of a done log must still surface as stale_generation.
+        resume = budget.resume
+        generation = generation or resume.generation
+        if resume.root ~= root or resume.recipient ~= hex then
+          return fail("stale_generation", "cursor_identity")
+        end
+      else
+        if tonumber(budget.resume.cursor_version) ~= 1 then
+          -- A pre-capture cursor cannot be resumed against a new EOF. The
+          -- Store must run an explicit invalidate/reseal, never infer old size.
+          return fail("invalid_snapshot", "cursor_version")
+        end
+        local old_generation = budget.resume.generation
+        if old_generation ~= nil and generation ~= nil and old_generation ~= generation then
+          return fail("stale_generation", "cursor_generation")
+        end
+        generation = generation or old_generation
+        local logs = {}
+        for _, name in ipairs(SEAL_LOGS) do
+          logs[name] = resume_log(budget.resume, name)
+          if logs[name] == nil then return fail("invalid_snapshot", "cursor") end
+        end
+        resume = { version = 1, root = root, generation = generation or "",
+          recipient = hex, logs = logs }
+      end
     end
   end
-  local inbox_done = resume and resume.inbox_done == 1 or false
-  local read_done = resume and resume.read_done == 1 or false
-  local inbox_end = resume and resume.inbox_end or nil
-  local inbox_torn = resume and resume.inbox_torn or nil
-  local read_end = resume and resume.read_end or nil
-  local read_torn = resume and resume.read_torn or nil
-  local inbox_offset = resume and resume.inbox_offset or -1
-  local read_offset = resume and resume.read_offset or -1
-  local used = 0
-  if not inbox_done then
-    local inbox, inbox_err = sealed_log_end(self,
-      self.root .. "/inboxes/" .. hex .. ".jsonl", allowance,
-      tonumber(inbox_offset))
-    if not inbox then return nil, inbox_err end
-    used = used + (inbox.used or 0)
-    if not inbox.complete then
-      return { partial = true, recipient = hex, bytes_read = used,
-        inbox_offset = inbox.offset, read_offset = -1,
-        inbox_done = 0, read_done = 0 }
-    end
-    inbox_done, inbox_end, inbox_torn = true, inbox.end_offset, inbox.torn
-  end
-  if not read_done then
-    -- One total allowance per recipient: the inbox scan must not let the read
-    -- scan exceed the caller's byte budget. A starved read scan resumes from
-    -- its persisted offset on the next call.
-    local remaining
-    if allowance ~= nil then remaining = math.max(allowance - used, 0) end
-    local reads, read_err = sealed_log_end(self,
-      self.root .. "/read/" .. hex .. ".jsonl", remaining, tonumber(read_offset))
-    if not reads then
-      return nil, read_err
-    end
-    used = used + (reads.used or 0)
-    if not reads.complete then
-      return { partial = true, recipient = hex, bytes_read = used,
-        inbox_offset = 0, read_offset = reads.offset,
-        inbox_done = 1, inbox_end = inbox_end, inbox_torn = inbox_torn,
-        read_done = 0 }
-    end
-    read_done, read_end, read_torn = true, reads.end_offset, reads.torn
-  end
-  return { recipient = hex, inbox_end = inbox_end, read_end = read_end,
-    inbox_torn = inbox_torn, read_torn = read_torn, bytes_read = used }
+  local stepped, step_err = seal_driver(self, root, hex, generation, resume, allowance)
+  if not stepped then return nil, step_err end
+  return flatten_seal(stepped.cursor, stepped.bytes_read, stepped.partial)
 end
 
 -- ---------------------------------------------------------------------------

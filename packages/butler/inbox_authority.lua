@@ -845,6 +845,38 @@ local function migration_backlog(store, generation, reason, step)
     tail_watermark = migration_watermark(store, generation) }
 end
 
+local function seal_rotation_get(store, generation)
+  local rows = sql_query(store,
+    "SELECT next_key FROM migration_seal_rotation WHERE root = ? AND generation = ?",
+    { store.actual_root, generation })
+  if not rows then return nil, { code = "unavailable", field = "migration_seal_rotation" } end
+  return rows[1] and rows[1].next_key or nil
+end
+
+local function seal_rotation_set(store, generation, next_key)
+  local held = sql_exec(store,
+    "INSERT OR REPLACE INTO migration_seal_rotation (root, generation, next_key) "
+      .. "VALUES (?, ?, ?)", { store.actual_root, generation, next_key })
+  if not held then return nil, { code = "unavailable", field = "migration_seal_rotation" } end
+  return true
+end
+
+local function rotated(recipients, next_key)
+  local count = #recipients
+  if count == 0 then return {} end
+  local start = 1
+  if next_key ~= nil then
+    for index, hex in ipairs(recipients) do
+      if hex >= next_key then start = index; break end
+    end
+  end
+  local order = {}
+  for step = 0, count - 1 do
+    order[#order + 1] = recipients[((start - 1 + step) % count) + 1]
+  end
+  return order
+end
+
 local function seal_step(store, generation, budget)
   local source = store.source
   if type(source) ~= "table" then
@@ -859,9 +891,12 @@ local function seal_step(store, generation, budget)
       (type(value) == "table" and value.code) or "source_unreadable"
     return migration_backlog(store, generation, code)
   end
+  local next_key, rotation_err = seal_rotation_get(store, generation)
+  if rotation_err then return nil, rotation_err end
+  local order = rotated(value.recipients, next_key)
   local sealed = 0
   local remaining = budget.max_bytes
-  for _, hex in ipairs(value.recipients) do
+  for index, hex in ipairs(order) do
     if sealed >= budget.max_statements or remaining < 1 then break end
     local rows = sql_query(store,
       "SELECT inbox_end, read_end FROM migration_prefix WHERE root = ? "
@@ -873,34 +908,58 @@ local function seal_step(store, generation, budget)
         return migration_backlog(store, generation, "sealed_source_unavailable")
       end
       local resume_rows = sql_query(store,
-        "SELECT inbox_offset, read_offset, inbox_done, inbox_end, inbox_torn, "
-          .. "read_done, read_end, read_torn FROM migration_seal_cursor "
+        "SELECT cursor_version, inbox_present, inbox_captured_size, inbox_offset, "
+          .. "inbox_done, inbox_end, inbox_torn, read_present, read_captured_size, "
+          .. "read_offset, read_done, read_end, read_torn FROM migration_seal_cursor "
           .. "WHERE root = ? AND generation = ? AND recipient = ?",
         { store.actual_root, generation, hex })
       if not resume_rows then
         return nil, { code = "unavailable", field = "migration_seal_cursor" }
       end
+      local resume = resume_rows[1]
+      if resume ~= nil then resume.generation = generation end
       local sealed_ok, sealed_value, sealed_why = pcall(source.seal, source,
-        store.root, hex, { max_bytes = remaining, resume = resume_rows[1] })
+        store.root, hex, { max_bytes = remaining, generation = generation,
+          resume = resume })
       if not sealed_ok or type(sealed_value) ~= "table" then
         local code = (type(sealed_value) == "table" and sealed_value.code)
           or (type(sealed_why) == "table" and sealed_why.code)
           or (type(sealed_why) == "string" and sealed_why) or "source_unreadable"
+        -- A cursor predating capture cannot be resumed against a new EOF.
+        -- Invalidate it explicitly; the next call captures fresh sizes and the
+        -- later prefix proof detects any rewrite.
+        local field = type(sealed_why) == "table" and sealed_why.field
+          or (type(sealed_value) == "table" and sealed_value.field)
+        if code == "invalid_snapshot" and field == "cursor_version" then
+          sql_exec(store,
+            "DELETE FROM migration_seal_cursor WHERE root = ? AND generation = ? "
+              .. "AND recipient = ?", { store.actual_root, generation, hex })
+          return migration_backlog(store, generation, "reseal")
+        end
         return migration_backlog(store, generation, code)
       end
       remaining = remaining - (sealed_value.bytes_read or 0)
       if sealed_value.partial then
         local held = sql_exec(store,
           "INSERT OR REPLACE INTO migration_seal_cursor (root, generation, "
-            .. "recipient, inbox_offset, read_offset, inbox_done, inbox_end, "
-            .. "inbox_torn, read_done, read_end, read_torn) "
-            .. "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            .. "recipient, cursor_version, inbox_present, inbox_captured_size, "
+            .. "inbox_offset, inbox_done, inbox_end, inbox_torn, read_present, "
+            .. "read_captured_size, read_offset, read_done, read_end, read_torn) "
+            .. "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
           { store.actual_root, generation, hex,
-            tonumber(sealed_value.inbox_offset) or -1,
-            tonumber(sealed_value.read_offset) or -1,
-            sealed_value.inbox_done or 0, sealed_value.inbox_end or 0,
-            sealed_value.inbox_torn or 0, sealed_value.read_done or 0,
-            sealed_value.read_end or 0, sealed_value.read_torn or 0 })
+            tonumber(sealed_value.cursor_version) or 1,
+            tonumber(sealed_value.inbox_present) or 0,
+            tonumber(sealed_value.inbox_captured_size) or 0,
+            tonumber(sealed_value.inbox_offset) or 0,
+            tonumber(sealed_value.inbox_done) or 0,
+            tonumber(sealed_value.inbox_end) or 0,
+            tonumber(sealed_value.inbox_torn) or 0,
+            tonumber(sealed_value.read_present) or 0,
+            tonumber(sealed_value.read_captured_size) or 0,
+            tonumber(sealed_value.read_offset) or 0,
+            tonumber(sealed_value.read_done) or 0,
+            tonumber(sealed_value.read_end) or 0,
+            tonumber(sealed_value.read_torn) or 0 })
         if not held then return nil, { code = "unavailable", field = "migration_seal_cursor" } end
       else
         local written = sql_exec(store,
@@ -915,6 +974,9 @@ local function seal_step(store, generation, budget)
             .. "AND recipient = ?", { store.actual_root, generation, hex })
       end
       sealed = sealed + 1
+      local rotated_key = order[(index % #order) + 1]
+      local set_ok, set_err = seal_rotation_set(store, generation, rotated_key)
+      if not set_ok then return nil, set_err end
     end
   end
   local cursor = { generation = generation, pass = "seal",
@@ -932,6 +994,9 @@ local function advance_step(store, generation, budget)
   local sealed_result, seal_err = seal_step(store, generation, budget)
   if not sealed_result then return nil, seal_err end
   if (sealed_result.sealed or 0) > 0 then return sealed_result end
+  if sealed_result.reason and sealed_result.reason ~= "prefix_pending" then
+    return sealed_result
+  end
   local source = store.source
   if type(source) ~= "table" or type(source.sealed_advance) ~= "function" then
     return migration_backlog(store, generation, "sealed_advance_unavailable")
