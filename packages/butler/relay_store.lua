@@ -1389,16 +1389,25 @@ function M.open(opts)
 
   local function ingest_discover_field(p, capture, budget)
     if budget.max_rows < 1 then return nil, 'budget_too_small' end
+    local bound = { p.ingest_id, tonumber(p.cursor_started) or 0, p.cursor_key or '' }
+    local key_meta, key_why = query(db,
+      'SELECT length(CAST(e.key AS BLOB)) AS n FROM relay_source_capture c,' ..
+        'json_each(c.raw) e WHERE c.ingest_id=? AND (?=0 ' ..
+        'OR CAST(e.key AS BLOB)>CAST(? AS BLOB)) ' ..
+        'ORDER BY CAST(e.key AS BLOB) LIMIT 1', bound)
+    if not key_meta then return nil, 'source: ' .. tostring(key_why) end
+    if not key_meta[1] then return { phase = 'READY' } end
+    local key_bytes = tonumber(key_meta[1].n) or 0
+    if key_bytes > limits.record_bytes then return nil, 'field_oversize' end
+    if key_bytes > budget.max_bytes then return nil, 'budget_too_small' end
     local rows, why = query(db,
       'SELECT e.key AS key,e.type AS kind FROM relay_source_capture c,' ..
         'json_each(c.raw) e WHERE c.ingest_id=? AND (?=0 ' ..
         'OR CAST(e.key AS BLOB)>CAST(? AS BLOB)) ' ..
-        'ORDER BY CAST(e.key AS BLOB) LIMIT 1',
-      { p.ingest_id, tonumber(p.cursor_started) or 0, p.cursor_key or '' })
+        'ORDER BY CAST(e.key AS BLOB) LIMIT 1', bound)
     if not rows then return nil, 'source: ' .. tostring(why) end
     if not rows[1] then return { phase = 'READY' } end
     local name, kind = tostring(rows[1].key), rows[1].kind
-    if #name > limits.record_bytes then return nil, 'field_oversize' end
     local expected = KNOWN[name]
     if expected == 'scalar' then
       if kind ~= 'text' and kind ~= 'null' then return nil, 'field_type' end
@@ -1420,6 +1429,7 @@ function M.open(opts)
       if not token_bytes then return nil, 'cursor: ' .. tostring(token_why) end
       local n = tonumber(token_bytes[1] and token_bytes[1].n) or 0
       if n > limits.record_bytes then return nil, 'field_oversize' end
+      if n > budget.max_bytes then return nil, 'budget_too_small' end
       local added = add_field(capture.source_id, field_path, '', kind, 1)
       if added ~= 1 then return nil, 'source_fields' end
       if capture.role == 'primary' then
@@ -1474,19 +1484,31 @@ function M.open(opts)
     local child_kind = expected == 'nested_array' and 'array' or 'object'
     local path = '$.' .. root
     local jpath = json_path(root)
+    local bound = { jpath, p.ingest_id, tonumber(p.cursor_started) or 0, p.cursor_key or '' }
+    local key_meta, key_why = query(db,
+      'SELECT length(CAST(r.key AS BLOB)) AS n FROM relay_source_capture c,' ..
+        'json_each(c.raw,?) r WHERE c.ingest_id=? AND (?=0 ' ..
+        'OR CAST(r.key AS BLOB)>CAST(? AS BLOB)) ' ..
+        'ORDER BY CAST(r.key AS BLOB) LIMIT 1', bound)
+    if not key_meta then return nil, 'source: ' .. tostring(key_why) end
+    if not key_meta[1] then
+      return { phase = 'DISCOVER_FIELD', cursor_field = false,
+        cursor_key = root, cursor_started = 1 }
+    end
+    local key_bytes = tonumber(key_meta[1].n) or 0
+    if key_bytes > limits.record_bytes then return nil, 'field_oversize' end
+    if key_bytes > budget.max_bytes then return nil, 'budget_too_small' end
     local rows, why = query(db,
       'SELECT r.key AS key,r.type AS kind FROM relay_source_capture c,' ..
         'json_each(c.raw,?) r WHERE c.ingest_id=? AND (?=0 ' ..
         'OR CAST(r.key AS BLOB)>CAST(? AS BLOB)) ' ..
-        'ORDER BY CAST(r.key AS BLOB) LIMIT 1',
-      { jpath, p.ingest_id, tonumber(p.cursor_started) or 0, p.cursor_key or '' })
+        'ORDER BY CAST(r.key AS BLOB) LIMIT 1', bound)
     if not rows then return nil, 'source: ' .. tostring(why) end
     if not rows[1] then
       return { phase = 'DISCOVER_FIELD', cursor_field = false,
         cursor_key = root, cursor_started = 1 }
     end
     local key = tostring(rows[1].key)
-    if #key > limits.record_bytes then return nil, 'field_oversize' end
     local next_fields = {
       cursor_key = key, cursor_started = 1, count = 1, bytes = #key,
     }
