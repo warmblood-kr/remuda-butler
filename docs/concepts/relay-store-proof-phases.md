@@ -62,6 +62,9 @@ exact; 1junk/1.5 NULL). Extra or missing rows refuse. Measured: derived ~2ms/2k 
 `PROOF_VERSION`; `relay_proof_state` binds the version and store id.
 READY/activation require the recomputation, so an older-verifier or fabricated
 certificate is reset/reverified while same-version resume continues.
+`store:proof(certificate_id)` returns the current certificate/witness/source
+inputs for the startup/archive coordinator; it is necessary input, never an
+archive authorization.
 
 ## Revision matrix
 

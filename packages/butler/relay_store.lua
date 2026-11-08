@@ -353,7 +353,7 @@ local METHODS = {
   'verify_import', 'activate', 'writer', 'cursor', 'accept_batch',
   'dispatch_page', 'complete_dispatch', 'get', 'put', 'delete', 'page',
   'resolve_operation', 'reply_dispatch_page', 'claim_reply', 'complete_reply',
-  'fail_reply', 'status',
+  'fail_reply', 'status', 'proof',
 }
 
 -- Bump whenever the verification semantics change. A READY certificate and
@@ -2394,6 +2394,17 @@ function M.open(opts)
         'ELSE NULL END AS attempts_raw,' ..
       'CASE WHEN json_type(r.payload_json,\'$.attempts\')=\'text\' ' ..
         'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))>64 ' ..
+        'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))<=308 ' ..
+        'AND json_extract(r.payload_json,\'$.attempts\') NOT GLOB \'*[^0-9]*\' ' ..
+        'THEN 1 ELSE 0 END AS attempts_long_digits,' ..
+      'CASE WHEN json_type(r.payload_json,\'$.attempts\')=\'text\' ' ..
+        'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))>64 ' ..
+        'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))<=308 ' ..
+        'AND json_extract(r.payload_json,\'$.attempts\') NOT GLOB \'*[^0-9]*\' ' ..
+        'AND i.attempts IS CAST(json_extract(r.payload_json,\'$.attempts\') AS REAL) ' ..
+        'THEN 1 ELSE 0 END AS attempts_long_digit_equal,' ..
+      'CASE WHEN json_type(r.payload_json,\'$.attempts\')=\'text\' ' ..
+        'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))>64 ' ..
         'AND substr(json_extract(r.payload_json,\'$.attempts\'),1,2) NOT IN (\'0x\',\'0X\') ' ..
         'AND json_extract(r.payload_json,\'$.attempts\') NOT GLOB \'*[^0-9eE+.-]*\' ' ..
         'AND instr(json_extract(r.payload_json,\'$.attempts\'),char(9))=0 ' ..
@@ -2426,7 +2437,11 @@ function M.open(opts)
         return fail('import_incomplete', 'intent')
       end
       if row.attempts_type == 'text' and tonumber(row.attempts_len) > 64 then
-        if tonumber(row.attempts_ambiguous) == 1 then
+        if tonumber(row.attempts_long_digits) == 1 then
+          if tonumber(row.attempts_long_digit_equal) ~= 1 then
+            return fail('import_incomplete', 'intent')
+          end
+        elseif tonumber(row.attempts_ambiguous) == 1 then
           return fail('import_incomplete', 'intent_oversize')
         end
       else
@@ -2802,6 +2817,79 @@ function M.open(opts)
       unit_id = p.unit_id, cursor = p.cursor,
       processed_rows = p.processed_rows, bytes = p.bytes, nodes = p.nodes,
       certificate_id = p.certificate_id, witness_id = p.witness_id }
+  end
+
+  -- Read-only producer proof for the startup/archive coordinator. It returns
+  -- necessary inputs, never an archive authorization: the coordinator must
+  -- reread this under the current owner and match its own inventory.
+  function store:proof(certificate_id)
+    if store.closed then return nil, 'stale_writer' end
+    if type(certificate_id) ~= 'string' or certificate_id == '' then
+      return fail('certificate_id')
+    end
+    local certificates, cert_why = query(db,
+      'SELECT certificate_id,verification_id,source_id,witness_id,data_revision,' ..
+        'processed_rows,bytes,nodes,owner_id,epoch FROM relay_verify_certificates ' ..
+        'WHERE certificate_id=?', { certificate_id })
+    if not certificates then return fail('proof', cert_why) end
+    local certificate = certificates[1]
+    if not certificate then return fail('proof_missing') end
+    local progress, progress_why = query(db,
+      'SELECT verification_id,revision,state,phase,data_revision,certificate_id,' ..
+        'witness_id,processed_rows,bytes,nodes,owner_id,epoch ' ..
+        'FROM relay_verify_progress WHERE verification_id=?',
+      { certificate.verification_id })
+    if not progress then return fail('proof', progress_why) end
+    local checkpoint = progress[1]
+    if not checkpoint or checkpoint.state ~= 'ready'
+        or checkpoint.phase ~= 'ready'
+        or checkpoint.certificate_id ~= certificate.certificate_id
+        or checkpoint.witness_id ~= certificate.witness_id then
+      return fail('proof_missing')
+    end
+    local state, state_why = query(db,
+      'SELECT store_id,proof_version FROM relay_proof_state WHERE verification_id=?',
+      { certificate.verification_id })
+    if not state then return fail('proof', state_why) end
+    if not state[1] or state[1].store_id ~= store.store_id
+        or tonumber(state[1].proof_version) ~= PROOF_VERSION then
+      return fail('proof_stale')
+    end
+    local auth, auth_why = current_auth()
+    if not auth then return fail('proof', auth_why) end
+    if auth.store_id ~= store.store_id
+        or certificate.data_revision ~= auth.data_revision
+        or certificate.owner_id ~= auth.owner_id
+        or certificate.epoch ~= auth.epoch then
+      return fail('proof_stale')
+    end
+    local digest, digest_why = certificate_id_for(certificate.verification_id,
+      certificate.source_id, certificate.witness_id, certificate.data_revision,
+      certificate.processed_rows, certificate.bytes, certificate.nodes,
+      certificate.owner_id, certificate.epoch)
+    if not digest then return fail('proof', digest_why) end
+    if digest ~= certificate.certificate_id then return fail('proof_stale') end
+    local witnesses, witness_why = query(db,
+      'SELECT source_id,kind,role,stamp,bytes,raw_sha256,root_digest,chunk_size ' ..
+        'FROM relay_verify_witness WHERE store_id=? AND source_id=? AND kind=\'source\'',
+      { store.store_id, certificate.source_id })
+    if not witnesses then return fail('proof', witness_why) end
+    if not witnesses[1] then return fail('witness_missing') end
+    return {
+      store_id = store.store_id,
+      verification_id = certificate.verification_id,
+      revision = checkpoint.revision,
+      data_revision = certificate.data_revision,
+      certificate_id = certificate.certificate_id,
+      witness_id = certificate.witness_id,
+      proof_version = PROOF_VERSION,
+      processed_rows = certificate.processed_rows,
+      bytes = certificate.bytes,
+      nodes = certificate.nodes,
+      owner_id = certificate.owner_id,
+      epoch = certificate.epoch,
+      source = witnesses[1],
+    }
   end
 
   function store:activate()
