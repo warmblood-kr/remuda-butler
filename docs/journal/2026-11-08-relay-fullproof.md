@@ -57,3 +57,16 @@ invalidating a READY certificate made under a weak trigger. Field paths require
 one canonical interpretation, parent identity is part of the match, and `$` is
 mandatory. The many-domain and node-rich scope probe is
 `/private/tmp/relay-sqlite-qa/scope_limits.lua`.
+
+## 42b upgrade/outbox HOLD
+
+Four QA REDs fixed: schema repair now writes a durable pending marker before
+bumping data_revision, deletes checkpoints/certificates and fails closed if the
+bump aborts, and retries from the marker on the next open; relay_schema_state
+stores the trigger fingerprint. relay_proof_state binds PROOF_VERSION to a
+verification, so a 646 (or older-verifier) READY certificate is reset and
+reverified while same-version resume continues; READY and activation require
+it. The outbox page selects only attempt/txn scalars and a SQL payload-equality
+flag, never payload JSON, and has no lower bound on its first page so an empty
+reply id is validated. Migration is now 18 tables / 31 relay_rev_*; QA's
+migration check reports 18.

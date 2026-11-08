@@ -20,11 +20,9 @@ WITNESS advances one source/sidecar at most and rehashes one sealed
 `chunk_size` (<=64KiB) raw-byte chunk per call with
 `substr(CAST(raw AS BLOB),offset,length)`, persists `{index,offset,chunks}` in
 `phase_cursor`, and accumulates at most 32KiB of chunk hex; a zero-byte input
-hashes the empty domain directly. The reverse direction also holds: every
-retained witness must still have its live source plus manifest entry (or its
-sidecar), paged one retained basis per call, so deleting both the manifest and
-import-source rows refuses instead of dropping a witnessed original from the
-proof. The existing domain
+hashes the empty domain directly. The reverse also holds: every retained
+witness must still have its live source+manifest (or sidecar), one per call, so
+deleting both refuses instead of dropping a witnessed original. The existing domain
 `SHA('butler-relay-source-v1\0'..bytes..'\0'..chunks)` is rebuilt; a final input
 over 64KiB refuses `digest_budget`. Digest/bytes/role/stamp/root_digest must
 match the sealed baseline, otherwise `source_changed`. Backup evidence and
@@ -37,9 +35,9 @@ original raw, one domain per call starting before the empty key, and requires
 the exact source field and, for every nonempty collection, exactly one unit
 with the original kind/parent/count. It then pages stored units and fields back
 one per call against the original domain with the original
-token/type/ordinal/kind check; the `$` root field is mandatory. Zero-expected units are refused; this is the
-original-domain-to-unit bijection, so deleting a unit/record pair and zeroing
-`staged_count` cannot certify an empty projection. Cursor presence/null/value
+token/type/ordinal/kind check; the `$` root field is mandatory. Zero-expected
+units are refused, so deleting a unit/record pair and zeroing `staged_count`
+cannot certify an empty projection. Cursor presence/null/value
 and source-field/unit structure parity follow.
 Planning order is LENGTH-only candidates -> byte prefix <=256KiB -> `json_tree`
 nodes for that selected prefix only -> node prefix <=8192 -> exact SQL join
@@ -54,18 +52,18 @@ count. No whole-target COUNT/EXCEPT is used.
 
 ## DERIVED and READY
 
-DERIVED checks both directions: processed `(source,ordinal,event_id)` and
-pending events payload/room/source_key/state are indexed aggregate passes over
-the target (not per-row JSON); delivered events require a witnessed ack
-sidecar, CRLF normalized, and `inbox_mail_id` must stay NULL. Imported outbox
-intents are paged and compared payload/imported/state plus txn and attempts,
-with the attempts value normalized by the same Lua `tonumber` rule as the
-importer (1.0/"1"/1e2/0x10 exact; 1junk/1.5 NULL). Extra or missing rows
-refuse. Measured scope: the derived aggregate pass is ~2ms on 2k processed rows
-and the whole 110001-row proof stays <=0.12s per call; this is not presented as
-an all-shape ceiling. READY creates the certificate only when all phases share the same
-witness and `data_revision`; activation checks the indexed
-certificate/checkpoint/witness/data_revision/owner/epoch equality.
+DERIVED checks processed and pending-event directions with indexed aggregate
+passes (not per-row JSON); delivered events require a witnessed CRLF-normalized
+ack and `inbox_mail_id` must stay NULL. Outbox intents are paged metadata-only:
+the query selects attempt/txn scalars and a SQL payload-equality flag (never
+payload JSON into Lua); the first page has no lower bound so an empty reply id
+is checked. Attempts use the importer's Lua `tonumber` rule (1.0/"1"/1e2/0x10
+exact; 1junk/1.5 NULL). Extra or missing rows refuse. Measured: derived ~2ms/2k rows; the 110001-row proof <=0.12s/call. READY creates the certificate only when all phases share the same witness and
+`data_revision`. `relay_proof_state` binds a `PROOF_VERSION` to the
+verification; READY and activation require it, so a certificate from an older
+verifier (or 646) is reset and reverified, while same-version resume continues.
+Activation checks the indexed
+certificate/checkpoint/witness/data_revision/owner/epoch/version equality.
 
 ## Revision matrix
 
@@ -74,8 +72,10 @@ import source (including `staged_count`), source fields, units, cursors,
 records, processed, events, reply intents, sidecar, and witness INSERT. Narrow
 exclusions are verification progress/certificates, `verified_count`, the exact
 status promotion to verified, authority bookkeeping, and ACTIVE raw retirement/
-normal mutations. `CREATE TRIGGER IF NOT EXISTS` does not repair an older
-incomplete predicate, so schema open drops and recreates every relay trigger
-before use. If the installed trigger set/definition differed, open bumps
-`data_revision` so a certificate produced while a weaker trigger was installed
-cannot remain READY; an old definition is replaced, never trusted.
+normal mutations. Schema open drops and recreates every relay trigger. `relay_schema_state`
+stores the expected trigger fingerprint plus a pending marker. If the installed
+set differed, open first writes pending=1, then bumps `data_revision`; on bump
+failure it deletes checkpoints/certificates and fails closed; later opens
+retry from the pending marker. A weak-trigger certificate therefore cannot
+stay READY even when the repaired SQL later looks correct. Now 18 tables,
+31 `relay_rev_*` triggers.

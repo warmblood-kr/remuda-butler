@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS relay_verify_certificates (
   epoch INTEGER NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS relay_proof_state (
+  verification_id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  proof_version INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS relay_schema_state (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  trigger_fingerprint TEXT NOT NULL,
+  pending INTEGER NOT NULL DEFAULT 0 CHECK(pending IN(0,1))
+);
 CREATE TABLE IF NOT EXISTS relay_verify_witness (
   witness_id TEXT PRIMARY KEY,
   store_id TEXT NOT NULL,
@@ -344,6 +355,11 @@ local METHODS = {
   'fail_reply', 'status',
 }
 
+-- Bump whenever the verification semantics change. A READY certificate and
+-- activation are bound to this constant through relay_proof_state, so a cert
+-- produced by an older verifier cannot be reused even if triggers match.
+local PROOF_VERSION = 2
+
 local KNOWN = {
   since = 'scalar',
   messages_since = 'scalar',
@@ -537,29 +553,59 @@ local function trigger_map(db)
   return map
 end
 
-local function trigger_maps_differ(before, after)
-  for name, sql in pairs(before) do
-    if after[name] ~= sql then return true end
+local function trigger_text(map)
+  local names = {}
+  for name in pairs(map) do names[#names + 1] = name end
+  table.sort(names)
+  local parts = {}
+  for _, name in ipairs(names) do
+    local sql = tostring(map[name])
+    parts[#parts + 1] = name .. '\0' .. tostring(#sql) .. '\0' .. sql
   end
-  for name in pairs(after) do
-    if before[name] == nil then return true end
-  end
-  return false
+  return table.concat(parts, '\1')
 end
 
 local function ensure_schema(db)
-  -- A trigger definition can be replaced by an older/weaker one. Detect it
-  -- before repair: any data mutation may have happened without a revision
-  -- bump, so a certificate produced before repair must not stay READY.
+  -- Repair can only make the installed triggers match this build. A durable
+  -- pending marker is written before the invalidation bump, and a failed bump
+  -- also removes any checkpoint/certificate so a stale READY cannot survive a
+  -- later reopen where the trigger SQL already looks correct.
   local before, before_why = trigger_map(db)
   if not before then return fail('schema', before_why) end
+  local before_text = trigger_text(before)
   local ok, why = db:batch(SCHEMA)
   if not ok then return fail('schema', why) end
   local after, after_why = trigger_map(db)
   if not after then return fail('schema', after_why) end
-  if trigger_maps_differ(before, after) then
-    pcall(exec, db,
-      'UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1')
+  local desired = trigger_text(after)
+  local stored, stored_why = query(db,
+    'SELECT trigger_fingerprint,pending FROM relay_schema_state WHERE singleton=1')
+  if not stored then return fail('schema', stored_why) end
+  local repaired = before_text ~= desired or not stored[1]
+    or stored[1].trigger_fingerprint ~= desired
+    or tonumber(stored[1].pending or 0) == 1
+  if repaired then
+    local authority, count_why = query(db,
+      'SELECT count(*) AS n FROM relay_authority')
+    if not authority then return fail('schema', count_why) end
+    if tonumber(authority[1].n) > 0 then
+      local marked, mark_why = exec(db,
+        'INSERT OR REPLACE INTO relay_schema_state ' ..
+          '(singleton,trigger_fingerprint,pending) VALUES (1,?,1)', { desired })
+      if marked ~= 1 then return fail('schema', mark_why) end
+      local called, changed, bump_why = pcall(exec, db,
+        'UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1')
+      if not called or tonumber(changed) ~= 1 then
+        -- Fail closed and durably remove the proof that could be stale.
+        pcall(exec, db, 'DELETE FROM relay_verify_certificates')
+        pcall(exec, db, 'DELETE FROM relay_verify_progress')
+        return fail('schema', 'repair_invalidate: ' .. tostring(called and changed or bump_why))
+      end
+    end
+    local saved, save_why = exec(db,
+      'INSERT OR REPLACE INTO relay_schema_state ' ..
+        '(singleton,trigger_fingerprint,pending) VALUES (1,?,0)', { desired })
+    if saved ~= 1 then return fail('schema', save_why) end
   end
   return true
 end
@@ -2309,20 +2355,27 @@ function M.open(opts)
     if type(cursor) ~= 'table' or cursor.task ~= 'outbox' then
       return fail('derived_state')
     end
-    local rows, why = query(db,
-      'SELECT r.record_key AS reply_id,r.payload_json AS payload,' ..
-        'json_extract(r.payload_json,\'$.attempts\') AS attempts_raw,' ..
-        'json_extract(r.payload_json,\'$.txn_id\') AS txn_raw,' ..
-        'i.reply_id AS intent_reply,i.payload_json AS intent_payload,' ..
-        'i.imported AS imported,i.state AS state,i.attempts AS attempts,' ..
-        'i.txn_id AS txn_id ' ..
-        'FROM relay_records r LEFT JOIN relay_reply_intents i ' ..
-        'ON i.reply_id=r.record_key WHERE r.namespace=\'matrix_reply_outbox\' ' ..
-        'AND r.record_key>? ORDER BY r.record_key LIMIT ?',
-      { cursor.reply_id or '', max_rows })
+    -- Metadata/scalar only: no payload JSON enters Lua and SQL decides payload
+    -- equality. The first page has no lower bound so a legal empty key is seen.
+    local sql = 'SELECT r.record_key AS reply_id,' ..
+      'json_extract(r.payload_json,\'$.attempts\') AS attempts_raw,' ..
+      'json_extract(r.payload_json,\'$.txn_id\') AS txn_raw,' ..
+      'i.reply_id AS intent_reply,i.imported AS imported,i.state AS state,' ..
+      'i.attempts AS attempts,i.txn_id AS txn_id,' ..
+      'CASE WHEN i.payload_json=r.payload_json THEN 1 ELSE 0 END AS payload_equal ' ..
+      'FROM relay_records r LEFT JOIN relay_reply_intents i ' ..
+      'ON i.reply_id=r.record_key WHERE r.namespace=\'matrix_reply_outbox\''
+    local params = {}
+    if cursor.started then
+      sql = sql .. ' AND r.record_key>?'
+      params[#params + 1] = cursor.reply_id or ''
+    end
+    sql = sql .. ' ORDER BY r.record_key LIMIT ?'
+    params[#params + 1] = max_rows
+    local rows, why = query(db, sql, params)
     if not rows then return fail('derived', why) end
     for _, row in ipairs(rows) do
-      if row.intent_reply == nil or row.intent_payload ~= row.payload
+      if row.intent_reply == nil or tonumber(row.payload_equal) ~= 1
           or tonumber(row.imported) ~= 1 or row.state ~= 'uncertain' then
         return fail('import_incomplete', 'intent')
       end
@@ -2338,7 +2391,8 @@ function M.open(opts)
       end
     end
     if #rows == max_rows then
-      p.phase_cursor = encode({ task = 'outbox', reply_id = rows[#rows].reply_id })
+      p.phase_cursor = encode({ task = 'outbox', started = true,
+        reply_id = rows[#rows].reply_id })
       return { count = #rows }
     end
     p.phase_cursor = nil
@@ -2389,6 +2443,12 @@ function M.open(opts)
     if not progress then return fail('verify', progress_why) end
     local p = progress[1]
     if p then p.phase = p.phase or 'witness' end
+    local protocol, protocol_why = query(db,
+      'SELECT proof_version FROM relay_proof_state WHERE verification_id=?',
+      { verification_id })
+    if not protocol then return fail('verify', protocol_why) end
+    local protocol_current = protocol[1] ~= nil
+      and tonumber(protocol[1].proof_version) == PROOF_VERSION
     if p and p.state == 'ready' and p.phase == 'ready'
         and p.data_revision == auth.data_revision
         and p.owner_id == store.owner_id and p.epoch == store.epoch then
@@ -2400,7 +2460,8 @@ function M.open(opts)
       if c and c.verification_id == verification_id and c.source_id == primary.source_id
           and c.witness_id == p.witness_id
           and c.data_revision == auth.data_revision
-          and c.owner_id == store.owner_id and c.epoch == store.epoch then
+          and c.owner_id == store.owner_id and c.epoch == store.epoch
+          and protocol_current then
         return { verified = true, done = true, state = 'ready', count = 0,
           verification_id = verification_id, revision = p.revision,
           data_revision = auth.data_revision, phase = 'ready',
@@ -2420,9 +2481,18 @@ function M.open(opts)
         'AND store_id=? AND owner_id=? AND epoch=?',
       { store.store_id, store.owner_id, store.epoch })
     if cas_ok ~= 1 then rollback(db); return fail('stale_writer', cas_why) end
-    if not p or p.data_revision ~= auth.data_revision then
+    if not p or p.data_revision ~= auth.data_revision or p.state == 'ready'
+        or not protocol_current then
       exec(db, 'DELETE FROM relay_verify_certificates WHERE verification_id=?',
         { verification_id })
+      exec(db, 'DELETE FROM relay_proof_state WHERE verification_id=?',
+        { verification_id })
+      local state_ok, state_why = exec(db,
+        'INSERT OR REPLACE INTO relay_proof_state ' ..
+          '(verification_id,store_id,proof_version,created_at) VALUES (?,?,?,?)',
+        { verification_id, store.store_id, PROOF_VERSION,
+          os.date('!%Y-%m-%dT%H:%M:%SZ') })
+      if state_ok ~= 1 then rollback(db); return fail('verify_state', state_why) end
       p = { verification_id = verification_id, source_id = primary.source_id,
         revision = 0, data_revision = auth.data_revision, unit_id = first[1].id,
         cursor = nil, state = 'backlog', processed_rows = 0, bytes = 0, nodes = 0,
@@ -2579,7 +2649,7 @@ function M.open(opts)
       if type(derived_cursor) ~= 'table' then
         local derived, derived_why = derived_checks(primary, auth)
         if not derived then rollback(db); return nil, derived_why end
-        p.phase_cursor = encode({ task = 'outbox', reply_id = '' })
+        p.phase_cursor = encode({ task = 'outbox' })
         result = { count = 0, bytes = 0, nodes = 0, state = 'backlog',
           phase = 'derived' }
       elseif derived_cursor.task == 'outbox' then
@@ -2614,6 +2684,12 @@ function M.open(opts)
           auth.data_revision, total_rows, total_bytes, total_nodes, store.owner_id,
           store.epoch, os.date('!%Y-%m-%dT%H:%M:%SZ') })
       if cert_ok ~= 1 then rollback(db); return fail('certificate', cert_err) end
+      local version_ok, version_err = exec(db,
+        'INSERT OR REPLACE INTO relay_proof_state ' ..
+          '(verification_id,store_id,proof_version,created_at) VALUES (?,?,?,?)',
+        { verification_id, store.store_id, PROOF_VERSION,
+          os.date('!%Y-%m-%dT%H:%M:%SZ') })
+      if version_ok ~= 1 then rollback(db); return fail('certificate', version_err) end
       p.state, p.certificate_id, p.phase, p.phase_cursor = 'ready', cert_id, 'ready', nil
       local source_ok, source_why = exec(db,
         'UPDATE relay_import_source SET status=\'verified\',verified_count=staged_count ' ..
@@ -2710,6 +2786,14 @@ function M.open(opts)
         or certificate.owner_id ~= store.owner_id
         or certificate.epoch ~= store.epoch then
       return fail('import_incomplete', 'certificate')
+    end
+    local proof_state, proof_state_why = query(db,
+      'SELECT proof_version FROM relay_proof_state WHERE verification_id=?',
+      { verification_id })
+    if not proof_state then return fail('import_incomplete', proof_state_why) end
+    if not proof_state[1]
+        or tonumber(proof_state[1].proof_version) ~= PROOF_VERSION then
+      return fail('import_incomplete', 'proof_version')
     end
     local raw = marker_encode(store.store_id, store.owner_id, store.epoch, auth.source_stamp)
     if not raw or #raw > limits.marker_bytes then return fail('marker_size') end

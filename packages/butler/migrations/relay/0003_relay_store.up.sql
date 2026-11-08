@@ -41,6 +41,17 @@ CREATE TABLE IF NOT EXISTS relay_verify_certificates (
   epoch INTEGER NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS relay_proof_state (
+  verification_id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  proof_version INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS relay_schema_state (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  trigger_fingerprint TEXT NOT NULL,
+  pending INTEGER NOT NULL DEFAULT 0 CHECK(pending IN(0,1))
+);
 CREATE TABLE IF NOT EXISTS relay_verify_witness (
   witness_id TEXT PRIMARY KEY,
   store_id TEXT NOT NULL,
