@@ -198,6 +198,12 @@ local function add_delta(self, recipient, generation, op)
     return true
   end
   if op.op == "metadata" then
+    local delivery = checked_query(self.db,
+      "SELECT 1 AS present FROM progress_deliveries "
+        .. "WHERE recipient = ? AND generation = ? AND message_id = ?",
+      { recipient, generation, op.message_id })
+    if not delivery then return nil, "unavailable" end
+    if #delivery == 0 then return nil, "not_committed" end
     local inserted, why = checked_exec(self.db,
       "INSERT OR REPLACE INTO progress_metadata "
         .. "(recipient, generation, message_id, envelope_ref, object_ref, metadata) "
@@ -412,17 +418,29 @@ local function scan(self, root, recipient, generation, kind, after_key, limit)
         .. "WHERE recipient = ? AND generation = ? AND path > ? ORDER BY path LIMIT ?",
       { recipient, generation, after, fetch })
   elseif kind == "fileproofs" then
-    local after = type(after_key) == "string" and after_key or ""
+    local after_path, after_pass = "", 0
+    if type(after_key) == "string" then
+      local path, pass = after_key:match("^(.*)\t(%d+)$")
+      if path then after_path, after_pass = path, tonumber(pass) end
+    end
     rows, err = checked_query(self.db,
       "SELECT pass, path, present, bytes, sha256 FROM progress_fileproofs "
-        .. "WHERE recipient = ? AND generation = ? AND path > ? "
-        .. "ORDER BY path, pass LIMIT ?", { recipient, generation, after, fetch })
+        .. "WHERE recipient = ? AND generation = ? "
+        .. "AND (path > ? OR (path = ? AND pass > ?)) "
+        .. "ORDER BY path, pass LIMIT ?",
+      { recipient, generation, after_path, after_path, after_pass, fetch })
   elseif kind == "chunkproofs" then
-    local after = type(after_key) == "string" and after_key or ""
+    local after_path, after_offset = "", 0
+    if type(after_key) == "string" then
+      local path, offset = after_key:match("^(.*)\t(%d+)$")
+      if path then after_path, after_offset = path, tonumber(offset) end
+    end
     rows, err = checked_query(self.db,
       "SELECT pass, path, offset, bytes, sha256, eof FROM progress_chunkproofs "
-        .. "WHERE recipient = ? AND generation = ? AND path > ? "
-        .. "ORDER BY path, offset LIMIT ?", { recipient, generation, after, fetch })
+        .. "WHERE recipient = ? AND generation = ? "
+        .. "AND (path > ? OR (path = ? AND offset > ?)) "
+        .. "ORDER BY path, offset LIMIT ?",
+      { recipient, generation, after_path, after_path, after_offset, fetch })
   end
   if not rows then return fail("unavailable", kind, err) end
   local complete = #rows <= limit
@@ -438,9 +456,16 @@ local function scan(self, root, recipient, generation, kind, after_key, limit)
     row.resent_json = nil
     out[index] = row
   end
-  local next_key = out[#out] and (out[#out].seq and tostring(out[#out].seq)
-    or out[#out].path or out[#out].message_id) or nil
-  if complete then next_key = nil end
+  local next_key
+  if #out > 0 and not complete then
+    local last = out[#out]
+    if kind == "deliveries" then next_key = tostring(last.seq)
+    elseif kind == "reads" then next_key = last.message_id
+    elseif kind == "dependencies" then next_key = last.path
+    elseif kind == "fileproofs" then next_key = last.path .. "\t" .. tostring(last.pass)
+    elseif kind == "chunkproofs" then next_key = last.path .. "\t" .. tostring(last.offset)
+    end
+  end
   return { rows = out, next_key = next_key, complete = complete }
 end
 
