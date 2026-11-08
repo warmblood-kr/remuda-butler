@@ -10,7 +10,8 @@ fail=0
 note() { echo "FAIL: $*" >&2; fail=1; }
 PARENT=$(cd /tmp && pwd -P)
 SENTINEL=$(mktemp /tmp/ienv-sentinel.XXXXXX) || exit 2
-cleanup() { rm -f "$SENTINEL"; }
+LOG=$(mktemp /tmp/ienv-admission-log.XXXXXX) || exit 2
+cleanup() { rm -f "$SENTINEL" "${LOG:-}"; }
 trap cleanup EXIT
 
 (
@@ -20,11 +21,11 @@ trap cleanup EXIT
   REMUDA_BIN=/usr/bin/false
   REMUDA_RUNTIME_DIR=$PARENT
   isolated_env_prepare zzz zzz
-) >/tmp/ienv-admission.out 2>&1
+) >"$LOG" 2>&1
 status=$?
 # The refusal names the scratch it created. Assert that exact tree is gone,
 # rather than counting a shared /tmp prefix (another run may use it too).
-leaked=$(sed -n 's/^private-env: FAIL: scratch aliases inherited REMUDA_RUNTIME_DIR: //p' /tmp/ienv-admission.out | tail -1)
+leaked=$(sed -n 's/^private-env: FAIL: scratch aliases inherited REMUDA_RUNTIME_DIR: //p' "$LOG" | tail -1)
 (( status != 0 )) || note "alias refusal returned success"
 [[ -n "$leaked" ]] || note "alias refusal did not name the created scratch"
 [[ ! -e "$leaked" ]] || note "alias refusal leaked $leaked"
