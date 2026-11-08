@@ -20,3 +20,26 @@ Reverse records are proved by per-`namespace/parent_key` target count vs unit
 this keeps the call bound and needs lead/QA acceptance. Derived joins add
 `r.parent_key=''` so the processed parity uses `relay_records_order` and stays
 under the 10s statement timeout.
+
+## Sealed/domain HOLD correction
+
+QA `sealed_proof.lua` produced eight counterexamples against 0616730: missing
+whole original domain, `unknown:` namespace alias, empty namespace tuple,
+sealed backup loss, fabricated `inbox_mail_id`, retained old trigger
+definition, empty ack, and CRLF ack. The fix adds a paged original-source
+domain walk (keys and nested rooms) with an exact domain<->unit bijection,
+sealed-baseline->source reverse membership, exact namespace injectivity with
+the empty tuple included, expected=0 refusal, zero-byte witness hashing, CRLF
+normalization, NULL `inbox_mail_id`, and trigger drop/recreate on open.
+All 14 sealed/coverage cases now pass.
+
+Two additional boundedness edges surfaced while validating the 64-key envelope:
+raw units are complete after their one row (both import_batch and source_rows),
+and structure parity is paged over units then fields instead of loading them in
+one call. A 64-key source now verifies, and max_rows=1 no longer replays a raw
+row or inflates staged_count.
+
+Outbox attempts are compared with the import normalization: integer tokens and
+integral real/numeric-text tokens (1.0, "1") become the same integer, while
+1.5/"x" normalize to NULL. A direct test confirms 1.0 and "1" verify as 1 and a
+later mismatch refuses with import_incomplete:intent.

@@ -79,12 +79,15 @@ CREATE TABLE IF NOT EXISTS relay_verify_witness (
   created_at TEXT NOT NULL,
   UNIQUE(store_id, source_id, kind)
 );
+DROP TRIGGER IF EXISTS relay_witness_no_insert;
 CREATE TRIGGER IF NOT EXISTS relay_witness_no_insert BEFORE INSERT ON relay_verify_witness
 WHEN EXISTS(SELECT 1 FROM relay_verify_witness w WHERE w.store_id=NEW.store_id
   AND w.source_id=NEW.source_id AND w.kind=NEW.kind)
 BEGIN SELECT RAISE(ABORT,'witness_immutable'); END;
+DROP TRIGGER IF EXISTS relay_witness_no_update;
 CREATE TRIGGER IF NOT EXISTS relay_witness_no_update BEFORE UPDATE ON relay_verify_witness
 BEGIN SELECT RAISE(ABORT,'witness_immutable'); END;
+DROP TRIGGER IF EXISTS relay_witness_no_delete;
 CREATE TRIGGER IF NOT EXISTS relay_witness_no_delete BEFORE DELETE ON relay_verify_witness
 BEGIN SELECT RAISE(ABORT,'witness_immutable'); END;
 CREATE TABLE IF NOT EXISTS relay_manifest (
@@ -201,42 +204,55 @@ CREATE TABLE IF NOT EXISTS relay_sidecar (
 -- Every verification-input mutation while importing advances data_revision.
 -- Verify progress/certificate/status bookkeeping is excluded; after ACTIVE the
 -- triggers are inert, so normal runtime mutations do not invalidate the cert.
+DROP TRIGGER IF EXISTS relay_rev_records_ins;
 CREATE TRIGGER IF NOT EXISTS relay_rev_records_ins AFTER INSERT ON relay_records
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_records_upd;
 CREATE TRIGGER IF NOT EXISTS relay_rev_records_upd AFTER UPDATE ON relay_records
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_records_del;
 CREATE TRIGGER IF NOT EXISTS relay_rev_records_del AFTER DELETE ON relay_records
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_processed_ins;
 CREATE TRIGGER IF NOT EXISTS relay_rev_processed_ins AFTER INSERT ON relay_processed
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_events_ins;
 CREATE TRIGGER IF NOT EXISTS relay_rev_events_ins AFTER INSERT ON relay_events
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_events_upd;
 CREATE TRIGGER IF NOT EXISTS relay_rev_events_upd AFTER UPDATE ON relay_events
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_intents_ins;
 CREATE TRIGGER IF NOT EXISTS relay_rev_intents_ins AFTER INSERT ON relay_reply_intents
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_intents_upd;
 CREATE TRIGGER IF NOT EXISTS relay_rev_intents_upd AFTER UPDATE ON relay_reply_intents
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_fields_ins;
 CREATE TRIGGER IF NOT EXISTS relay_rev_fields_ins AFTER INSERT ON relay_source_fields
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_cursors_ins;
 CREATE TRIGGER IF NOT EXISTS relay_rev_cursors_ins AFTER INSERT ON relay_cursors
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_cursors_upd;
 CREATE TRIGGER IF NOT EXISTS relay_rev_cursors_upd AFTER UPDATE ON relay_cursors
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_source_ins;
 CREATE TRIGGER IF NOT EXISTS relay_rev_source_ins AFTER INSERT ON relay_import_source
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_source_upd;
 CREATE TRIGGER IF NOT EXISTS relay_rev_source_upd AFTER UPDATE ON relay_import_source
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
  AND (OLD.raw IS NOT NEW.raw OR OLD.raw_sha256 IS NOT NEW.raw_sha256
@@ -244,59 +260,77 @@ WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
    OR OLD.staged_count IS NOT NEW.staged_count
    OR OLD.role IS NOT NEW.role OR OLD.source_id IS NOT NEW.source_id)
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_source_del;
 CREATE TRIGGER IF NOT EXISTS relay_rev_source_del AFTER DELETE ON relay_import_source
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_source_status;
 CREATE TRIGGER IF NOT EXISTS relay_rev_source_status AFTER UPDATE OF status ON relay_import_source
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
  AND OLD.status IS NOT NEW.status
  AND NOT (OLD.status IN ('importing','staged') AND NEW.status='verified')
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_units_ins;
 CREATE TRIGGER IF NOT EXISTS relay_rev_units_ins AFTER INSERT ON relay_import_units
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_units_upd;
 CREATE TRIGGER IF NOT EXISTS relay_rev_units_upd AFTER UPDATE ON relay_import_units
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_units_del;
 CREATE TRIGGER IF NOT EXISTS relay_rev_units_del AFTER DELETE ON relay_import_units
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_manifest_ins;
 CREATE TRIGGER IF NOT EXISTS relay_rev_manifest_ins AFTER INSERT ON relay_manifest
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_manifest_upd;
 CREATE TRIGGER IF NOT EXISTS relay_rev_manifest_upd AFTER UPDATE ON relay_manifest
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_manifest_del;
 CREATE TRIGGER IF NOT EXISTS relay_rev_manifest_del AFTER DELETE ON relay_manifest
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_fields_upd;
 CREATE TRIGGER IF NOT EXISTS relay_rev_fields_upd AFTER UPDATE ON relay_source_fields
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_fields_del;
 CREATE TRIGGER IF NOT EXISTS relay_rev_fields_del AFTER DELETE ON relay_source_fields
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_cursors_del;
 CREATE TRIGGER IF NOT EXISTS relay_rev_cursors_del AFTER DELETE ON relay_cursors
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_processed_upd;
 CREATE TRIGGER IF NOT EXISTS relay_rev_processed_upd AFTER UPDATE ON relay_processed
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_processed_del;
 CREATE TRIGGER IF NOT EXISTS relay_rev_processed_del AFTER DELETE ON relay_processed
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_events_del;
 CREATE TRIGGER IF NOT EXISTS relay_rev_events_del AFTER DELETE ON relay_events
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_intents_del;
 CREATE TRIGGER IF NOT EXISTS relay_rev_intents_del AFTER DELETE ON relay_reply_intents
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_sidecar_ins;
 CREATE TRIGGER IF NOT EXISTS relay_rev_sidecar_ins AFTER INSERT ON relay_sidecar
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_sidecar_upd;
 CREATE TRIGGER IF NOT EXISTS relay_rev_sidecar_upd AFTER UPDATE ON relay_sidecar
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+DROP TRIGGER IF EXISTS relay_rev_sidecar_del;
 CREATE TRIGGER IF NOT EXISTS relay_rev_sidecar_del AFTER DELETE ON relay_sidecar
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
@@ -1300,7 +1334,9 @@ function M.open(opts)
         total = total + #rows
         remaining = remaining - #rows
         local last = tostring(rows[#rows].key)
-        local done = #rows < requested and 1 or 0
+        -- A raw unit holds one exact token; it is complete even when its row
+        -- filled the remaining batch budget, so it must not be re-read.
+        local done = (#rows < requested or unit.kind == 'raw') and 1 or 0
         -- A short page is the last page. A full page stays resumable; the
         -- next call observes an empty page and closes the unit.
         local update = exec(db,
@@ -1570,6 +1606,45 @@ function M.open(opts)
     return rows[1].chunk, tonumber(rows[1].bytes) or 0
   end
 
+  -- Every retained sealed baseline must still have its live original. This is
+  -- the sealed-baseline -> source reverse direction; deleting both the manifest
+  -- and import_source rows must not drop a witnessed original from the proof.
+  local function sealed_baseline_ok()
+    local witnesses, why = query(db,
+      'SELECT source_id,kind,role,stamp,bytes,raw_sha256 FROM relay_verify_witness ' ..
+        'WHERE store_id=? ORDER BY source_id,kind', { store.store_id })
+    if not witnesses then return nil, why end
+    for _, witness in ipairs(witnesses) do
+      if witness.kind == 'source' then
+        local live, live_why = query(db,
+          'SELECT role,stamp,bytes,raw_sha256 FROM relay_import_source WHERE source_id=?',
+          { witness.source_id })
+        if not live then return nil, live_why end
+        local source = live[1]
+        if not source or source.role ~= witness.role
+            or (source.stamp or '') ~= (witness.stamp or '')
+            or tonumber(source.bytes) ~= tonumber(witness.bytes)
+            or source.raw_sha256 ~= witness.raw_sha256 then
+          return nil, 'source_missing:' .. witness.source_id
+        end
+        local manifest, manifest_why = query(db,
+          'SELECT role,stamp FROM relay_manifest WHERE source_id=?', { witness.source_id })
+        if not manifest then return nil, manifest_why end
+        if not manifest[1] or manifest[1].role ~= witness.role
+            or (manifest[1].stamp or '') ~= (witness.stamp or '') then
+          return nil, 'manifest_missing:' .. witness.source_id
+        end
+      else
+        local live, live_why = query(db,
+          'SELECT 1 AS ok FROM relay_sidecar WHERE source_id=? AND raw_sha256=? LIMIT 1',
+          { witness.source_id, witness.raw_sha256 })
+        if not live then return nil, live_why end
+        if not live[1] then return nil, 'sidecar_missing:' .. witness.source_id end
+      end
+    end
+    return true
+  end
+
   -- WITNESS is a persisted one-chunk-per-call rehash. It never inserts or
   -- replaces a baseline; a missing baseline refuses the unsealed source.
   local function witness_step(p, auth, max_bytes)
@@ -1588,7 +1663,10 @@ function M.open(opts)
       end
       local witness = primary and lookup_witness(primary.source_id, 'source')
       if not primary or not witness then return fail('source_witness_missing') end
-      p.witness_id, p.phase, p.phase_cursor = witness.witness_id, 'source_rows', 'meta'
+      local sealed, sealed_why = sealed_baseline_ok()
+      if not sealed then return fail('import_incomplete', sealed_why) end
+      p.witness_id, p.phase, p.phase_cursor = witness.witness_id, 'source_rows',
+        encode({ task = 'keys', key = '' })
       p.unit_id, p.cursor = nil, nil
       p.processed_rows, p.bytes, p.nodes = 0, 0, 0
       return { count = 0 }
@@ -1608,6 +1686,14 @@ function M.open(opts)
     local chunk_size = tonumber(witness.chunk_size) or limits.digest_chunk_bytes
     if chunk_size < 1 or chunk_size > limits.digest_chunk_bytes then
       return fail('witness_chunk')
+    end
+    if input.bytes == 0 then
+      local final_input = 'butler-relay-source-v1\0' .. '0\0'
+      local digest, digest_why = invoke(opts.digest.sha256, final_input)
+      if type(digest) ~= 'string' then return fail('witness_digest', digest_why) end
+      if digest ~= witness.raw_sha256 then return fail('source_changed') end
+      p.phase_cursor = encode({ index = index + 1, offset = 0, chunks = '' })
+      return { count = 0, bytes = 0 }
     end
     if offset < input.bytes and max_bytes < chunk_size then
       return fail('budget_too_small')
@@ -1639,6 +1725,120 @@ function M.open(opts)
     return { count = 0, bytes = #chunk }
   end
 
+  local function source_field_matches(primary, path, parent_key, kind, count)
+    local rows, why = query(db,
+      'SELECT kind,count FROM relay_source_fields WHERE source_id=? AND path=?',
+      { primary.source_id, path })
+    if not rows then return nil, why end
+    local row = rows[1]
+    if not row then return nil, 'field_missing:' .. path end
+    if row.kind ~= kind then return nil, 'field_kind:' .. path end
+    if tonumber(row.count) ~= count then return nil, 'field_count:' .. path end
+    return true
+  end
+
+  local function source_unit_matches(primary, root_field, kind, parent_key, nested, expected)
+    local rows, why = query(db,
+      'SELECT count(*) AS n FROM relay_import_units WHERE source_id=? AND root_field=? ' ..
+        'AND kind=? AND parent_key=? AND nested=? AND expected=?',
+      { primary.source_id, root_field, kind, parent_key or '', nested, expected })
+    if not rows then return nil, why end
+    local n = tonumber(rows[1].n) or 0
+    if n ~= 1 then
+      return nil, 'unit_missing:' .. root_field .. '/' .. tostring(parent_key or '') ..
+        '/' .. tostring(n)
+    end
+    return true
+  end
+
+  -- Original-source domain coverage, paged over json_each with a bounded key
+  -- cursor. Every original root key must have its exact source field, and
+  -- every original nonempty collection must have its exact import unit. Stored
+  -- units/fields are not trusted to enumerate themselves.
+  local function domain_step(p, primary, max_rows)
+    local cursor = p.phase_cursor and decode(p.phase_cursor) or nil
+    if type(cursor) ~= 'table' then cursor = { task = 'keys', key = '' } end
+    if cursor.task == 'rooms' then
+      local parent = cursor.parent
+      local expected_kind = KNOWN[parent] == 'nested_array' and 'array' or 'object'
+      local rows, why = query(db,
+        'SELECT e.key AS room_key,e.type AS room_kind,' ..
+          'CASE WHEN e.type IN (\'object\',\'array\') ' ..
+          'THEN (SELECT count(*) FROM json_each(e.value)) ELSE 0 END AS children ' ..
+          'FROM relay_import_source s,json_each(s.raw) p,json_each(p.value) e ' ..
+          'WHERE s.source_id=? AND p.key=? AND CAST(e.key AS BLOB)>CAST(? AS BLOB) ' ..
+          'ORDER BY CAST(e.key AS BLOB) LIMIT ?',
+        { primary.source_id, parent, cursor.room_key or '', max_rows })
+      if not rows then return fail('domain', why) end
+      for _, row in ipairs(rows) do
+        if row.room_kind == expected_kind then
+          local n = tonumber(row.children) or 0
+          local path = '$.' .. parent .. '/' .. tostring(row.room_key)
+          local field_ok, field_why = source_field_matches(primary, path,
+            row.room_key, expected_kind, n)
+          if not field_ok then return fail('import_incomplete', field_why) end
+          if n > 0 then
+            local unit_ok, unit_why = source_unit_matches(primary, parent,
+              expected_kind, row.room_key, 1, n)
+            if not unit_ok then return fail('import_incomplete', unit_why) end
+          end
+        end
+      end
+      if #rows == max_rows then
+        p.phase_cursor = encode({ task = 'rooms', parent = parent,
+          room_key = rows[#rows].room_key })
+      else
+        p.phase_cursor = encode({ task = 'keys', key = parent })
+      end
+      return { count = #rows }
+    end
+    if cursor.task ~= 'keys' then return fail('domain_state') end
+    local rows, why = query(db,
+      'SELECT e.key AS key,e.type AS kind,' ..
+        'CASE WHEN e.type IN (\'object\',\'array\') ' ..
+        'THEN (SELECT count(*) FROM json_each(e.value)) ELSE 0 END AS children ' ..
+        'FROM relay_import_source s,json_each(s.raw) e ' ..
+        'WHERE s.source_id=? AND CAST(e.key AS BLOB)>CAST(? AS BLOB) ' ..
+        'ORDER BY CAST(e.key AS BLOB) LIMIT ?',
+      { primary.source_id, cursor.key or '', max_rows })
+    if not rows then return fail('domain', why) end
+    for _, row in ipairs(rows) do
+      local name, kind = row.key, row.kind
+      local n = tonumber(row.children) or 0
+      local path = '$.' .. name
+      local expected = KNOWN[name]
+      if expected == nil then
+        local field_ok, field_why = source_field_matches(primary, path, '', kind, 1)
+        if not field_ok then return fail('import_incomplete', field_why) end
+        local unit_ok, unit_why = source_unit_matches(primary, name, 'raw', '', 0, 1)
+        if not unit_ok then return fail('import_incomplete', unit_why) end
+      elseif expected == 'scalar' then
+        local field_ok, field_why = source_field_matches(primary, path, '', kind, 1)
+        if not field_ok then return fail('import_incomplete', field_why) end
+      elseif expected == 'array' or expected == 'map' then
+        local field_ok, field_why = source_field_matches(primary, path, '', kind, n)
+        if not field_ok then return fail('import_incomplete', field_why) end
+        if n > 0 then
+          local unit_ok, unit_why = source_unit_matches(primary, name, kind, '', 0, n)
+          if not unit_ok then return fail('import_incomplete', unit_why) end
+        end
+      else
+        local field_ok, field_why = source_field_matches(primary, path, '', kind, n)
+        if not field_ok then return fail('import_incomplete', field_why) end
+        if n > 0 then
+          p.phase_cursor = encode({ task = 'rooms', parent = name, room_key = '' })
+          return { count = #rows }
+        end
+      end
+    end
+    if #rows == max_rows then
+      p.phase_cursor = encode({ task = 'keys', key = rows[#rows].key })
+    else
+      p.phase_cursor = encode({ task = 'cursors' })
+    end
+    return { count = #rows }
+  end
+
   local function cursor_parity(primary)
     local scopes = { { scope = 'sync', path = '$.since' },
       { scope = 'messages', path = '$.messages_since' } }
@@ -1668,62 +1868,124 @@ function M.open(opts)
     return true
   end
 
-  local function structure_parity(primary)
-    local cursor_ok, cursor_why = cursor_parity(primary)
-    if not cursor_ok then return nil, cursor_why end
-    -- Units define enumeration; each must have an original source collection.
-    local units, unit_why = query(db,
-      'SELECT unit_id,root_field,kind,parent_key,nested,expected FROM relay_import_units ' ..
-        'WHERE source_id=? ORDER BY unit_id', { primary.source_id })
-    if not units then return nil, unit_why end
-    for _, unit in ipairs(units) do
-      local path = '$.' .. unit.root_field
+  local function structure_unit_ok(primary, unit)
+    local path = '$.' .. unit.root_field
+    local expected = tonumber(unit.expected) or 0
+    if expected < 1 then return nil, 'unit' end
+    local domain = KNOWN[unit.root_field]
+    if unit.kind == 'raw' then
+      if domain ~= nil or expected ~= 1 then return nil, 'unit' end
       local field, field_why = query(db,
         'SELECT type FROM relay_import_source s,json_each(s.raw) e ' ..
           'WHERE s.source_id=? AND e.key=?', { primary.source_id, unit.root_field })
       if not field then return nil, field_why end
       if not field[1] then return nil, 'unit' end
-      local expected = tonumber(unit.expected) or 0
-      if unit.kind == 'raw' then
-        if expected ~= 1 then return nil, 'unit' end
-      elseif unit.nested == 1 then
-        local parent, parent_why = query(db,
-          'SELECT count(*) AS n FROM relay_import_source s,json_each(s.raw,?) r,' ..
-            'json_each(r.value) e WHERE s.source_id=? AND r.key=?',
-          { path, primary.source_id, unit.parent_key })
-        if not parent then return nil, parent_why end
-        if not parent[1] or tonumber(parent[1].n) ~= expected then return nil, 'unit' end
-      else
-        local counted, count_why = query(db,
-          'SELECT count(*) AS n FROM relay_import_source s,json_each(s.raw,?) e ' ..
-            'WHERE s.source_id=?', { path, primary.source_id })
-        if not counted then return nil, count_why end
-        if tonumber(counted[1].n) ~= expected then return nil, 'unit' end
-      end
-    end
-    -- Root source fields must match the original root types and counts.
-    local fields, fields_why = query(db,
-      'SELECT path,parent_key,kind,count FROM relay_source_fields WHERE source_id=? ' ..
-        'ORDER BY path', { primary.source_id })
-    if not fields then return nil, fields_why end
-    for _, field in ipairs(fields) do
-      if field.path == '$' then
-        if field.kind ~= 'object' then return nil, 'field' end
-        local counted, count_why = query(db,
-          'SELECT count(*) AS n FROM relay_import_source s,json_each(s.raw) e WHERE s.source_id=?',
-          { primary.source_id })
-        if not counted then return nil, count_why end
-        if tonumber(counted[1].n) ~= tonumber(field.count) then return nil, 'field' end
-      elseif not field.path:find('/', 1, true) then
-        local name = field.path:sub(3)
-        local actual, actual_why = query(db,
-          'SELECT type FROM relay_import_source s,json_each(s.raw) e ' ..
-            'WHERE s.source_id=? AND e.key=?', { primary.source_id, name })
-        if not actual then return nil, actual_why end
-        if not actual[1] or actual[1].type ~= field.kind then return nil, 'field' end
-      end
+    elseif unit.nested == 1 then
+      local child_kind = domain == 'nested_array' and 'array'
+        or (domain == 'nested_map' and 'object' or nil)
+      if not child_kind or unit.kind ~= child_kind then return nil, 'unit' end
+      local parent, parent_why = query(db,
+        'SELECT count(*) AS n FROM relay_import_source s,json_each(s.raw,?) r,' ..
+          'json_each(r.value) e WHERE s.source_id=? AND r.key=? AND r.type=?',
+        { path, primary.source_id, unit.parent_key, child_kind })
+      if not parent then return nil, parent_why end
+      if not parent[1] or tonumber(parent[1].n) ~= expected then return nil, 'unit' end
+    else
+      local root_kind = domain == 'array' and 'array'
+        or (domain == 'map' and 'object' or nil)
+      if not root_kind or unit.kind ~= root_kind
+          or (unit.parent_key or '') ~= '' then return nil, 'unit' end
+      local counted, count_why = query(db,
+        'SELECT count(*) AS n FROM relay_import_source s,json_each(s.raw,?) e ' ..
+          'WHERE s.source_id=?', { path, primary.source_id })
+      if not counted then return nil, count_why end
+      if tonumber(counted[1].n) ~= expected then return nil, 'unit' end
     end
     return true
+  end
+
+  local function structure_field_ok(primary, field)
+    if field.path == '$' then
+      if field.kind ~= 'object' then return nil, 'field' end
+      local counted, count_why = query(db,
+        'SELECT count(*) AS n FROM relay_import_source s,json_each(s.raw) e WHERE s.source_id=?',
+        { primary.source_id })
+      if not counted then return nil, count_why end
+      if tonumber(counted[1].n) ~= tonumber(field.count) then return nil, 'field' end
+    elseif not field.path:find('/', 1, true) then
+      local name = field.path:sub(3)
+      local actual, actual_why = query(db,
+        'SELECT type FROM relay_import_source s,json_each(s.raw) e ' ..
+          'WHERE s.source_id=? AND e.key=?', { primary.source_id, name })
+      if not actual then return nil, actual_why end
+      if not actual[1] or actual[1].type ~= field.kind then return nil, 'field' end
+    else
+      local slash = field.path:find('/', 3, true)
+      local root = field.path:sub(3, slash - 1)
+      local room = field.path:sub(slash + 1)
+      if not KNOWN[root] or (KNOWN[root] ~= 'nested_array'
+          and KNOWN[root] ~= 'nested_map') then return nil, 'field' end
+      local actual, actual_why = query(db,
+        'SELECT r.type AS kind,' ..
+          'CASE WHEN r.type IN (\'object\',\'array\') ' ..
+          'THEN (SELECT count(*) FROM json_each(r.value)) ELSE 0 END AS n ' ..
+          'FROM relay_import_source s,json_each(s.raw) p,json_each(p.value) r ' ..
+          'WHERE s.source_id=? AND p.key=? AND r.key=?',
+        { primary.source_id, root, room })
+      if not actual then return nil, actual_why end
+      if not actual[1] or actual[1].kind ~= field.kind
+          or tonumber(actual[1].n) ~= tonumber(field.count)
+          or (field.parent_key or '') ~= room then return nil, 'field' end
+    end
+    return true
+  end
+
+  -- Structure parity is paged with the same bounded cursor: units then fields.
+  -- It proves stored units/fields map back to the original domain exactly.
+  local function structure_step(p, primary, max_rows)
+    local cursor = p.phase_cursor and decode(p.phase_cursor) or nil
+    if type(cursor) ~= 'table' then cursor = { task = 'cursors' } end
+    if cursor.task == 'cursors' then
+      local cursor_ok, cursor_why = cursor_parity(primary)
+      if not cursor_ok then return nil, cursor_why end
+      p.phase_cursor = encode({ task = 'units', unit_id = 0 })
+      return { count = 0 }
+    end
+    if cursor.task == 'units' then
+      local rows, why = query(db,
+        'SELECT unit_id,root_field,kind,parent_key,nested,expected ' ..
+          'FROM relay_import_units WHERE source_id=? AND unit_id>? ORDER BY unit_id LIMIT ?',
+        { primary.source_id, tonumber(cursor.unit_id) or 0, max_rows })
+      if not rows then return nil, why end
+      for _, unit in ipairs(rows) do
+        local ok, unit_why = structure_unit_ok(primary, unit)
+        if not ok then return nil, unit_why end
+      end
+      if #rows == max_rows then
+        p.phase_cursor = encode({ task = 'units', unit_id = rows[#rows].unit_id })
+      else
+        p.phase_cursor = encode({ task = 'fields', path = '' })
+      end
+      return { count = #rows }
+    end
+    if cursor.task == 'fields' then
+      local rows, why = query(db,
+        'SELECT path,parent_key,kind,count FROM relay_source_fields ' ..
+          'WHERE source_id=? AND path>? ORDER BY path LIMIT ?',
+        { primary.source_id, cursor.path or '', max_rows })
+      if not rows then return nil, why end
+      for _, field in ipairs(rows) do
+        local ok, field_why = structure_field_ok(primary, field)
+        if not ok then return nil, field_why end
+      end
+      if #rows == max_rows then
+        p.phase_cursor = encode({ task = 'fields', path = rows[#rows].path })
+      else
+        p.phase_cursor = nil
+      end
+      return { count = #rows }
+    end
+    return nil, 'structure_state'
   end
 
   local function reverse_origin(unit, row)
@@ -1753,31 +2015,49 @@ function M.open(opts)
     return found[1] ~= nil
   end
 
+  local function reverse_unit(namespace, parent_key, primary)
+    local root_field = namespace
+    local want_raw = false
+    if namespace:sub(1, 8) == 'unknown:' then
+      root_field = namespace:sub(9)
+      want_raw = true
+    end
+    local units, why = query(db,
+      'SELECT unit_id,expected FROM relay_import_units ' ..
+        'WHERE source_id=? AND root_field=? AND parent_key=? AND kind' ..
+        (want_raw and '=\'raw\'' or '<>\'raw\'') .. ' LIMIT 2',
+      { primary.source_id, root_field, parent_key or '' })
+    if not units then return nil, why end
+    return units
+  end
+
   local function reverse_step(p, primary, max_rows)
     local cursor = p.phase_cursor and decode(p.phase_cursor) or nil
     if type(cursor) ~= 'table' then cursor = { task = 'records' } end
     if cursor.task == 'records' then
-      -- Exact reverse completeness without per-row JSON rescans: forward
-      -- SOURCE_ROWS already proved every original key/ordinal has its exact
-      -- target row. A per-namespace/parent target count vs the original
-      -- expected count then proves there is no extra row (PKs are unique).
-      local after = cursor
-      local groups, why = query(db,
-        'SELECT namespace,parent_key,count(*) AS n FROM relay_records ' ..
-          'WHERE (namespace,parent_key) > (?,?) ' ..
-          'GROUP BY namespace,parent_key ORDER BY namespace,parent_key LIMIT ?',
-        { after.namespace or '', after.parent_key or '', max_rows })
+      -- Exact namespace/parent injectivity: every target group must map to one
+      -- exact canonical unit, never an unknown: alias of a real domain. The
+      -- first page starts before the empty namespace so ('','') is inspected.
+      local groups, why
+      if cursor.namespace == nil then
+        groups, why = query(db,
+          'SELECT namespace,parent_key,count(*) AS n FROM relay_records ' ..
+            'GROUP BY namespace,parent_key ORDER BY namespace,parent_key LIMIT ?',
+          { max_rows })
+      else
+        groups, why = query(db,
+          'SELECT namespace,parent_key,count(*) AS n FROM relay_records ' ..
+            'WHERE (namespace,parent_key) > (?,?) ' ..
+            'GROUP BY namespace,parent_key ORDER BY namespace,parent_key LIMIT ?',
+          { cursor.namespace, cursor.parent_key or '', max_rows })
+      end
       if not groups then return fail('reverse', why) end
       for _, group in ipairs(groups) do
-        local root_field = group.namespace
-        if group.namespace:sub(1, 8) == 'unknown:' then root_field = group.namespace:sub(9) end
-        local unit, unit_why = query(db,
-          'SELECT unit_id,expected FROM relay_import_units ' ..
-            'WHERE source_id=? AND root_field=? AND parent_key=? LIMIT 1',
-          { primary.source_id, root_field, group.parent_key or '' })
-        if not unit then return fail('reverse', unit_why) end
-        if not unit[1] then return fail('import_incomplete', 'extra_record') end
-        if tonumber(group.n) ~= tonumber(unit[1].expected) then
+        local units, unit_why = reverse_unit(group.namespace, group.parent_key, primary)
+        if not units then return fail('reverse', unit_why) end
+        if #units == 0 then return fail('import_incomplete', 'extra_record') end
+        if #units > 1 then return fail('import_incomplete', 'duplicate_unit') end
+        if tonumber(group.n) ~= tonumber(units[1].expected) then
           return fail('import_incomplete', 'record_coverage')
         end
       end
@@ -1797,6 +2077,17 @@ function M.open(opts)
         { primary.source_id, tonumber(cursor.unit_id) or 0, max_rows })
       if not rows then return fail('reverse', why) end
       for _, unit in ipairs(rows) do
+        -- Canonical target domain, including an expected=0 domain that can
+        -- never appear in the target-group page.
+        local namespace = unit.kind == 'raw' and ('unknown:' .. unit.root_field)
+          or unit.root_field
+        local counted, count_why = query(db,
+          'SELECT count(*) AS n FROM relay_records WHERE namespace=? AND parent_key=?',
+          { namespace, unit.parent_key or '' })
+        if not counted then return fail('reverse', count_why) end
+        if tonumber(counted[1].n) ~= tonumber(unit.expected) then
+          return fail('import_incomplete', 'record_coverage')
+        end
         local path = '$.' .. unit.root_field
         local found, found_why
         if unit.nested == 1 then
@@ -1865,9 +2156,10 @@ function M.open(opts)
         'OR e.room_id<>COALESCE(json_extract(r.payload_json,\'$.room_id\'),\'\') ' ..
         'OR e.source_key<>?||\'|\'||COALESCE(json_extract(r.payload_json,\'$.room_id\'),\'\')||\'|\'||r.record_key||\'|butler\' ' ..
         'OR (e.state=\'delivered\' AND NOT EXISTS (SELECT 1 FROM relay_sidecar sc ' ..
-          'WHERE sc.kind IN (\'acks\',\'drain\') AND instr(char(10)||sc.raw||char(10),char(10)||e.event_id||char(10))>0)) ' ..
+          'WHERE sc.kind IN (\'acks\',\'drain\') AND instr(char(10)||replace(sc.raw,char(13)||char(10),char(10))||char(10),char(10)||e.event_id||char(10))>0)) ' ..
         'OR (e.state=\'pending\' AND EXISTS (SELECT 1 FROM relay_sidecar sc ' ..
-          'WHERE sc.kind IN (\'acks\',\'drain\') AND instr(char(10)||sc.raw||char(10),char(10)||e.event_id||char(10))>0)) ' ..
+          'WHERE sc.kind IN (\'acks\',\'drain\') AND instr(char(10)||replace(sc.raw,char(13)||char(10),char(10))||char(10),char(10)||e.event_id||char(10))>0)) ' ..
+        'OR e.inbox_mail_id IS NOT NULL ' ..
         'OR e.state NOT IN (\'pending\',\'delivered\'))',
       { identity.account_id })
     if not bad then return fail('derived', why) end
@@ -1887,8 +2179,21 @@ function M.open(opts)
         'OR i.txn_id IS NOT (CASE WHEN json_type(r.payload_json,\'$.txn_id\')=\'text\' ' ..
           'AND json_extract(r.payload_json,\'$.txn_id\')<>\'\' ' ..
           'THEN json_extract(r.payload_json,\'$.txn_id\') ELSE NULL END) ' ..
-        'OR i.attempts IS NOT (CASE WHEN json_type(r.payload_json,\'$.attempts\')=\'integer\' ' ..
-          'THEN json_extract(r.payload_json,\'$.attempts\') ELSE NULL END))', {})
+        'OR i.attempts IS NOT (CASE ' ..
+          'WHEN json_type(r.payload_json,\'$.attempts\')=\'integer\' ' ..
+            'THEN json_extract(r.payload_json,\'$.attempts\') ' ..
+          'WHEN json_type(r.payload_json,\'$.attempts\')=\'real\' ' ..
+            'AND json_extract(r.payload_json,\'$.attempts\')=' ..
+              'CAST(json_extract(r.payload_json,\'$.attempts\') AS INTEGER) ' ..
+            'THEN CAST(json_extract(r.payload_json,\'$.attempts\') AS INTEGER) ' ..
+          'WHEN json_type(r.payload_json,\'$.attempts\')=\'text\' ' ..
+            'AND (trim(json_extract(r.payload_json,\'$.attempts\')) GLOB \'[0-9]*\' ' ..
+              'OR trim(json_extract(r.payload_json,\'$.attempts\')) GLOB \'-[0-9]*\' ' ..
+              'OR trim(json_extract(r.payload_json,\'$.attempts\')) GLOB \'+[0-9]*\') ' ..
+            'AND CAST(json_extract(r.payload_json,\'$.attempts\') AS REAL)=' ..
+              'CAST(json_extract(r.payload_json,\'$.attempts\') AS INTEGER) ' ..
+            'THEN CAST(json_extract(r.payload_json,\'$.attempts\') AS INTEGER) ' ..
+          'ELSE NULL END))', {})
     if not bad then return fail('derived', why) end
     if bad ~= 0 then return mismatch('intent') end
     bad, why = check(
@@ -2009,12 +2314,23 @@ function M.open(opts)
       result = { count = stepped.count or 0, bytes = stepped.bytes or 0, nodes = 0,
         state = 'backlog', phase = p.phase }
     elseif p.phase == 'source_rows' then
+      local cursor_state = p.phase_cursor and decode(p.phase_cursor) or nil
       if p.phase_cursor == 'meta' then
-        local structure, structure_why = structure_parity(primary)
-        if not structure then rollback(db); return fail('import_incomplete', structure_why) end
-        p.phase_cursor = nil
+        p.phase_cursor = encode({ task = 'cursors' })
         result = { count = 0, bytes = 0, nodes = 0, state = 'backlog',
           phase = 'source_rows' }
+      elseif type(cursor_state) == 'table'
+          and (cursor_state.task == 'cursors' or cursor_state.task == 'units'
+            or cursor_state.task == 'fields') then
+        local stepped, step_why = structure_step(p, primary, max_rows)
+        if not stepped then rollback(db); return fail('import_incomplete', step_why) end
+        result = { count = stepped.count or 0, bytes = 0, nodes = 0,
+          state = 'backlog', phase = 'source_rows' }
+      elseif type(cursor_state) == 'table' then
+        local stepped, step_why = domain_step(p, primary, max_rows)
+        if not stepped then rollback(db); return nil, step_why end
+        result = { count = stepped.count or 0, bytes = 0, nodes = 0,
+          state = 'backlog', phase = 'source_rows' }
       else
         local processed_this, bytes_this, nodes_this = 0, 0, 0
         local total_rows = tonumber(p.processed_rows) or 0
@@ -2088,7 +2404,9 @@ function M.open(opts)
             bytes_this, nodes_this = bytes_this + prefix_bytes, nodes_this + prefix_nodes
             total_bytes, total_nodes = total_bytes + prefix_bytes, total_nodes + prefix_nodes
             if fits < #meta then break end
-            if #meta < limit then
+            -- A raw unit is one exact source token, so it is exhausted after
+            -- its single row even when that row filled the page limit.
+            if #meta < limit or unit.kind == 'raw' then
               units_this = units_this + 1
               local next_unit, next_why = query(db,
                 'SELECT min(unit_id) AS id FROM relay_import_units WHERE source_id=? AND unit_id>?',
