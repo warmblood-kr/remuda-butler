@@ -111,6 +111,8 @@ local function valid_delta(delta)
         or type(op.second_chain) ~= "string" then
         return false, "ready"
       end
+    elseif op.op == "invalid" then
+      if not nonempty(op.reason) then return false, "invalid" end
     else
       return false, "delta"
     end
@@ -156,7 +158,7 @@ local function schema_ready(self)
     "SELECT MAX(version) AS version FROM _remuda_migrations", {})
   if not versions then return nil, "schema_unavailable" end
   local version = versions[1] and tonumber(versions[1].version) or 0
-  if version > 2 then return nil, "schema_too_new" end
+  if version > 3 then return nil, "schema_too_new" end
   return true
 end
 
@@ -266,6 +268,11 @@ local function add_delta(self, recipient, generation, op)
   if op.op == "ready" then
     return self:ready(recipient, generation, op)
   end
+  if op.op == "invalid" then
+    -- The generation is marked unusable by the cursor phase that is committed
+    -- with this delta; no staging row is written or deleted.
+    return true
+  end
   return nil, "invalid_snapshot"
 end
 
@@ -297,8 +304,8 @@ local function load(self, root, recipient)
   if root ~= self.root then return fail("invalid_snapshot", "root") end
   if not is_hex(recipient) then return fail("invalid_snapshot", "recipient") end
   local rows, err = checked_query(self.db,
-    "SELECT generation, revision, cursor_json FROM progress_state WHERE recipient = ?",
-    { recipient })
+    "SELECT generation, revision, cursor_json FROM progress_state "
+      .. "WHERE root = ? AND recipient = ?", { root, recipient })
   if not rows then return fail("unavailable", nil, err) end
   if #rows == 0 then return fail("not_found") end
   local ok, cursor = pcall(self.json.decode, rows[1].cursor_json)
@@ -316,6 +323,8 @@ local function commit(self, root, recipient, expected_revision, next_state, delt
   if not valid_cursor(next_state) then return fail("invalid_snapshot", "cursor") end
   local ok, field = valid_delta(delta)
   if not ok then return fail("invalid_snapshot", field) end
+  local length = dense_length(delta)
+  if length > self.max_stage_records then return fail("invalid_snapshot", "delta") end
   local encoded_ok, encoded = pcall(self.json.encode, next_state)
   if not encoded_ok or type(encoded) ~= "string" then
     return fail("invalid_snapshot", "cursor")
@@ -330,7 +339,8 @@ local function commit(self, root, recipient, expected_revision, next_state, delt
       expected_revision = expected_revision, next_revision = expected_revision + 1 }
   end
   local state_rows, state_err = checked_query(self.db,
-    "SELECT generation, revision FROM progress_state WHERE recipient = ?", { recipient })
+    "SELECT generation, revision FROM progress_state WHERE root = ? AND recipient = ?",
+    { root, recipient })
   if not state_rows then
     local uncertain = rollback()
     if uncertain then return nil, uncertain end
@@ -349,7 +359,6 @@ local function commit(self, root, recipient, expected_revision, next_state, delt
     if uncertain then return nil, uncertain end
     return fail("stale_generation")
   end
-  local length = dense_length(delta)
   for index = 1, length do
     local applied, why = add_delta(self, recipient, generation, delta[index])
     if not applied then
@@ -363,8 +372,8 @@ local function commit(self, root, recipient, expected_revision, next_state, delt
   end
   if exists then
     local updated, update_why = checked_exec(self.db,
-      "UPDATE progress_state SET revision = revision + 1, cursor_json = ? WHERE recipient = ?",
-      { encoded, recipient })
+      "UPDATE progress_state SET revision = revision + 1, cursor_json = ? "
+        .. "WHERE root = ? AND recipient = ?", { encoded, root, recipient })
     if not updated then
       local uncertain = rollback()
       if uncertain then return nil, uncertain end
@@ -372,8 +381,8 @@ local function commit(self, root, recipient, expected_revision, next_state, delt
     end
   else
     local inserted, insert_why = checked_exec(self.db,
-      "INSERT INTO progress_state (recipient, generation, revision, cursor_json) "
-        .. "VALUES (?, ?, 1, ?)", { recipient, generation, encoded })
+      "INSERT INTO progress_state (root, recipient, generation, revision, cursor_json) "
+        .. "VALUES (?, ?, ?, 1, ?)", { root, recipient, generation, encoded })
     if not inserted then
       local uncertain = rollback()
       if uncertain then return nil, uncertain end
@@ -388,6 +397,15 @@ local function commit(self, root, recipient, expected_revision, next_state, delt
   return { revision = expected_revision + 1 }
 end
 
+local function generation_known(self, root, recipient, generation)
+  local rows, err = checked_query(self.db,
+    "SELECT 1 AS present FROM progress_state "
+      .. "WHERE root = ? AND recipient = ? AND generation = ?",
+    { root, recipient, generation })
+  if not rows then return nil, err end
+  return #rows > 0
+end
+
 local function scan(self, root, recipient, generation, kind, after_key, limit)
   if root ~= self.root then return fail("invalid_snapshot", "root") end
   if not is_hex(recipient) or not nonempty(generation) then
@@ -397,14 +415,20 @@ local function scan(self, root, recipient, generation, kind, after_key, limit)
   if not is_integer(limit) or limit < 1 or limit > 256 then
     return fail("invalid_snapshot", "limit")
   end
+  local known, known_err = generation_known(self, root, recipient, generation)
+  if known == nil then return fail("unavailable", "generation", known_err) end
+  if not known then return fail("source_unreadable", "generation") end
   local fetch = limit + 1
   local rows, err
   if kind == "deliveries" then
     local after = tonumber(after_key) or 0
     rows, err = checked_query(self.db,
-      "SELECT message_id, seq, resent_json FROM progress_deliveries "
-        .. "WHERE recipient = ? AND generation = ? AND seq > ? ORDER BY seq LIMIT ?",
-      { recipient, generation, after, fetch })
+      "SELECT d.message_id, d.seq, d.resent_json, m.envelope_ref, m.object_ref, m.metadata "
+        .. "FROM progress_deliveries d LEFT JOIN progress_metadata m "
+        .. "ON m.recipient = d.recipient AND m.generation = d.generation "
+        .. "AND m.message_id = d.message_id "
+        .. "WHERE d.recipient = ? AND d.generation = ? AND d.seq > ? "
+        .. "ORDER BY d.seq LIMIT ?", { recipient, generation, after, fetch })
   elseif kind == "reads" then
     local after = type(after_key) == "string" and after_key or ""
     rows, err = checked_query(self.db,
@@ -414,7 +438,7 @@ local function scan(self, root, recipient, generation, kind, after_key, limit)
   elseif kind == "dependencies" then
     local after = type(after_key) == "string" and after_key or ""
     rows, err = checked_query(self.db,
-      "SELECT path FROM progress_dependencies "
+      "SELECT DISTINCT path FROM progress_dependencies "
         .. "WHERE recipient = ? AND generation = ? AND path > ? ORDER BY path LIMIT ?",
       { recipient, generation, after, fetch })
   elseif kind == "fileproofs" then
@@ -430,17 +454,18 @@ local function scan(self, root, recipient, generation, kind, after_key, limit)
         .. "ORDER BY path, pass LIMIT ?",
       { recipient, generation, after_path, after_path, after_pass, fetch })
   elseif kind == "chunkproofs" then
-    local after_path, after_offset = "", 0
+    local after_path, after_pass, after_offset = "", 0, 0
     if type(after_key) == "string" then
-      local path, offset = after_key:match("^(.*)\t(%d+)$")
-      if path then after_path, after_offset = path, tonumber(offset) end
+      local path, pass, offset = after_key:match("^(.*)\t(%d+)\t(%d+)$")
+      if path then after_path, after_pass, after_offset = path, tonumber(pass), tonumber(offset) end
     end
     rows, err = checked_query(self.db,
       "SELECT pass, path, offset, bytes, sha256, eof FROM progress_chunkproofs "
         .. "WHERE recipient = ? AND generation = ? "
-        .. "AND (path > ? OR (path = ? AND offset > ?)) "
-        .. "ORDER BY path, offset LIMIT ?",
-      { recipient, generation, after_path, after_path, after_offset, fetch })
+        .. "AND (path > ? OR (path = ? AND (pass > ? OR (pass = ? AND offset > ?)))) "
+        .. "ORDER BY path, pass, offset LIMIT ?",
+      { recipient, generation, after_path, after_path, after_pass, after_pass,
+        after_offset, fetch })
   end
   if not rows then return fail("unavailable", kind, err) end
   local complete = #rows <= limit
@@ -463,7 +488,8 @@ local function scan(self, root, recipient, generation, kind, after_key, limit)
     elseif kind == "reads" then next_key = last.message_id
     elseif kind == "dependencies" then next_key = last.path
     elseif kind == "fileproofs" then next_key = last.path .. "\t" .. tostring(last.pass)
-    elseif kind == "chunkproofs" then next_key = last.path .. "\t" .. tostring(last.offset)
+    elseif kind == "chunkproofs" then
+      next_key = last.path .. "\t" .. tostring(last.pass) .. "\t" .. tostring(last.offset)
     end
   end
   return { rows = out, next_key = next_key, complete = complete }
@@ -475,11 +501,17 @@ local function get(self, root, recipient, generation, kind, key)
     return fail("invalid_snapshot", "recipient")
   end
   if not GET_KINDS[kind] then return fail("invalid_snapshot", "kind") end
+  local known, known_err = generation_known(self, root, recipient, generation)
+  if known == nil then return fail("unavailable", "generation", known_err) end
+  if not known then return fail("source_unreadable", "generation") end
   local rows, err
   if kind == "delivery" then
     rows, err = checked_query(self.db,
-      "SELECT message_id, seq, resent_json FROM progress_deliveries "
-        .. "WHERE recipient = ? AND generation = ? AND message_id = ?",
+      "SELECT d.message_id, d.seq, d.resent_json, m.envelope_ref, m.object_ref, m.metadata "
+        .. "FROM progress_deliveries d LEFT JOIN progress_metadata m "
+        .. "ON m.recipient = d.recipient AND m.generation = d.generation "
+        .. "AND m.message_id = d.message_id "
+        .. "WHERE d.recipient = ? AND d.generation = ? AND d.message_id = ?",
       { recipient, generation, tostring(key) })
   elseif kind == "read" then
     rows, err = checked_query(self.db,
@@ -526,7 +558,15 @@ function M.open(config)
     or type(json.decode) ~= "function" then
     return fail("unavailable", "json")
   end
-  local self = setmetatable({ db = db, root = config.root, json = json }, Progress)
+  local max_records = 256
+  if config.max_stage_records ~= nil then
+    if not is_integer(config.max_stage_records) or config.max_stage_records < 1 then
+      return fail("invalid_snapshot", "max_stage_records")
+    end
+    max_records = config.max_stage_records
+  end
+  local self = setmetatable({ db = db, root = config.root, json = json,
+    max_stage_records = max_records }, Progress)
   local ready, why = schema_ready(self)
   if not ready then return fail(why) end
   return { load = function(root, recipient) return load(self, root, recipient) end,
