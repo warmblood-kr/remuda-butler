@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS relay_proof_state (
 CREATE TABLE IF NOT EXISTS relay_schema_state (
   singleton INTEGER PRIMARY KEY CHECK(singleton=1),
   trigger_fingerprint TEXT NOT NULL,
+  schema_version INTEGER NOT NULL DEFAULT 0,
   pending INTEGER NOT NULL DEFAULT 0 CHECK(pending IN(0,1))
 );
 CREATE TABLE IF NOT EXISTS relay_verify_witness (
@@ -358,7 +359,8 @@ local METHODS = {
 -- Bump whenever the verification semantics change. A READY certificate and
 -- activation are bound to this constant through relay_proof_state, so a cert
 -- produced by an older verifier cannot be reused even if triggers match.
-local PROOF_VERSION = 2
+local PROOF_VERSION = 3
+local SCHEMA_VERSION = 1
 
 local KNOWN = {
   since = 'scalar',
@@ -566,37 +568,56 @@ local function trigger_text(map)
 end
 
 local function ensure_schema(db)
-  -- Repair can only make the installed triggers match this build. A durable
-  -- pending marker is written before the invalidation bump, and a failed bump
-  -- also removes any checkpoint/certificate so a stale READY cannot survive a
-  -- later reopen where the trigger SQL already looks correct.
+  -- Pending publication comes BEFORE repair DDL when the state table already
+  -- exists. If the marker cannot be written, no trigger repair is applied, so
+  -- a later open still sees the old fingerprint and retries. When the table is
+  -- first created, a missing fingerprint row is itself the durable signal.
+  local existing, existing_why = query(db,
+    "SELECT 1 AS ok FROM sqlite_master WHERE type='table' AND name='relay_schema_state'")
+  if not existing then return fail('schema', existing_why) end
+  local had_state = existing[1] ~= nil
   local before, before_why = trigger_map(db)
   if not before then return fail('schema', before_why) end
   local before_text = trigger_text(before)
+  local stored = nil
+  if had_state then
+    local rows, stored_why = query(db,
+      'SELECT trigger_fingerprint,schema_version,pending FROM relay_schema_state ' ..
+        'WHERE singleton=1')
+    if not rows then return fail('schema', stored_why) end
+    stored = rows[1]
+  end
+  local repair = not had_state or not stored
+    or tonumber(stored.schema_version) ~= SCHEMA_VERSION
+    or tonumber(stored.pending or 0) == 1
+    or before_text ~= stored.trigger_fingerprint
+  if repair and had_state then
+    local marked, mark_why = exec(db,
+      'INSERT OR REPLACE INTO relay_schema_state ' ..
+        '(singleton,trigger_fingerprint,schema_version,pending) VALUES (1,?,?,1)',
+      { stored and stored.trigger_fingerprint or before_text, SCHEMA_VERSION })
+    if marked ~= 1 then return fail('schema', mark_why) end
+  end
   local ok, why = db:batch(SCHEMA)
   if not ok then return fail('schema', why) end
   local after, after_why = trigger_map(db)
   if not after then return fail('schema', after_why) end
-  local desired = trigger_text(after)
-  local stored, stored_why = query(db,
-    'SELECT trigger_fingerprint,pending FROM relay_schema_state WHERE singleton=1')
-  if not stored then return fail('schema', stored_why) end
-  local repaired = before_text ~= desired or not stored[1]
-    or stored[1].trigger_fingerprint ~= desired
-    or tonumber(stored[1].pending or 0) == 1
-  if repaired then
+  local after_text = trigger_text(after)
+  if repair or after_text ~= before_text then
+    if not had_state then
+      local marked, mark_why = exec(db,
+        'INSERT OR REPLACE INTO relay_schema_state ' ..
+          '(singleton,trigger_fingerprint,schema_version,pending) VALUES (1,?,?,1)',
+        { before_text, SCHEMA_VERSION })
+      if marked ~= 1 then return fail('schema', mark_why) end
+    end
     local authority, count_why = query(db,
       'SELECT count(*) AS n FROM relay_authority')
     if not authority then return fail('schema', count_why) end
     if tonumber(authority[1].n) > 0 then
-      local marked, mark_why = exec(db,
-        'INSERT OR REPLACE INTO relay_schema_state ' ..
-          '(singleton,trigger_fingerprint,pending) VALUES (1,?,1)', { desired })
-      if marked ~= 1 then return fail('schema', mark_why) end
       local called, changed, bump_why = pcall(exec, db,
         'UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1')
       if not called or tonumber(changed) ~= 1 then
-        -- Fail closed and durably remove the proof that could be stale.
         pcall(exec, db, 'DELETE FROM relay_verify_certificates')
         pcall(exec, db, 'DELETE FROM relay_verify_progress')
         return fail('schema', 'repair_invalidate: ' .. tostring(called and changed or bump_why))
@@ -604,7 +625,8 @@ local function ensure_schema(db)
     end
     local saved, save_why = exec(db,
       'INSERT OR REPLACE INTO relay_schema_state ' ..
-        '(singleton,trigger_fingerprint,pending) VALUES (1,?,0)', { desired })
+        '(singleton,trigger_fingerprint,schema_version,pending) VALUES (1,?,?,0)',
+      { after_text, SCHEMA_VERSION })
     if saved ~= 1 then return fail('schema', save_why) end
   end
   return true
@@ -2355,13 +2377,36 @@ function M.open(opts)
     if type(cursor) ~= 'table' or cursor.task ~= 'outbox' then
       return fail('derived_state')
     end
-    -- Metadata/scalar only: no payload JSON enters Lua and SQL decides payload
-    -- equality. The first page has no lower bound so a legal empty key is seen.
+    -- Scalars are bounded in SQL. Short attempts are fetched for the exact Lua
+    -- tonumber rule; long numeric-looking attempts become an explicit oversize
+    -- refusal, and other long values normalize to NULL without transfer. Txn
+    -- equality and payload equality stay in SQL; no payload enters Lua.
     local sql = 'SELECT r.record_key AS reply_id,' ..
-      'json_extract(r.payload_json,\'$.attempts\') AS attempts_raw,' ..
-      'json_extract(r.payload_json,\'$.txn_id\') AS txn_raw,' ..
+      'json_type(r.payload_json,\'$.attempts\') AS attempts_type,' ..
+      'length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB)) AS attempts_len,' ..
+      'CASE WHEN json_type(r.payload_json,\'$.attempts\')=\'true\' THEN 1 ' ..
+        'WHEN json_type(r.payload_json,\'$.attempts\')=\'false\' THEN 0 ' ..
+        'WHEN json_type(r.payload_json,\'$.attempts\') IN (\'integer\',\'real\') ' ..
+          'THEN json_extract(r.payload_json,\'$.attempts\') ' ..
+        'WHEN json_type(r.payload_json,\'$.attempts\')=\'text\' ' ..
+          'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))<=64 ' ..
+          'THEN json_extract(r.payload_json,\'$.attempts\') ' ..
+        'ELSE NULL END AS attempts_raw,' ..
+      'CASE WHEN json_type(r.payload_json,\'$.attempts\')=\'text\' ' ..
+        'AND length(CAST(json_extract(r.payload_json,\'$.attempts\') AS BLOB))>64 ' ..
+        'AND substr(json_extract(r.payload_json,\'$.attempts\'),1,2) NOT IN (\'0x\',\'0X\') ' ..
+        'AND json_extract(r.payload_json,\'$.attempts\') NOT GLOB \'*[^0-9eE+.-]*\' ' ..
+        'AND instr(json_extract(r.payload_json,\'$.attempts\'),char(9))=0 ' ..
+        'AND instr(json_extract(r.payload_json,\'$.attempts\'),char(10))=0 ' ..
+        'AND instr(json_extract(r.payload_json,\'$.attempts\'),char(13))=0 ' ..
+        'AND instr(json_extract(r.payload_json,\'$.attempts\'),char(32))=0 ' ..
+        'THEN 1 ELSE 0 END AS attempts_ambiguous,' ..
+      'CASE WHEN i.txn_id IS (CASE WHEN json_type(r.payload_json,\'$.txn_id\')=\'text\' ' ..
+        'AND json_extract(r.payload_json,\'$.txn_id\')<>\'\' ' ..
+        'THEN json_extract(r.payload_json,\'$.txn_id\') ELSE NULL END) ' ..
+        'THEN 1 ELSE 0 END AS txn_equal,' ..
       'i.reply_id AS intent_reply,i.imported AS imported,i.state AS state,' ..
-      'i.attempts AS attempts,i.txn_id AS txn_id,' ..
+      'i.attempts AS attempts,' ..
       'CASE WHEN i.payload_json=r.payload_json THEN 1 ELSE 0 END AS payload_equal ' ..
       'FROM relay_records r LEFT JOIN relay_reply_intents i ' ..
       'ON i.reply_id=r.record_key WHERE r.namespace=\'matrix_reply_outbox\''
@@ -2376,18 +2421,20 @@ function M.open(opts)
     if not rows then return fail('derived', why) end
     for _, row in ipairs(rows) do
       if row.intent_reply == nil or tonumber(row.payload_equal) ~= 1
-          or tonumber(row.imported) ~= 1 or row.state ~= 'uncertain' then
+          or tonumber(row.imported) ~= 1 or row.state ~= 'uncertain'
+          or tonumber(row.txn_equal) ~= 1 then
         return fail('import_incomplete', 'intent')
       end
-      local attempts = intent_attempts(row.attempts_raw)
-      local stored_attempts = row.attempts ~= nil and tonumber(row.attempts) or nil
-      if attempts ~= stored_attempts then
-        return fail('import_incomplete', 'intent')
-      end
-      local txn = row.txn_raw
-      if txn ~= nil and (type(txn) ~= 'string' or txn == '') then txn = nil end
-      if row.txn_id ~= txn then
-        return fail('import_incomplete', 'intent')
+      if row.attempts_type == 'text' and tonumber(row.attempts_len) > 64 then
+        if tonumber(row.attempts_ambiguous) == 1 then
+          return fail('import_incomplete', 'intent_oversize')
+        end
+      else
+        local attempts = intent_attempts(row.attempts_raw)
+        local stored_attempts = row.attempts ~= nil and tonumber(row.attempts) or nil
+        if attempts ~= stored_attempts then
+          return fail('import_incomplete', 'intent')
+        end
       end
     end
     if #rows == max_rows then
@@ -2397,6 +2444,17 @@ function M.open(opts)
     end
     p.phase_cursor = nil
     return { count = #rows, done = true }
+  end
+
+  local function certificate_id_for(verification_id, source_id, witness_id,
+      data_revision, rows, bytes, nodes, owner_id, epoch)
+    local stamp = store.store_id .. '\0' .. verification_id .. '\0' ..
+      source_id .. '\0' .. tostring(witness_id) .. '\0' ..
+      tostring(data_revision) .. '\0' .. tostring(rows) .. '\0' ..
+      tostring(bytes) .. '\0' .. tostring(nodes) .. '\0' ..
+      tostring(owner_id) .. '\0' .. tostring(epoch) .. '\0' ..
+      tostring(PROOF_VERSION)
+    return invoke(opts.digest.sha256, stamp)
   end
 
   function store:verify_import(options)
@@ -2457,10 +2515,25 @@ function M.open(opts)
           'FROM relay_verify_certificates WHERE certificate_id=?', { p.certificate_id })
       if not cert then return fail('verify', cert_why) end
       local c = cert[1]
-      if c and c.verification_id == verification_id and c.source_id == primary.source_id
+      local proof_store, proof_store_why = query(db,
+        'SELECT store_id FROM relay_proof_state WHERE verification_id=?',
+        { verification_id })
+      if not proof_store then return fail('verify', proof_store_why) end
+      local cert_ok = c ~= nil
+      if cert_ok then
+        local digest, digest_why = certificate_id_for(c.verification_id,
+          c.source_id, c.witness_id, c.data_revision, c.processed_rows,
+          c.bytes, c.nodes, c.owner_id, c.epoch)
+        if not digest then return fail('certificate', digest_why) end
+        cert_ok = digest == c.certificate_id
+          and c.certificate_id == p.certificate_id
+      end
+      if cert_ok and c.verification_id == verification_id
+          and c.source_id == primary.source_id
           and c.witness_id == p.witness_id
           and c.data_revision == auth.data_revision
           and c.owner_id == store.owner_id and c.epoch == store.epoch
+          and proof_store[1] and proof_store[1].store_id == store.store_id
           and protocol_current then
         return { verified = true, done = true, state = 'ready', count = 0,
           verification_id = verification_id, revision = p.revision,
@@ -2668,12 +2741,9 @@ function M.open(opts)
       local total_rows = tonumber(p.processed_rows) or 0
       local total_bytes = tonumber(p.bytes) or 0
       local total_nodes = tonumber(p.nodes) or 0
-      local cert_stamp = store.store_id .. '\0' .. verification_id .. '\0' ..
-        primary.source_id .. '\0' .. tostring(p.witness_id) .. '\0' ..
-        tostring(auth.data_revision) .. '\0' .. tostring(total_rows) .. '\0' ..
-        tostring(total_bytes) .. '\0' .. tostring(total_nodes) .. '\0' ..
-        tostring(store.owner_id) .. '\0' .. tostring(store.epoch)
-      local cert_id, cert_why = invoke(opts.digest.sha256, cert_stamp)
+      local cert_id, cert_why = certificate_id_for(verification_id,
+        primary.source_id, p.witness_id, auth.data_revision, total_rows,
+        total_bytes, total_nodes, store.owner_id, store.epoch)
       if type(cert_id) ~= 'string' then rollback(db); return fail('certificate', cert_why) end
       local cert_ok, cert_err = exec(db,
         'INSERT OR REPLACE INTO relay_verify_certificates ' ..
@@ -2774,9 +2844,9 @@ function M.open(opts)
       return fail('import_incomplete', 'certificate')
     end
     local certificates, cert_why = query(db,
-      'SELECT verification_id,source_id,witness_id,data_revision,owner_id,epoch ' ..
-        'FROM relay_verify_certificates WHERE certificate_id=?',
-      { checkpoint.certificate_id })
+      'SELECT certificate_id,verification_id,source_id,witness_id,data_revision,' ..
+        'processed_rows,bytes,nodes,owner_id,epoch FROM relay_verify_certificates ' ..
+        'WHERE certificate_id=?', { checkpoint.certificate_id })
     if not certificates then return fail('import_incomplete', cert_why) end
     local certificate = certificates[1]
     if not certificate or certificate.verification_id ~= verification_id
@@ -2788,12 +2858,21 @@ function M.open(opts)
       return fail('import_incomplete', 'certificate')
     end
     local proof_state, proof_state_why = query(db,
-      'SELECT proof_version FROM relay_proof_state WHERE verification_id=?',
+      'SELECT store_id,proof_version FROM relay_proof_state WHERE verification_id=?',
       { verification_id })
     if not proof_state then return fail('import_incomplete', proof_state_why) end
-    if not proof_state[1]
+    if not proof_state[1] or proof_state[1].store_id ~= store.store_id
         or tonumber(proof_state[1].proof_version) ~= PROOF_VERSION then
       return fail('import_incomplete', 'proof_version')
+    end
+    local cert_digest, cert_digest_why = certificate_id_for(
+      certificate.verification_id, certificate.source_id, certificate.witness_id,
+      certificate.data_revision, certificate.processed_rows, certificate.bytes,
+      certificate.nodes, certificate.owner_id, certificate.epoch)
+    if not cert_digest then return fail('certificate', cert_digest_why) end
+    if cert_digest ~= certificate.certificate_id
+        or certificate.certificate_id ~= checkpoint.certificate_id then
+      return fail('import_incomplete', 'certificate')
     end
     local raw = marker_encode(store.store_id, store.owner_id, store.epoch, auth.source_stamp)
     if not raw or #raw > limits.marker_bytes then return fail('marker_size') end

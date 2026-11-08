@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS relay_proof_state (
 CREATE TABLE IF NOT EXISTS relay_schema_state (
   singleton INTEGER PRIMARY KEY CHECK(singleton=1),
   trigger_fingerprint TEXT NOT NULL,
+  schema_version INTEGER NOT NULL DEFAULT 0,
   pending INTEGER NOT NULL DEFAULT 0 CHECK(pending IN(0,1))
 );
 CREATE TABLE IF NOT EXISTS relay_verify_witness (

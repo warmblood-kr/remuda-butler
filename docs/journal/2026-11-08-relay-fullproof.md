@@ -70,3 +70,17 @@ it. The outbox page selects only attempt/txn scalars and a SQL payload-equality
 flag, never payload JSON, and has no lower bound on its first page so an empty
 reply id is validated. Migration is now 18 tables / 31 relay_rev_*; QA's
 migration check reports 18.
+
+## 010 HOLD correction
+
+The candidate fixes three groups: pending=1 is written before
+repair DDL when the state table exists (a missing fingerprint row is the
+durable signal on first creation), so an aborted pending publication leaves the
+old trigger fingerprint and retries; certificate ids are recomputed from their
+exact stored inputs plus PROOF_VERSION and require the proof_state store id, so
+an old 646 certificate or a wrong-store version row cannot bless READY; and the
+outbox page bounds attempts in SQL time (short values only, long numeric-looking
+values refuse, long nonnumeric values normalize to NULL), keeps txn and payload
+equality in SQL, and never transfers payload/large scalar strings into Lua.
+PROOF_VERSION is 3. Schema state now stores schema_version + pending and is
+written before repair. Table count remains 18.

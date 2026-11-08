@@ -22,9 +22,8 @@ WITNESS advances one source/sidecar at most and rehashes one sealed
 `phase_cursor`, and accumulates at most 32KiB of chunk hex; a zero-byte input
 hashes the empty domain directly. The reverse also holds: every retained
 witness must still have its live source+manifest (or sidecar), one per call, so
-deleting both refuses instead of dropping a witnessed original. The existing domain
-`SHA('butler-relay-source-v1\0'..bytes..'\0'..chunks)` is rebuilt; a final input
-over 64KiB refuses `digest_budget`. Digest/bytes/role/stamp/root_digest must
+deleting both refuses instead of dropping a witnessed original. The domain digest is rebuilt; input over
+64KiB refuses `digest_budget`. Digest/bytes/role/stamp/root_digest must
 match the sealed baseline, otherwise `source_changed`. Backup evidence and
 sidecars are witnessed too; the original raw bytes stay as evidence.
 
@@ -59,11 +58,10 @@ the query selects attempt/txn scalars and a SQL payload-equality flag (never
 payload JSON into Lua); the first page has no lower bound so an empty reply id
 is checked. Attempts use the importer's Lua `tonumber` rule (1.0/"1"/1e2/0x10
 exact; 1junk/1.5 NULL). Extra or missing rows refuse. Measured: derived ~2ms/2k rows; the 110001-row proof <=0.12s/call. READY creates the certificate only when all phases share the same witness and
-`data_revision`. `relay_proof_state` binds a `PROOF_VERSION` to the
-verification; READY and activation require it, so a certificate from an older
-verifier (or 646) is reset and reverified, while same-version resume continues.
-Activation checks the indexed
-certificate/checkpoint/witness/data_revision/owner/epoch/version equality.
+`data_revision`. The certificate id is recomputed from its exact inputs plus
+`PROOF_VERSION`; `relay_proof_state` binds the version and store id.
+READY/activation require the recomputation, so an older-verifier or fabricated
+certificate is reset/reverified while same-version resume continues.
 
 ## Revision matrix
 
@@ -72,10 +70,8 @@ import source (including `staged_count`), source fields, units, cursors,
 records, processed, events, reply intents, sidecar, and witness INSERT. Narrow
 exclusions are verification progress/certificates, `verified_count`, the exact
 status promotion to verified, authority bookkeeping, and ACTIVE raw retirement/
-normal mutations. Schema open drops and recreates every relay trigger. `relay_schema_state`
-stores the expected trigger fingerprint plus a pending marker. If the installed
-set differed, open first writes pending=1, then bumps `data_revision`; on bump
-failure it deletes checkpoints/certificates and fails closed; later opens
-retry from the pending marker. A weak-trigger certificate therefore cannot
-stay READY even when the repaired SQL later looks correct. Now 18 tables,
-31 `relay_rev_*` triggers.
+normal mutations. Schema open writes pending=1 BEFORE repairing trigger DDL, then bumps
+`data_revision`; on bump failure it deletes checkpoints/certificates and fails
+closed; later opens retry from the durable pending/fingerprint state. A
+weak-trigger certificate cannot stay READY even when repaired SQL later looks
+correct. Now 18 tables, 31 `relay_rev_*` triggers.
