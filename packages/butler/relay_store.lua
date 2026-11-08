@@ -1590,9 +1590,11 @@ function M.open(opts)
     local after = options.after_key
     local rows, why = query(db,
       'SELECT namespace,parent_key,record_key,ordinal,json_kind,payload_json FROM relay_records ' ..
-        'WHERE namespace=? AND parent_key=? AND record_key>? ' ..
+        'WHERE namespace=? AND parent_key=? AND (? IS NULL OR ?=\'\' OR ' ..
+        '(ordinal IS NOT NULL AND ordinal>CAST(? AS INTEGER)) OR ' ..
+        '(ordinal IS NULL AND record_key>?)) ' ..
         'ORDER BY CASE WHEN ordinal IS NULL THEN 0 ELSE 1 END,ordinal,record_key LIMIT ?',
-      { namespace, parent, after or '', limit })
+      { namespace, parent, after, after, after, after, limit })
     if not rows then return nil, why end
     return rows
   end
