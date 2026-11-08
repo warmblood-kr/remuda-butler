@@ -51,5 +51,12 @@ Evidence on this candidate:
   `json_extract(raw -> path,'$')`) without returning token+value to Lua; the
   step reports and charges the 100,002B token. Cursor parity also compares in
   SQL. QA cursor budget 1/1.
-- Near-32MiB is gated separately; record measured walltime and SQL page work
-  rather than claiming a range that did not finish.
+- Near-32MiB source: 32,630,025B / 65,000 x 500B ids, every advance its own
+  native turn with 23 reopen checkpoints; 1,530 verify calls, max 4.092s,
+  total 2,318.6s, 65,000 processed, verified and activated. The max call is
+  SQL re-reading the 32MB raw to return 64 rows; no raw enters Lua and the
+  result is not a universal byte-bound claim.
+- Startup/archive caller RED fixtures added under `tests/red/`: blocked
+  authority must stop `matrix.relay.start`, a single bounded `migrate.step`,
+  a real inbox producer for `authority.start`, and archive planning only with
+  both proofs. They fail until the wiring lands.
