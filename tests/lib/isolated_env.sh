@@ -31,6 +31,7 @@ isolated_env_prepare() {
   # Install the trap before mktemp: a mid-prepare failure must not leak the
   # scratch tree either.
   isolated_env_install_trap
+  ISOLATED_DAEMON_PID=
 
   [[ -n ${REPO:-} ]] || { isolated_env_fail "REPO is not set"; return 1; }
   [[ "$prefix" =~ ^[a-z]+$ ]] ||
@@ -99,6 +100,15 @@ isolated_env_check_daemon() {
   return 0
 }
 
+# True while PID is a live (non-zombie) process. ps also reports empty when it
+# is gone, and Z* when it exited but has not been reaped yet.
+isolated_env_pid_alive() {
+  local pid=$1 state
+  [[ -n "$pid" ]] || return 1
+  state=$(ps -o stat= -p "$pid" 2>/dev/null) || return 1
+  [[ -n "$state" && "$state" != Z* ]]
+}
+
 isolated_env_cleanup() {
   local status=${1:-0}
   [[ -n ${T:-} && -e ${T:-} ]] || return "$status"
@@ -106,25 +116,38 @@ isolated_env_cleanup() {
     echo "private-env: refusing cleanup outside the owned scratch: ${T:-}" >&2
     return 1
   fi
-  local socket="$T/runtime/remuda/${S:-}.sock" up=0 i
-  if [[ -S "$socket" && -n ${REMUDA_BIN:-} && -n ${S:-} ]]; then
-    "$REMUDA_BIN" -s "$S" stop -f >/dev/null 2>&1 || true
+  local socket="$T/runtime/remuda/${S:-}.sock" pid=${ISOLATED_DAEMON_PID:-}
+  local alive=0 up=0 i
+  if [[ -n "$pid" ]]; then
+    if isolated_env_pid_alive "$pid"; then
+      alive=1
+    else
+      wait "$pid" 2>/dev/null || true
+    fi
+  fi
+  if (( alive )); then
+    if [[ -S "$socket" && -n ${REMUDA_BIN:-} && -n ${S:-} ]]; then
+      "$REMUDA_BIN" -s "$S" stop -f >/dev/null 2>&1 || true
+    fi
+    # A daemon that failed before bind is still our process: wait bounded and
+    # keep the scratch if it cannot be proven exited.
     for i in $(seq 1 30); do
-      if "$REMUDA_BIN" -s "$S" ls >/dev/null 2>&1; then
-        up=1
-        sleep 0.1
-      elif [[ -S "$socket" ]]; then
-        up=1
-        sleep 0.1
-      else
-        up=0
+      if ! isolated_env_pid_alive "$pid"; then
+        alive=0
+        wait "$pid" 2>/dev/null || true
         break
       fi
+      sleep 0.1
     done
-    if (( up )); then
-      echo "private-env: daemon ${S:-} is still up or its socket is unresolved; keeping scratch $T" >&2
-      return 1
-    fi
+  fi
+  # An untracked daemon may still answer on the socket. Socket absence alone is
+  # not proof: a late bind can appear after this check.
+  if [[ -S "$socket" && -n ${REMUDA_BIN:-} && -n ${S:-} ]]; then
+    if "$REMUDA_BIN" -s "$S" ls >/dev/null 2>&1; then up=1; fi
+  fi
+  if (( alive || up )); then
+    echo "private-env: cannot prove the private daemon is down; keeping scratch $T" >&2
+    return 1
   fi
   rm -rf -- "$T"
   return "$status"
