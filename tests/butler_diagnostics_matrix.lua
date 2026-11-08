@@ -1,4 +1,7 @@
 -- Focused relay test with real core JSON, synthetic transport and tmp files.
+-- First executable operation: refuse an ordinary daemon image before any
+-- global, timer, file or transport mutation. See tests/lib/isolated_test.lua.
+dofile("tests/lib/isolated_test.lua")(remuda)
 assert(remuda and remuda.json)
 remuda.butler = { matrix = {} }
 local timers, events, broken, mode, sequence = {}, {}, false, 'success', 0

@@ -1,6 +1,11 @@
 -- Lua-side L3 relay tests. The HTTP callback is scripted at the stable
 -- remuda.butler.matrix.request_json boundary; run under core so the relay's
 -- persisted state uses the same remuda.json implementation as production.
+--
+-- First executable operation: refuse an ordinary daemon image before any
+-- global, timer, file or transport mutation. The private wrapper creates the
+-- disposable process and the owned 0700 envelope; see tests/lib/isolated_test.lua.
+dofile("tests/lib/isolated_test.lua")(remuda)
 assert(type(remuda) == "table" and type(remuda.json) == "table",
   "run this suite with a Remuda core that provides remuda.json")
 remuda.butler = { matrix = {} }

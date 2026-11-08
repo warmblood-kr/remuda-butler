@@ -57,6 +57,9 @@ if [[ $mode == policy ]]; then
   # Lifecycle reload rollback is pure Lua; keep it on PRs so a policy run
   # cannot report green without exercising the recovery contract.
   run butler_lifecycle_reload.lua luajit "tests/butler_lifecycle_reload.lua"
+  # The private-envelope guard is pure Lua and must run on PRs even though the
+  # mutation-heavy wrappers it protects are skipped there.
+  run isolated_test_guard_test.lua luajit "tests/isolated_test_guard_test.lua"
 fi
 if [[ $mode == all ]]; then
 for lua in "$REPO"/tests/*.lua; do
@@ -71,7 +74,7 @@ fi
 for sh in "$REPO"/tests/*.sh; do
   case $(basename "$sh") in
     rust_tests.sh | golden_guidance.sh | shell_tests.sh) continue ;;
-    awk-timeout.sh | core_ref.sh | hand_parsed_verbs.sh | installer_no_restart.sh | installer_readiness_budget.sh | lua_harness_guards.sh | butler_file_args.sh | butler_permissions.sh | caller_identity.sh | butler_single_instance.sh | agent_identity.sh | butler_adopt.sh | delegate_leader_id.sh | mail_by_ulid.sh | reply_forward.sh | butler_unknown_verb.sh | opencode_nudge_events.sh | inbox_db_upgrade.sh | mod_package_assets.sh)
+    awk-timeout.sh | core_ref.sh | hand_parsed_verbs.sh | installer_no_restart.sh | installer_readiness_budget.sh | lua_harness_guards.sh | butler_file_args.sh | butler_permissions.sh | caller_identity.sh | butler_single_instance.sh | agent_identity.sh | butler_adopt.sh | delegate_leader_id.sh | mail_by_ulid.sh | reply_forward.sh | butler_unknown_verb.sh | opencode_nudge_events.sh | inbox_db_upgrade.sh | mod_package_assets.sh | isolated_env_cleanup_test.sh | isolated_env_admission_test.sh)
       # Policy tests and identity, file-boundary, isolation and harness
       # security controls stay on PRs, even when they need a private daemon.
       ;;
