@@ -60,18 +60,18 @@ Evidence on this candidate:
   authority must stop `matrix.relay.start`, a single bounded `migrate.step`,
   a real inbox producer for `authority.start`, and archive planning only with
   both proofs.
-- Static RED cleared after the gated implementation: `relay_store_migrate.step`
-  performs one store action (exported acks/drain are sidecars, not manifest
-  rows), `relay_authority.start/advance/status/proof/certificate/inventories/
-  assert_inbox_compatible/authorize` refuse without the real producer proof,
-  `relay_archive.plan/advance/status` require both current proofs, and
-  `relay.start`/`relay.new` plus the boot path consult the authority gate.
+- Static RED cleared: `relay_store_migrate.step` is one store action (acks/
+  drain are sidecars, not manifest rows), `relay_authority` refuses without
+  the real producer proof, `relay_archive.plan/advance/status` require both
+  current proofs, and relay.start/new plus the boot path use the gate.
 - Native caller gate `startup_step_native.lua` (QA private daemon): 61 bounded
-  advances, max 1 store action per advance, changed stamp refused as
-  `manifest_conflict`, real producer shape accepted and tampered/blocked
-  objects refused, gate refuses an incomplete job and accepts the active one,
-  archive plan is 4 files with 0-byte ack/drain valid. No live archive/copy.
-- Inbox producer head `9cb44ef` supplies the pinned flat identities plus the
-  exact NUL `butler-inbox-compat-v1` tuple; store_id may be `config.store_id`,
-  data_revision is frozen at cutover, verification_id is the final proof hash.
+  advances, max 1 action each, changed stamp refused, real producer shape
+  accepted, tampered/blocked refused, gate refuses incomplete/accepts active,
+  restart resumes, adapter binding works, archive plan 4 files with 0B
+  ack/drain. No live archive/copy.
+- Inbox producer `9cb44ef` supplies the flat identities plus the exact NUL
+  `butler-inbox-compat-v1` tuple; store_id may be `config.store_id`,
+  data_revision is frozen, verification_id is the final proof hash.
+- `authority.adapter(providers)` is the coordinator seam: bind providers once,
+  then start(cfg,{inbox_proof=fn})/advance/certificate/status/inventories.
 

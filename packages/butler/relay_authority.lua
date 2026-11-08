@@ -280,6 +280,10 @@ function M.start(cfg, deps)
           verify = cfg.verify, batch_limit = cfg.batch_limit } }
     jobs[job_id] = entry
   end
+  entry.deps, entry.cfg = deps, cfg
+  if entry.job.inbox_root ~= proof.root then
+    return nil, 'blocked: inbox_root_changed'
+  end
   active = entry
   local wrote, write_why = persist(entry)
   if not wrote then return nil, 'blocked: job_' .. tostring(write_why) end
@@ -412,6 +416,29 @@ end
 
 function M.active_job()
   return active and active.job_id or nil
+end
+
+-- Exact adapter for the joint inbox startup coordinator. The coordinator binds
+-- its owner/store/digest/fs providers once, then passes only the live
+-- `{inbox_proof = function() ... end}` on start.
+function M.adapter(providers)
+  if type(providers) ~= 'table' then return nil, 'providers' end
+  local bound = {}
+  for key, value in pairs(providers) do bound[key] = value end
+  return {
+    start = function(cfg, opts)
+      local deps = {}
+      for key, value in pairs(bound) do deps[key] = value end
+      deps.inbox_proof = opts and opts.inbox_proof or bound.inbox_proof
+      return M.start(cfg, deps)
+    end,
+    advance = M.advance,
+    certificate = M.certificate,
+    proof = M.proof,
+    status = M.status,
+    inventories = M.inventories,
+    authorize = M.authorize,
+  }
 end
 
 return M
