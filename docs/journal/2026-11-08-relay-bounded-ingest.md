@@ -59,4 +59,19 @@ Evidence on this candidate:
 - Startup/archive caller RED fixtures added under `tests/red/`: blocked
   authority must stop `matrix.relay.start`, a single bounded `migrate.step`,
   a real inbox producer for `authority.start`, and archive planning only with
-  both proofs. They fail until the wiring lands.
+  both proofs.
+- Static RED cleared after the gated implementation: `relay_store_migrate.step`
+  performs one store action (exported acks/drain are sidecars, not manifest
+  rows), `relay_authority.start/advance/status/proof/certificate/inventories/
+  assert_inbox_compatible/authorize` refuse without the real producer proof,
+  `relay_archive.plan/advance/status` require both current proofs, and
+  `relay.start`/`relay.new` plus the boot path consult the authority gate.
+- Native caller gate `startup_step_native.lua` (QA private daemon): 61 bounded
+  advances, max 1 store action per advance, changed stamp refused as
+  `manifest_conflict`, real producer shape accepted and tampered/blocked
+  objects refused, gate refuses an incomplete job and accepts the active one,
+  archive plan is 4 files with 0-byte ack/drain valid. No live archive/copy.
+- Inbox producer head `9cb44ef` supplies the pinned flat identities plus the
+  exact NUL `butler-inbox-compat-v1` tuple; store_id may be `config.store_id`,
+  data_revision is frozen at cutover, verification_id is the final proof hash.
+
