@@ -1,7 +1,7 @@
 # Relay startup, bridge and retained archive plan
 
-Wiring plan for the frozen startup/archive contract: existing caller paths and
-driver seam before broad implementation.
+Wiring plan for the frozen startup/archive contract: caller paths and driver
+seam before broad implementation.
 
 ## Existing caller and artifact paths
 
