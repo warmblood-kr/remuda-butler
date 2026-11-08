@@ -13,7 +13,6 @@ SENTINEL=$(mktemp /tmp/ienv-sentinel.XXXXXX) || exit 2
 cleanup() { rm -f "$SENTINEL"; }
 trap cleanup EXIT
 
-before=$(find "$PARENT" -maxdepth 1 -type d -name 'zzz.*' 2>/dev/null | wc -l | tr -d ' ')
 (
   set -euo pipefail
   source "$REPO/tests/lib/isolated_env.sh"
@@ -23,9 +22,12 @@ before=$(find "$PARENT" -maxdepth 1 -type d -name 'zzz.*' 2>/dev/null | wc -l | 
   isolated_env_prepare zzz zzz
 ) >/tmp/ienv-admission.out 2>&1
 status=$?
-after=$(find "$PARENT" -maxdepth 1 -type d -name 'zzz.*' 2>/dev/null | wc -l | tr -d ' ')
+# The refusal names the scratch it created. Assert that exact tree is gone,
+# rather than counting a shared /tmp prefix (another run may use it too).
+leaked=$(sed -n 's/^private-env: FAIL: scratch aliases inherited REMUDA_RUNTIME_DIR: //p' /tmp/ienv-admission.out | tail -1)
 (( status != 0 )) || note "alias refusal returned success"
-(( after == before )) || note "alias refusal leaked a scratch directory"
+[[ -n "$leaked" ]] || note "alias refusal did not name the created scratch"
+[[ ! -e "$leaked" ]] || note "alias refusal leaked $leaked"
 [[ -f "$SENTINEL" ]] || note "cleanup removed a foreign sentinel"
 
 d=$(mktemp -d /tmp/ienv-mode.XXXXXX) || exit 2
