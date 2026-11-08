@@ -335,6 +335,572 @@ function Source:witness(root, hex)
   return witness(self, root, hex)
 end
 
+-- ---------------------------------------------------------------------------
+-- Resumable advance v1 (inbox-source-progress.md). The staged generation lives
+-- in the injected progress backend; the cursor is bounded and diagnostic.
+local LOG_CHUNK = 64 * 1024
+local MAX_STAGE_ROWS = 256
+local generation_serial = 0
+
+local function frame(parts)
+  local out = {}
+  for index = 1, #parts do out[index] = #parts[index] .. ":" .. parts[index] end
+  return table.concat(out)
+end
+
+local function chain_start(self, root, hex)
+  return self.sha256(frame({ "source-progress-v1", root, hex }))
+end
+
+local function chain_add(self, chain, path, presence, offset, length, digest)
+  return self.sha256(frame({ chain, path, presence, tostring(offset),
+    tostring(length), digest }))
+end
+
+local function new_generation(self, root, hex)
+  generation_serial = generation_serial + 1
+  local clock = (os and os.time and os.time()) or 0
+  return "progress-v1:" .. self.sha256(table.concat({ root, hex, tostring(clock),
+    tostring(os.clock and os.clock() or 0), tostring(generation_serial) }, "\0"))
+end
+
+-- Row helpers: false means a proven absence, nil means the query failed.
+local function progress_get(self, root, hex, generation, kind, key)
+  local row, err = self.progress.get(root, hex, generation, kind, key)
+  if row == nil then return nil, err end
+  if row.state == "absent" then return false end
+  return row
+end
+
+local function scan_pages(self, root, hex, generation, kind)
+  local out, after = {}, nil
+  repeat
+    local page, err = self.progress.scan(root, hex, generation, kind, after,
+      MAX_STAGE_ROWS)
+    if not page then return nil, err end
+    for _, row in ipairs(page.rows) do out[#out + 1] = row end
+    after = page.next_key
+  until page.complete
+  return out
+end
+
+local function read_dependency(self, path)
+  local size, size_err = self.fs.size(self.root .. "/" .. path)
+  if type(size) ~= "number" or size < 0 or size % 1 ~= 0 then
+    return fail("source_unreadable", "missing", path)
+  end
+  if self.max_single_file_bytes and size > self.max_single_file_bytes then
+    return fail("source_oversize", "file", path)
+  end
+  local text, why = read(self, self.root .. "/" .. path)
+  if not text then return content_error(why, path) end
+  return text
+end
+
+local function envelope_of(self, delivery)
+  local path = "messages/" .. delivery.message_id .. ".json"
+  local text, err = read_dependency(self, path)
+  if not text then return nil, err end
+  local envelope, decode_err = decode(self, text, path)
+  if decode_err or type(envelope) ~= "table" then
+    return fail("source_unreadable", nil, path)
+  end
+  if envelope.id ~= delivery.message_id then
+    return fail("source_unreadable", "id", path)
+  end
+  local body = envelope.body
+  if type(body) ~= "table" or not safe_component(body.object_id) then
+    return fail("source_unreadable", "object_id", path)
+  end
+  return { path = path, text = text, envelope = envelope, body = body,
+    object_path = "objects/" .. body.object_id }
+end
+
+local function note_object_path(self, delivery)
+  if delivery.resent == nil then return nil end
+  local resent, err = decode(self, delivery.resent,
+    "inboxes/" .. delivery.message_id .. ".jsonl")
+  if err or type(resent) ~= "table" then
+    return fail("source_unreadable", "resent",
+      "inboxes/" .. delivery.message_id .. ".jsonl")
+  end
+  local note = resent.note_object_id
+  if note == nil then return nil end
+  if not safe_component(note) then
+    return fail("source_unreadable", "note_object_id",
+      "inboxes/" .. delivery.message_id .. ".jsonl")
+  end
+  return "objects/" .. note
+end
+
+local function sha_of(self, text, path)
+  local digest = self.sha256(text)
+  if not is_hex(digest) or #digest ~= 64 then
+    return fail("unavailable", "sha256", path)
+  end
+  return digest
+end
+
+local function find_file_task(self, root, hex, state, pass)
+  local deliveries, err = scan_pages(self, root, hex, state.generation, "deliveries")
+  if not deliveries then return nil, err end
+  for _, delivery in ipairs(deliveries) do
+    local id = delivery.message_id
+    local env_path = "messages/" .. id .. ".json"
+    local env_proof, proof_err = progress_get(self, root, hex, state.generation,
+      "fileproof", { pass = pass, path = env_path })
+    if env_proof == nil then return nil, proof_err end
+    if env_proof == false then
+      return { kind = "envelope", delivery = delivery, path = env_path }
+    end
+    local body_dep, dep_err = progress_get(self, root, hex, state.generation,
+      "dependency", { owner = id, role = "body" })
+    if body_dep == nil then return nil, dep_err end
+    if body_dep == false then
+      if pass == 1 then return { kind = "envelope", delivery = delivery, path = env_path } end
+      return fail("source_unreadable", "dependency", env_path)
+    end
+    local body_proof, body_err = progress_get(self, root, hex, state.generation,
+      "fileproof", { pass = pass, path = body_dep.path })
+    if body_proof == nil then return nil, body_err end
+    if body_proof == false then
+      return { kind = "body", delivery = delivery, path = body_dep.path }
+    end
+    local note_path, note_err = note_object_path(self, delivery)
+    if not note_path and note_err then return nil, note_err end
+    local note_dep, note_dep_err = progress_get(self, root, hex, state.generation,
+      "dependency", { owner = id, role = "note" })
+    if note_dep == nil then return nil, note_dep_err end
+    if note_path and note_dep == false then
+      if pass == 1 then
+        return { kind = "note", delivery = delivery, path = note_path }
+      end
+      return fail("source_unreadable", "dependency", note_path)
+    end
+    if note_dep and note_dep ~= false then
+      local note_proof, note_proof_err = progress_get(self, root, hex, state.generation,
+        "fileproof", { pass = pass, path = note_dep.path })
+      if note_proof == nil then return nil, note_proof_err end
+      if note_proof == false then
+        return { kind = "note", delivery = delivery, path = note_dep.path }
+      end
+    end
+    if pass == 1 and delivery.metadata == nil then
+      return { kind = "metadata", delivery = delivery }
+    end
+  end
+  return nil
+end
+
+local function first_proof(self, root, hex, generation, path)
+  local proof, err = progress_get(self, root, hex, generation, "fileproof",
+    { pass = 1, path = path })
+  if proof == nil then return nil, err end
+  if proof == false then return fail("stale_generation", "proof", path) end
+  return proof
+end
+
+local function pass2_proof(self, root, hex, state, path, text)
+  local first, err = first_proof(self, root, hex, state.generation, path)
+  if not first then return nil, err end
+  local digest, sha_err = sha_of(self, text, path)
+  if not digest then return nil, sha_err end
+  if first.bytes ~= #text or first.sha256 ~= digest or first.present ~= true then
+    return fail("stale_generation", "proof", path)
+  end
+  return { { op = "fileproof", pass = 2, path = path, present = true,
+    bytes = #text, sha256 = digest } }, digest
+end
+
+local function execute_file_task(self, root, hex, state, pass, task)
+  local delivery = task.delivery
+  local id = delivery.message_id
+  if task.kind == "envelope" then
+    local env, err = envelope_of(self, delivery)
+    if not env then return nil, err, 0 end
+    if pass == 2 then
+      local delta, digest = pass2_proof(self, root, hex, state, env.path, env.text)
+      if not delta then return nil, digest, 0 end
+      local chain = chain_add(self, state.cursor.chain, env.path, "present", 0,
+        #env.text, digest)
+      return delta, nil, #env.text, chain
+    end
+    local digest, sha_err = sha_of(self, env.text, env.path)
+    if not digest then return nil, sha_err, 0 end
+    local delta = {
+      { op = "dependency", owner = id, role = "envelope", path = env.path },
+      { op = "dependency", owner = id, role = "body", path = env.object_path },
+      { op = "fileproof", pass = 1, path = env.path, present = true,
+        bytes = #env.text, sha256 = digest },
+    }
+    local chain = chain_add(self, state.cursor.chain, env.path, "present", 0,
+      #env.text, digest)
+    return delta, nil, #env.text, chain
+  end
+  if task.kind == "body" then
+    local env, env_err = envelope_of(self, delivery)
+    if not env then return nil, env_err, 0 end
+    if task.path ~= env.object_path then
+      return fail("source_unreadable", "object_id", env.path), 0
+    end
+    local text, read_err = read_dependency(self, task.path)
+    if not text then return nil, read_err, 0 end
+    if env.body.bytes ~= nil and (type(env.body.bytes) ~= "number"
+      or env.body.bytes % 1 ~= 0 or env.body.bytes ~= #text) then
+      return fail("source_unreadable", "bytes", env.path), 0
+    end
+    local digest, sha_err = sha_of(self, text, task.path)
+    if not digest then return nil, sha_err, 0 end
+    if pass == 2 then
+      local delta, why = pass2_proof(self, root, hex, state, task.path, text)
+      if not delta then return nil, why, 0 end
+      local chain = chain_add(self, state.cursor.chain, task.path, "present", 0,
+        #text, digest)
+      return delta, nil, #text, chain
+    end
+    local metadata, metadata_err = canonical(self, {
+      envelope = env.envelope,
+      object = { id = env.body.object_id, bytes = #text, sha256 = digest },
+    }, env.path)
+    if not metadata then return nil, metadata_err, 0 end
+    local delta = {
+      { op = "fileproof", pass = 1, path = task.path, present = true,
+        bytes = #text, sha256 = digest },
+      { op = "metadata", message_id = id, envelope_ref = env.path,
+        object_ref = task.path, metadata = metadata },
+    }
+    local chain = chain_add(self, state.cursor.chain, task.path, "present", 0,
+      #text, digest)
+    return delta, nil, #text, chain
+  end
+  if task.kind == "note" then
+    local text, read_err = read_dependency(self, task.path)
+    if not text then return nil, read_err, 0 end
+    local digest, sha_err = sha_of(self, text, task.path)
+    if not digest then return nil, sha_err, 0 end
+    if pass == 2 then
+      local delta, why = pass2_proof(self, root, hex, state, task.path, text)
+      if not delta then return nil, why, 0 end
+      local chain = chain_add(self, state.cursor.chain, task.path, "present", 0,
+        #text, digest)
+      return delta, nil, #text, chain
+    end
+    local delta = {
+      { op = "dependency", owner = id, role = "note", path = task.path },
+      { op = "fileproof", pass = 1, path = task.path, present = true,
+        bytes = #text, sha256 = digest },
+    }
+    local chain = chain_add(self, state.cursor.chain, task.path, "present", 0,
+      #text, digest)
+    return delta, nil, #text, chain
+  end
+  if task.kind == "metadata" then
+    local env, env_err = envelope_of(self, delivery)
+    if not env then return nil, env_err, 0 end
+    local text, read_err = read_dependency(self, env.object_path)
+    if not text then return nil, read_err, 0 end
+    if env.body.bytes ~= nil and (type(env.body.bytes) ~= "number"
+      or env.body.bytes % 1 ~= 0 or env.body.bytes ~= #text) then
+      return fail("source_unreadable", "bytes", env.path), 0
+    end
+    local digest, sha_err = sha_of(self, text, env.object_path)
+    if not digest then return nil, sha_err, 0 end
+    local metadata, metadata_err = canonical(self, {
+      envelope = env.envelope,
+      object = { id = env.body.object_id, bytes = #text, sha256 = digest },
+    }, env.path)
+    if not metadata then return nil, metadata_err, 0 end
+    local delta = {
+      { op = "dependency", owner = id, role = "envelope", path = env.path },
+      { op = "dependency", owner = id, role = "body", path = env.object_path },
+      { op = "metadata", message_id = id, envelope_ref = env.path,
+        object_ref = env.object_path, metadata = metadata },
+    }
+    return delta, nil, #env.text + #text, state.cursor.chain
+  end
+  return fail("invalid_snapshot", "task"), 0
+end
+
+local function assemble_snapshot(self, root, hex, state, witness)
+  local deliveries, err = scan_pages(self, root, hex, state.generation, "deliveries")
+  if not deliveries then return nil, err end
+  local read_rows, read_err = scan_pages(self, root, hex, state.generation, "reads")
+  if not read_rows then return nil, read_err end
+  local reads = {}
+  for _, row in ipairs(read_rows) do reads[row.message_id] = true end
+  local out = {}
+  for index, row in ipairs(deliveries) do
+    out[index] = { message_id = row.message_id, seq = tonumber(row.seq),
+      resent = row.resent, envelope_ref = row.envelope_ref,
+      object_ref = row.object_ref, metadata = row.metadata }
+  end
+  return { deliveries = out, reads = reads, recipient = hex, complete = true,
+    witness = witness, source_before = witness, source_after = witness }
+end
+
+local function invalidate(self, root, hex, state, reason)
+  local cursor = state.cursor
+  local next_cursor = { generation = cursor.generation, phase = "invalid",
+    offset = 0, parse_offset = 0, line_tail = "", chain = cursor.chain,
+    first_chain = cursor.first_chain, next_seq = cursor.next_seq or 1,
+    complete = false }
+  local value, err = self.progress.commit(root, hex, state.revision, next_cursor,
+    { { op = "invalid", reason = reason } })
+  if not value and err and err.code == "unknown_commit" then return nil, err end
+  return fail(reason)
+end
+
+local function commit_log(self, root, hex, state, cursor, delta, bytes)
+  local value, err = self.progress.commit(root, hex, state.revision, cursor, delta)
+  if not value then return nil, err end
+  return { revision = value.revision, cursor = cursor, bytes = bytes }
+end
+
+local function finish_log(self, root, hex, state, cursor, delta, bytes)
+  if (cursor.log or "inbox") == "inbox" then
+    cursor.log = "read"
+    cursor.offset = 0
+    cursor.parse_offset = 0
+    cursor.line_tail = ""
+  else
+    cursor.log = nil
+    if cursor.phase == "logs1" then cursor.phase = "files1" else cursor.phase = "files2" end
+  end
+  return commit_log(self, root, hex, state, cursor, delta, bytes)
+end
+
+local function stage_line(self, root, hex, state, cursor, log, line, seen)
+  if log == "read" then
+    if not safe_component(line) then return fail("source_unreadable", nil,
+      "read/" .. hex .. ".jsonl") end
+    return { op = "read", message_id = line }
+  end
+  local path = "inboxes/" .. hex .. ".jsonl"
+  local value, decode_err = decode(self, line, path)
+  if decode_err or type(value) ~= "table" then
+    return fail("source_unreadable", nil, path)
+  end
+  local id = value.message_id
+  if not safe_component(id) then return fail("source_unreadable", "message_id", path) end
+  local resent
+  if value.resent ~= nil then
+    if type(value.resent) ~= "table" then return fail("source_unreadable", "resent", path) end
+    local encoded, encode_err = canonical(self, value.resent, path)
+    if not encoded or encoded:sub(1, 1) ~= "{" then
+      return fail("source_unreadable", "resent", path)
+    end
+    resent = encoded
+  end
+  local existing, get_err = progress_get(self, root, hex, state.generation,
+    "delivery", id)
+  if existing == nil then return nil, get_err end
+  local seq
+  if seen[id] then
+    seq = seen[id]
+  elseif existing == false then
+    seq = cursor.next_seq or 1
+    cursor.next_seq = seq + 1
+    seen[id] = seq
+  else
+    seq = tonumber(existing.seq)
+    seen[id] = seq
+  end
+  return { op = "delivery", message_id = id, seq = seq, resent = resent }
+end
+
+local function log_unit(self, root, hex, state)
+  local cursor = state.cursor
+  local log = cursor.log or "inbox"
+  local path = (log == "inbox" and "inboxes" or "read") .. "/" .. hex .. ".jsonl"
+  local offset = cursor.offset or 0
+  local parse_offset = cursor.parse_offset or 0
+  local line_tail = cursor.line_tail or ""
+  local ok, chunk, range_err = pcall(self.fs.read_range,
+    self.root .. "/" .. path, offset, LOG_CHUNK)
+  if not ok or chunk == nil then
+    if error_code(not ok and range_err or chunk) ~= "not_found" then
+      return fail("source_unreadable", "log", path)
+    end
+    local digest = assert(self.sha256(""))
+    cursor.chain = chain_add(self, cursor.chain, path, "absent", 0, 0, digest)
+    return finish_log(self, root, hex, state, cursor, {}, 0)
+  end
+  if type(chunk) ~= "table" or type(chunk.bytes) ~= "string" then
+    return fail("source_unreadable", "log", path)
+  end
+  local bytes = chunk.bytes
+  local eof = chunk.eof == true
+  if eof and #bytes == 0 and parse_offset == 0 and line_tail ~= "" then
+    -- Torn tail at EOF: no new bytes can complete it. Persist nothing new.
+    return { revision = state.revision, cursor = cursor, bytes = 0 }
+  end
+  if parse_offset == 0 then
+    local digest = assert(self.sha256(bytes))
+    cursor.chain = chain_add(self, cursor.chain, path, "present", offset, #bytes,
+      digest)
+  end
+  local buffer = line_tail .. bytes
+  local position = parse_offset
+  local delta = {}
+  local staged = 0
+  local seen = {}
+  while staged < MAX_STAGE_ROWS do
+    local newline = buffer:find("\n", position + 1, true)
+    if not newline then break end
+    local op, op_err = stage_line(self, root, hex, state, cursor, log,
+      buffer:sub(position + 1, newline - 1), seen)
+    if not op then return nil, op_err end
+    delta[#delta + 1] = op
+    position = newline
+    staged = staged + 1
+  end
+  if position < #buffer and buffer:find("\n", position + 1, true) then
+    cursor.parse_offset = position
+    cursor.line_tail = line_tail
+    return commit_log(self, root, hex, state, cursor, delta, #bytes)
+  end
+  local remainder = buffer:sub(position + 1)
+  cursor.parse_offset = 0
+  cursor.offset = offset + #bytes
+  cursor.line_tail = remainder
+  if #remainder > self.max_line_bytes then
+    return fail("source_oversize", "line", path)
+  end
+  if eof then
+    if remainder ~= "" then
+      return commit_log(self, root, hex, state, cursor, delta, #bytes)
+    end
+    cursor.chain = chain_add(self, cursor.chain, path, "eof", offset + #bytes, 0,
+      assert(self.sha256("")))
+    return finish_log(self, root, hex, state, cursor, delta, #bytes)
+  end
+  return commit_log(self, root, hex, state, cursor, delta, #bytes)
+end
+
+local function file_unit(self, root, hex, state, pass)
+  local task, task_err = find_file_task(self, root, hex, state, pass)
+  if task_err then return nil, task_err end
+  if not task then
+    local cursor = state.cursor
+    if pass == 1 then
+      cursor.first_chain = cursor.chain
+      cursor.phase = "logs2"
+      cursor.log = "inbox"
+      cursor.offset = 0
+      cursor.parse_offset = 0
+      cursor.line_tail = ""
+      cursor.chain = chain_start(self, root, hex)
+      return commit_log(self, root, hex, state, cursor, {}, 0)
+    end
+    local first = cursor.first_chain
+    local second = cursor.chain
+    if type(first) ~= "string" or first ~= second then
+      return invalidate(self, root, hex, state, "stale_generation")
+    end
+    local witness = "source-progress-v1:sha256:" .. second
+    local ready_cursor = { generation = cursor.generation, phase = "ready",
+      offset = 0, parse_offset = 0, line_tail = "", chain = second,
+      first_chain = first, next_seq = cursor.next_seq or 1, complete = true,
+      witness = witness }
+    local value, ready_err = self.progress.commit(root, hex, state.revision,
+      ready_cursor, { { op = "ready", witness = witness, first_chain = first,
+        second_chain = second } })
+    if not value then return nil, ready_err end
+    local snapshot, snapshot_err = assemble_snapshot(self, root, hex, state, witness)
+    if not snapshot then return nil, snapshot_err end
+    return { revision = value.revision, cursor = ready_cursor, bytes = 0,
+      snapshot = snapshot }
+  end
+  local delta, exec_err, bytes, chain = execute_file_task(self, root, hex, state,
+    pass, task)
+  if not delta then return nil, exec_err end
+  state.cursor.chain = chain
+  local value, commit_err = self.progress.commit(root, hex, state.revision,
+    state.cursor, delta)
+  if not value then return nil, commit_err end
+  return { revision = value.revision, cursor = state.cursor, bytes = bytes }
+end
+
+local function advance_result(unit, state, ready)
+  local cursor = unit.cursor
+  local revision = unit.revision
+  if ready then
+    return { state = "ready", complete = true,
+      cursor = { generation = cursor.generation, revision = revision,
+        pass = "ready", task = "ready", offset = 0 },
+      processed_bytes = 0, processed_tasks = 1, snapshot = unit.snapshot }
+  end
+  return { state = "backlog", complete = false,
+    cursor = { generation = (cursor and cursor.generation) or state.cursor.generation,
+      revision = revision, pass = (cursor and cursor.phase) or state.cursor.phase,
+      task = (cursor and (cursor.log or "files")) or "files",
+      offset = (cursor and cursor.offset) or 0 },
+    processed_bytes = unit.bytes or 0, processed_tasks = 1, snapshot = nil }
+end
+
+function Source:advance(root, hex, budget)
+  local ok, root_err = check_root(self, root)
+  if not ok then return nil, root_err end
+  ok, root_err = check_recipient(hex)
+  if not ok then return nil, root_err end
+  if type(self.progress) ~= "table" or type(self.progress.load) ~= "function"
+    or type(self.progress.commit) ~= "function"
+    or type(self.progress.scan) ~= "function"
+    or type(self.progress.get) ~= "function" then
+    return fail("unavailable", "progress")
+  end
+  if type(self.fs.read_range) ~= "function" or type(self.fs.size) ~= "function" then
+    return fail("unavailable", "fs")
+  end
+  if type(budget) ~= "table" then return fail("invalid_snapshot", "budget") end
+  for _, key in ipairs({ "max_bytes", "max_tasks", "max_ms" }) do
+    local value = budget[key]
+    if type(value) ~= "number" or value % 1 ~= 0 or value < 1 then
+      return fail("invalid_snapshot", "budget")
+    end
+  end
+  local state, load_err = self.progress.load(root, hex)
+  if state == nil then
+    if load_err and load_err.code ~= "not_found" then return nil, load_err end
+    local cursor = { generation = new_generation(self, root, hex), phase = "logs1",
+      log = "inbox", offset = 0, parse_offset = 0, line_tail = "",
+      chain = chain_start(self, root, hex), next_seq = 1, complete = false }
+    local value, commit_err = self.progress.commit(root, hex, 0, cursor, {})
+    if not value then return nil, commit_err end
+    return { state = "backlog", complete = false,
+      cursor = { generation = cursor.generation, revision = value.revision,
+        pass = "logs1", task = "inbox", offset = 0 },
+      processed_bytes = 0, processed_tasks = 0, snapshot = nil }
+  end
+  if state.cursor.phase == "invalid" then return fail("stale_generation") end
+  if state.cursor.phase == "ready" or state.cursor.complete == true then
+    local witness = state.cursor.witness
+    if type(witness) ~= "string" then
+      local snapshot, snapshot_err = assemble_snapshot(self, root, hex, state, witness)
+      if not snapshot then return nil, snapshot_err end
+      witness = snapshot.witness
+    end
+    local snapshot, snapshot_err = assemble_snapshot(self, root, hex, state, witness)
+    if not snapshot then return nil, snapshot_err end
+    return { state = "ready", complete = true,
+      cursor = { generation = state.cursor.generation, revision = state.revision,
+        pass = "ready", task = "ready", offset = 0 },
+      processed_bytes = 0, processed_tasks = 0, snapshot = snapshot }
+  end
+  local unit, unit_err
+  if state.cursor.phase == "logs1" or state.cursor.phase == "logs2" then
+    unit, unit_err = log_unit(self, root, hex, state)
+  elseif state.cursor.phase == "files1" then
+    unit, unit_err = file_unit(self, root, hex, state, 1)
+  elseif state.cursor.phase == "files2" then
+    unit, unit_err = file_unit(self, root, hex, state, 2)
+  else
+    return fail("invalid_snapshot", "phase")
+  end
+  if not unit then return nil, unit_err end
+  return advance_result(unit, state, unit.snapshot ~= nil)
+end
+
 function M.open(config)
   if type(config) ~= "table" then return fail("invalid_snapshot", "config") end
   if not is_canonical_root(config.root) then return fail("invalid_snapshot", "root") end
@@ -348,8 +914,25 @@ function M.open(config)
     return fail("unavailable", "json")
   end
   if type(config.sha256) ~= "function" then return fail("unavailable", "sha256") end
-  return setmetatable({ root = config.root, fs = fs, json = json, sha256 = config.sha256 },
-    Source)
+  if config.max_single_file_bytes ~= nil then
+    if type(config.max_single_file_bytes) ~= "number"
+      or config.max_single_file_bytes % 1 ~= 0 or config.max_single_file_bytes < 1 then
+      return fail("invalid_snapshot", "max_single_file_bytes")
+    end
+  end
+  if config.max_line_bytes ~= nil then
+    if type(config.max_line_bytes) ~= "number"
+      or config.max_line_bytes % 1 ~= 0 or config.max_line_bytes < 1 then
+      return fail("invalid_snapshot", "max_line_bytes")
+    end
+  end
+  if config.progress ~= nil and type(config.progress) ~= "table" then
+    return fail("invalid_snapshot", "progress")
+  end
+  return setmetatable({ root = config.root, fs = fs, json = json,
+    sha256 = config.sha256, progress = config.progress,
+    max_single_file_bytes = config.max_single_file_bytes,
+    max_line_bytes = config.max_line_bytes or (1024 * 1024) }, Source)
 end
 
 if type(remuda) == "table" then remuda._butler_inbox_source = M end
