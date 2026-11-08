@@ -600,6 +600,17 @@ local function execute_file_task(self, root, hex, state, pass, task)
     return delta, nil, #text, chain
   end
   if task.kind == "note" then
+    if pass == 1 then
+      local already, proof_err = progress_get(self, root, hex, state.generation,
+        "fileproof", { pass = 1, path = task.path })
+      if already == nil then return nil, proof_err, 0 end
+      if already ~= false then
+        -- The note object is already proven by another delivery's first
+        -- encounter; link this owner without rehashing or folding the path.
+        return { { op = "dependency", owner = id, role = "note",
+          path = task.path } }, nil, 0, state.cursor.chain
+      end
+    end
     local text, read_err = read_dependency(self, task.path)
     if not text then return nil, read_err, 0 end
     local digest, sha_err = sha_of(self, text, task.path)
