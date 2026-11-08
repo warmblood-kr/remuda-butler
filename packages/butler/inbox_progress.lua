@@ -55,18 +55,36 @@ local KINDS = { deliveries = true, reads = true, dependencies = true,
 local GET_KINDS = { delivery = true, read = true, dependency = true,
   fileproof = true, chunkproof = true }
 
-local function valid_cursor(cursor)
+local CURSOR_KEYS = { generation = true, phase = true, log = true, offset = true,
+  parse_offset = true, line_tail = true, after_key = true, chain = true,
+  first_chain = true, next_seq = true, complete = true, witness = true }
+local CURSOR_LOGS = { inbox = true, read = true }
+
+local function valid_cursor(cursor, max_line_bytes)
   if type(cursor) ~= "table" then return false end
+  for key in pairs(cursor) do
+    if not CURSOR_KEYS[key] then return false end
+  end
   if not nonempty(cursor.generation) then return false end
   if cursor.phase ~= nil and not PHASES[cursor.phase] then return false end
+  if cursor.log ~= nil and not CURSOR_LOGS[cursor.log] then return false end
   for _, key in ipairs({ "offset", "parse_offset", "next_seq" }) do
     if cursor[key] ~= nil and (not is_integer(cursor[key]) or cursor[key] < 0) then
       return false
     end
   end
+  if cursor.after_key ~= nil and type(cursor.after_key) ~= "string" then return false end
+  if cursor.witness ~= nil and type(cursor.witness) ~= "string" then return false end
   if cursor.complete ~= nil and type(cursor.complete) ~= "boolean" then return false end
-  if cursor.line_tail ~= nil and type(cursor.line_tail) ~= "string" then return false end
-  if cursor.chain ~= nil and type(cursor.chain) ~= "string" then return false end
+  if cursor.line_tail ~= nil then
+    if type(cursor.line_tail) ~= "string" or #cursor.line_tail > max_line_bytes then
+      return false
+    end
+  end
+  for _, key in ipairs({ "chain", "first_chain" }) do
+    if cursor[key] ~= nil and not is_hex(cursor[key]) then return false end
+    if cursor[key] ~= nil and #cursor[key] ~= 64 then return false end
+  end
   return true
 end
 
@@ -162,7 +180,7 @@ local function schema_ready(self)
   return true
 end
 
-local function add_delta(self, recipient, generation, op)
+local function add_delta(self, root, recipient, generation, op)
   if op.op == "delivery" then
     local statement, params
     if op.resent ~= nil then
@@ -266,7 +284,7 @@ local function add_delta(self, recipient, generation, op)
     return true
   end
   if op.op == "ready" then
-    return self:ready(recipient, generation, op)
+    return self:ready(self.root, recipient, generation, op)
   end
   if op.op == "invalid" then
     -- The generation is marked unusable by the cursor phase that is committed
@@ -276,26 +294,61 @@ local function add_delta(self, recipient, generation, op)
   return nil, "invalid_snapshot"
 end
 
-function Progress:ready(recipient, generation, op)
-  local deliveries = checked_query(self.db,
+function Progress:ready(root, recipient, generation, op)
+  local function count(sql, params)
+    local rows, err = checked_query(self.db, sql, params)
+    if not rows then return nil, err end
+    return tonumber(rows[1] and rows[1].n) or 0
+  end
+  local deliveries, why = count(
     "SELECT COUNT(*) AS n FROM progress_deliveries WHERE recipient = ? AND generation = ?",
     { recipient, generation })
   if not deliveries then return nil, "unavailable" end
-  local metadata = checked_query(self.db,
-    "SELECT COUNT(*) AS n FROM progress_metadata WHERE recipient = ? AND generation = ?",
+  local missing_metadata = count(
+    "SELECT COUNT(*) AS n FROM progress_deliveries d "
+      .. "LEFT JOIN progress_metadata m ON m.recipient = d.recipient "
+      .. "AND m.generation = d.generation AND m.message_id = d.message_id "
+      .. "WHERE d.recipient = ? AND d.generation = ? AND m.message_id IS NULL",
     { recipient, generation })
-  if not metadata then return nil, "unavailable" end
-  if tonumber(deliveries[1].n) ~= tonumber(metadata[1].n) then return nil, "not_committed" end
+  if not missing_metadata then return nil, "unavailable" end
+  if missing_metadata > 0 then return nil, "not_committed" end
   if op.first_chain ~= op.second_chain then return nil, "stale_generation" end
-  local proofs1 = checked_query(self.db,
-    "SELECT COUNT(*) AS n FROM progress_fileproofs "
-      .. "WHERE recipient = ? AND generation = ? AND pass = 1", { recipient, generation })
-  local proofs2 = checked_query(self.db,
-    "SELECT COUNT(*) AS n FROM progress_fileproofs "
-      .. "WHERE recipient = ? AND generation = ? AND pass = 2", { recipient, generation })
-  if not proofs1 or not proofs2 then return nil, "unavailable" end
-  if tonumber(proofs1[1].n) == 0 or tonumber(proofs1[1].n) ~= tonumber(proofs2[1].n) then
-    return nil, "not_committed"
+  local proofs1, proofs2
+  proofs1, why = count("SELECT COUNT(*) AS n FROM progress_fileproofs "
+    .. "WHERE recipient = ? AND generation = ? AND pass = 1", { recipient, generation })
+  if not proofs1 then return nil, "unavailable" end
+  proofs2, why = count("SELECT COUNT(*) AS n FROM progress_fileproofs "
+    .. "WHERE recipient = ? AND generation = ? AND pass = 2", { recipient, generation })
+  if not proofs2 then return nil, "unavailable" end
+  if proofs1 == 0 or proofs1 ~= proofs2 then return nil, "not_committed" end
+  -- Both passes must describe the same exact path set and bytes, not just the
+  -- same number of rows.
+  local mismatched = count(
+    "SELECT COUNT(*) AS n FROM progress_fileproofs a "
+      .. "LEFT JOIN progress_fileproofs b ON b.recipient = a.recipient "
+      .. "AND b.generation = a.generation AND b.path = a.path AND b.pass = 2 "
+      .. "WHERE a.recipient = ? AND a.generation = ? AND a.pass = 1 "
+      .. "AND (b.path IS NULL OR b.present <> a.present OR b.bytes <> a.bytes "
+      .. "OR b.sha256 <> a.sha256)", { recipient, generation })
+  if not mismatched then return nil, "unavailable" end
+  if mismatched > 0 then return nil, "stale_generation" end
+  local second_only = count(
+    "SELECT COUNT(*) AS n FROM progress_fileproofs a "
+      .. "LEFT JOIN progress_fileproofs b ON b.recipient = a.recipient "
+      .. "AND b.generation = a.generation AND b.path = a.path AND b.pass = 1 "
+      .. "WHERE a.recipient = ? AND a.generation = ? AND a.pass = 2 "
+      .. "AND b.path IS NULL", { recipient, generation })
+  if not second_only then return nil, "unavailable" end
+  if second_only > 0 then return nil, "stale_generation" end
+  for pass = 1, 2 do
+    local missing = count(
+      "SELECT COUNT(*) AS n FROM progress_dependencies d "
+        .. "LEFT JOIN progress_fileproofs f ON f.recipient = d.recipient "
+        .. "AND f.generation = d.generation AND f.path = d.path AND f.pass = ? "
+        .. "WHERE d.recipient = ? AND d.generation = ? AND f.path IS NULL",
+      { pass, recipient, generation })
+    if not missing then return nil, "unavailable" end
+    if missing > 0 then return nil, "not_committed" end
   end
   return true
 end
@@ -320,11 +373,25 @@ local function commit(self, root, recipient, expected_revision, next_state, delt
   if not is_integer(expected_revision) or expected_revision < 0 then
     return fail("invalid_snapshot", "expected_revision")
   end
-  if not valid_cursor(next_state) then return fail("invalid_snapshot", "cursor") end
+  if not valid_cursor(next_state, self.max_line_bytes) then
+    return fail("invalid_snapshot", "cursor")
+  end
   local ok, field = valid_delta(delta)
   if not ok then return fail("invalid_snapshot", field) end
   local length = dense_length(delta)
   if length > self.max_stage_records then return fail("invalid_snapshot", "delta") end
+  local ready_ops = 0
+  for index = 1, length do
+    if delta[index].op == "ready" then ready_ops = ready_ops + 1 end
+  end
+  if ready_ops > 1 then return fail("invalid_snapshot", "ready") end
+  if ready_ops == 1 then
+    if next_state.phase ~= "ready" or next_state.complete ~= true then
+      return fail("invalid_snapshot", "ready")
+    end
+  elseif next_state.complete == true then
+    return fail("invalid_snapshot", "complete")
+  end
   local encoded_ok, encoded = pcall(self.json.encode, next_state)
   if not encoded_ok or type(encoded) ~= "string" then
     return fail("invalid_snapshot", "cursor")
@@ -360,7 +427,7 @@ local function commit(self, root, recipient, expected_revision, next_state, delt
     return fail("stale_generation")
   end
   for index = 1, length do
-    local applied, why = add_delta(self, recipient, generation, delta[index])
+    local applied, why = add_delta(self, root, recipient, generation, delta[index])
     if not applied then
       local uncertain = rollback()
       if uncertain then return nil, uncertain end
@@ -565,8 +632,15 @@ function M.open(config)
     end
     max_records = config.max_stage_records
   end
+  local max_line_bytes = 1024 * 1024
+  if config.max_line_bytes ~= nil then
+    if not is_integer(config.max_line_bytes) or config.max_line_bytes < 1 then
+      return fail("invalid_snapshot", "max_line_bytes")
+    end
+    max_line_bytes = config.max_line_bytes
+  end
   local self = setmetatable({ db = db, root = config.root, json = json,
-    max_stage_records = max_records }, Progress)
+    max_stage_records = max_records, max_line_bytes = max_line_bytes }, Progress)
   local ready, why = schema_ready(self)
   if not ready then return fail(why) end
   return { load = function(root, recipient) return load(self, root, recipient) end,
