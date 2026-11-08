@@ -69,8 +69,8 @@ Evidence on this candidate:
 - Inbox producer `9cb44ef` supplies the flat identities plus the exact NUL
   `butler-inbox-compat-v1` tuple; store_id may be `config.store_id`,
   data_revision is frozen, verification_id is the final proof hash.
-- `authority.adapter(providers)` is the coordinator seam: bind providers once,
-  then start(cfg,{inbox_proof=fn})/advance/certificate/status/inventories.
+- `authority.adapter(providers)` binds once, then start(cfg,{inbox_proof=fn})/
+  advance/certificate/status/inventories for the inbox coordinator.
 - `relay_archive.providers` copies <=64KiB chunks to durable `.part.NNNN`,
   writes a small digest manifest, re-reads one part per call, then renames the
   source and fences both parents; no whole-file SHA/publish or unlink. Native:
