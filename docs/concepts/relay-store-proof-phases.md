@@ -54,9 +54,9 @@ count. No whole-target COUNT/EXCEPT is used.
 DERIVED checks processed and pending-event directions with indexed aggregate
 passes (not per-row JSON); delivered events require a witnessed CRLF-normalized
 ack and `inbox_mail_id` must stay NULL. Outbox intents are paged metadata-only:
-no payload enters Lua; SQL decides payload/txn equality, and only bounded
-attempts (<=64B trimmed or <=16 hex digits) or a long-number comparison enter
-the check. Long junk requires stored NULL; other long numeric forms refuse.
+no payload enters Lua; SQL decides payload/txn equality, and each text attempt
+is fetched alone only after its length fits the remaining max_bytes, then
+compared with the exact importer tonumber. Non-text attempts stay in SQL.
 The first page has no lower bound so an empty reply id is checked. Extra or
 missing rows refuse. Measured: derived ~2ms/2k rows; the 110001-row proof
 <=0.12s/call. READY creates the certificate only when all phases share the same witness and
