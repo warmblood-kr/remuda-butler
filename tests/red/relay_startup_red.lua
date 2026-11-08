@@ -73,7 +73,8 @@ end)
 
 check("authority seam exists and refuses without a real inbox producer", function()
   local authority = assert(dofile("packages/butler/relay_authority.lua"))
-  for _, name in ipairs({ "start", "advance", "status", "assert_inbox_compatible" }) do
+  for _, name in ipairs({ "start", "advance", "status", "proof", "certificate",
+      "inventories", "assert_inbox_compatible", "authorize" }) do
     assert(type(authority[name]) == "function", "missing authority." .. name)
   end
   local result, why = authority.start({ config_path = "/tmp/red-relay" },
