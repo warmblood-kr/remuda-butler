@@ -16,7 +16,8 @@ hosted session command is `tail -f <scratch>/host-<tag>`, so the host always
 has a unique argv token even where `ps` does not expose another process's
 environment. The host-orphan check is argv-based on macOS; the environment
 scan is an extra on Linux. A ps/pgrep failure is treated as unknown, never as
-proven absence, and the old daemon is reaped with a bounded wait.
+proven absence; a self-test feeds fake pgrep/ps status 2 and asserts that path.
+The old daemon is reaped with a bounded wait.
 
 - **A**: creates a host-backed session (`REMUDA_EXPERIMENTAL_SESSION_HOST=1`),
   requires `version --hosts` to report it, requires `reload --check` to be

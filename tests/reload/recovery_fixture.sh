@@ -202,6 +202,38 @@ check_absent() {
   return 0
 }
 
+# Prove the status-2 path is not silently read as absence. This uses fake
+# pgrep/ps binaries, not a live daemon.
+inspection_failure_selftest() (
+  set -u
+  fake=$(mktemp -d /tmp/rrf-inspect.XXXXXX) || return 1
+  T=$(mktemp -d /tmp/rrf-selftest.XXXXXX) || return 1
+  S=selftest
+  SOCK="$T/selftest.sock"
+  HOST_MARKER="$T/host-selftest"
+  BIN=/bin/echo
+  cleanup_selftest() { rm -rf -- "$fake" "$T"; }
+  trap cleanup_selftest EXIT
+
+  printf '%s\n' '#!/bin/sh' 'exit 2' >"$fake/pgrep"
+  printf '%s\n' '#!/bin/sh' 'exit 2' >"$fake/ps"
+  chmod +x "$fake/pgrep" "$fake/ps"
+  local rc
+  PATH="$fake:$PATH" daemon_pids >/dev/null; rc=$?
+  [[ "$rc" == 2 ]] || return 1
+  PATH="$fake:$PATH" candidate_pids >/dev/null; rc=$?
+  [[ "$rc" == 2 ]] || return 1
+  PATH="$fake:$PATH" host_marker_pids >/dev/null; rc=$?
+  [[ "$rc" == 2 ]] || return 1
+  PATH="$fake:$PATH" runtime_env_pids >/dev/null; rc=$?
+  [[ "$rc" == 2 ]] || return 1
+  PATH="$fake:$PATH" private_procs_gone; rc=$?
+  [[ "$rc" == 2 ]] || return 1
+  if PATH="$fake:$PATH" check_absent x daemon_pids 2>/dev/null; then return 1; fi
+
+  return 0
+)
+
 daemon_id() {
   [[ -f "$SOCK.daemon-id" ]] || return 1
   cat "$SOCK.daemon-id"
@@ -507,6 +539,12 @@ run_case() {
     *) FAILED+=("$name"); fail=1; echo "FAIL $name"; tail -40 "$log";;
   esac
 }
+
+if inspection_failure_selftest; then
+  echo "inspection-failure self-test: PASS (fake pgrep/ps status 2 is unknown, not absence)"
+else
+  echo "FAIL inspection-failure self-test"; FAILED+=("inspection-selftest"); fail=1
+fi
 
 run_case A case_a
 run_case B case_b
