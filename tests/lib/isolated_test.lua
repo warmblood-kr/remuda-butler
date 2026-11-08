@@ -21,12 +21,23 @@ local ID_PATTERN = '^[A-Za-z0-9._-]+$'
 local SERVER_PATTERN = '^[A-Za-z0-9._-]+$'
 
 -- Explicit checked identity variables. os.getenv cannot enumerate the
--- environment, so this is not a wildcard proof; the wrapper scrubs every
--- REMUDA_BUTLER_* name in the child before launch and the list below covers
--- the documented ones. A new variable must be added here and to the wrapper.
+-- environment, so this is a checked subset, not a wildcard proof: the shell
+-- wrapper scrubs the whole REMUDA_BUTLER_*/REMUDA_TEST_* prefixes plus the
+-- named session/reload variables before launch. A new name should be added
+-- here and to the wrapper.
 local IDENTITY_ENV = {
   'REMUDA_SERVER',
+  'REMUDA_SESSION_CAPABILITY',
+  'REMUDA_SESSION_ID',
+  'REMUDA_SESSION_NAME',
+  'REMUDA_DAEMON_ID',
+  'REMUDA_RELOAD_SOURCE',
+  'REMUDA_RELOAD_CANDIDATE',
+  'REMUDA_BUTLER_SERVER',
   'REMUDA_BUTLER_AGENT_ID',
+  'REMUDA_BUTLER_AGENT_ALIAS',
+  'REMUDA_BUTLER_AGENT_KIND',
+  'REMUDA_BUTLER_AGENT_ORDER',
   'REMUDA_BUTLER_LEADER_ID',
   'REMUDA_BUTLER_TOKEN',
   'REMUDA_BUTLER_CONFIG',
@@ -38,6 +49,10 @@ local IDENTITY_ENV = {
   'REMUDA_BUTLER_NAME',
   'REMUDA_BUTLER_LEADER',
   'REMUDA_BUTLER_AGENT',
+  'REMUDA_BUTLER_BINDING_NONCE',
+  'REMUDA_BUTLER_STRICT_INSTANCE_BINDING',
+  'REMUDA_BUTLER_TEST',
+  'REMUDA_BUTLER_TOPICS',
 }
 
 local function refuse(fmt, ...)
@@ -163,12 +178,6 @@ local function check_envelope()
     end
   end
   return envelope
-end
-
-local function nonempty(name, value)
-  if value == nil then return false end
-  if type(value) ~= 'table' then return true end
-  return next(value) ~= nil
 end
 
 local function check_empty_runtime(remuda)

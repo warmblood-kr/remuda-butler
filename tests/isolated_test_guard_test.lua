@@ -111,7 +111,13 @@ local function deep_changes(saved)
   return result
 end
 
-expect_admitted('valid empty envelope', environment(), empty_remuda())
+local admitted_host = empty_remuda()
+local admitted_saved = deep_snapshot(admitted_host)
+expect_admitted('valid empty envelope', environment(), admitted_host)
+local admitted_changes = deep_changes(admitted_saved)
+if #admitted_changes > 0 then
+  fail('valid empty envelope', 'guard mutated the admitted graph: ' .. table.concat(admitted_changes, '; '))
+end
 
 expect_refused('missing context', environment({ REMUDA_TEST_CONTEXT = false }), empty_remuda())
 expect_refused('malformed context', environment({ REMUDA_TEST_CONTEXT = 'invalid' }), empty_remuda())
@@ -127,6 +133,10 @@ expect_refused('wrong home binding', environment({ HOME = '/private/tmp/foreign-
 expect_refused('wrong runtime binding', environment({ REMUDA_RUNTIME_DIR = '/private/tmp/foreign-runtime' }), empty_remuda())
 expect_refused('inherited server', environment({ REMUDA_SERVER = 'production' }), empty_remuda())
 expect_refused('inherited identity', environment({ REMUDA_BUTLER_AGENT_ID = 'production-member' }), empty_remuda())
+expect_refused('inherited butler alias', environment({ REMUDA_BUTLER_AGENT_ALIAS = 'production' }), empty_remuda())
+expect_refused('inherited daemon id', environment({ REMUDA_DAEMON_ID = 'production' }), empty_remuda())
+expect_refused('inherited session id', environment({ REMUDA_SESSION_ID = 'production' }), empty_remuda())
+expect_refused('inherited reload source', environment({ REMUDA_RELOAD_SOURCE = 'production' }), empty_remuda())
 
 -- Marker never overrides live evidence, including an otherwise empty bus.
 expect_refused('any empty bus', environment(), {

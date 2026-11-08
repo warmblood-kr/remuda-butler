@@ -44,7 +44,11 @@ isolated_env_prepare() {
 
   S=$server
   T=$(mktemp -d "/tmp/${prefix}.XXXXXX") || return 1
+  # Bind cleanup to the tree we just created before any refusal can fire, so
+  # an alias/private-dir failure cannot leak it. Canonicalize, then rebind.
+  export REMUDA_RUNTIME_DIR="$T/runtime"
   T=$(cd "$T" && pwd -P) || return 1
+  export REMUDA_RUNTIME_DIR="$T/runtime"
   isolated_env_private_dir "$T" || return 1
 
   [[ "$T" != "$default_runtime" && "$T" != "$default_runtime/"* ]] ||
@@ -60,11 +64,14 @@ isolated_env_prepare() {
   export XDG_RUNTIME_DIR="$T/xdg-runtime"
   export REMUDA_RUNTIME_DIR="$T/runtime"
 
-  # Identity must come only from this disposable envelope. Scrub the child
-  # environment before the daemon inherits it. The shell can enumerate the
-  # prefix; the Lua guard checks the documented names (plus REMUDA_SERVER).
-  unset REMUDA_SERVER REMUDA_SESSION_CAPABILITY
+  # Identity and test knobs must come only from this disposable envelope.
+  # Scrub the child environment before the daemon inherits it. The shell can
+  # enumerate the prefixes; the Lua guard checks an explicit subset.
+  unset REMUDA_SERVER REMUDA_SESSION_CAPABILITY \
+    REMUDA_SESSION_ID REMUDA_SESSION_NAME REMUDA_DAEMON_ID \
+    REMUDA_RELOAD_SOURCE REMUDA_RELOAD_CANDIDATE
   for name in ${!REMUDA_BUTLER_@}; do unset "$name"; done
+  for name in ${!REMUDA_TEST_@}; do unset "$name"; done
 
   for name in "$HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_RUNTIME_DIR" "$REMUDA_RUNTIME_DIR"; do
     mkdir -m 700 "$name" || return 1
@@ -100,13 +107,27 @@ isolated_env_check_daemon() {
   return 0
 }
 
-# True while PID is a live (non-zombie) process. ps also reports empty when it
-# is gone, and Z* when it exited but has not been reaped yet.
+# True while PID may be alive. kill -0 is authoritative for a process we own;
+# a permission/unknown failure is treated as alive (fail closed), never as
+# gone. A zombie still answers kill -0 until it is reaped, so callers use
+# isolated_env_pid_zombie (when ps is usable) to prove exit.
 isolated_env_pid_alive() {
-  local pid=$1 state
+  local pid=$1 err
   [[ -n "$pid" ]] || return 1
+  if kill -0 "$pid" 2>/dev/null; then return 0; fi
+  err=$(kill -0 "$pid" 2>&1) || true
+  case "$err" in
+    *[Pp]ermission*|*"not permitted"*|*"Operation not permitted"*) return 0 ;;
+  esac
+  return 1
+}
+
+# True only when ps positively reports Z. A ps failure (for example EPERM in a
+# sandbox) proves nothing, so it is not treated as an exit.
+isolated_env_pid_zombie() {
+  local pid=$1 state
   state=$(ps -o stat= -p "$pid" 2>/dev/null) || return 1
-  [[ -n "$state" && "$state" != Z* ]]
+  [[ "$state" == Z* ]]
 }
 
 isolated_env_cleanup() {
@@ -120,7 +141,11 @@ isolated_env_cleanup() {
   local alive=0 up=0 i
   if [[ -n "$pid" ]]; then
     if isolated_env_pid_alive "$pid"; then
-      alive=1
+      if isolated_env_pid_zombie "$pid"; then
+        wait "$pid" 2>/dev/null || true
+      else
+        alive=1
+      fi
     else
       wait "$pid" 2>/dev/null || true
     fi
@@ -133,6 +158,11 @@ isolated_env_cleanup() {
     # keep the scratch if it cannot be proven exited.
     for i in $(seq 1 30); do
       if ! isolated_env_pid_alive "$pid"; then
+        alive=0
+        wait "$pid" 2>/dev/null || true
+        break
+      fi
+      if isolated_env_pid_zombie "$pid"; then
         alive=0
         wait "$pid" 2>/dev/null || true
         break
