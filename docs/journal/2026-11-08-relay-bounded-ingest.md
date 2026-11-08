@@ -64,15 +64,15 @@ Evidence on this candidate:
   manifest rows), authority refuses without the real producer proof, archive
   requires both proofs, and relay.start/new plus boot use the gate.
 - Native gate: 61 bounded advances, max 1 action each, changed stamp refused,
-  producer shape accepted, tampered/blocked refused, gate refuses incomplete,
-  restart resumes, adapter binds, archive plan 4 files with 0B ack/drain.
+  producer shape accepted, tampered/blocked refused, restart resumes, adapter
+  binds, archive plans 4 files with 0B ack/drain.
 - Inbox producer `9cb44ef` supplies the flat identities plus the exact NUL
   `butler-inbox-compat-v1` tuple; store_id may be `config.store_id`,
   data_revision is frozen, verification_id is the final proof hash.
 - `authority.adapter(providers)` is the coordinator seam: bind providers once,
   then start(cfg,{inbox_proof=fn})/advance/certificate/status/inventories.
-- `relay_archive.providers` is the actual provider: staged bounded reads,
-  write_atomic publish, exact digest, rename retire, write_atomic fences in
-  both parents, no unlink. Native run copied+retired 4 with exact sizes and
-  both fences.
+- `relay_archive.providers` copies <=64KiB chunks to durable `.part.NNNN`,
+  writes a small digest manifest, re-reads one part per call, then renames the
+  source and fences both parents; no whole-file SHA/publish or unlink. Native:
+  200KB -> 4 parts, max 65536B/call, manifest reopen resumes verification.
 

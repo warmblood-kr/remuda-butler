@@ -2,16 +2,20 @@
 --
 -- Planning is bound to BOTH current proofs: the relay certificate reread under
 -- the current owner and the real inbox producer proof. Nothing is archived
--- from a cached status, a boolean or a count. Bytes are copied/verified through
--- injected providers; the proven shell filesystem has no generic fsync or
--- durable rename, so this module never invents one and never deletes a source.
+-- from a cached status, a boolean or a count. Bytes move in bounded 64KiB
+-- chunks; each chunk is durably published with fs.write_atomic, then a small
+-- manifest binds their exact digests. The source is retired by atomic rename
+-- after every chunk is re-read and verified; no whole-file SHA/publish happens
+-- inside one call.
 --
--- The GO for this branch does not authorize a live archive. Until the caller
--- supplies the copy/rename/parent-sync providers, advance stays blocked and the
--- originals remain untouched.
+-- The shell filesystem has write_atomic/mkdir_new/realpath/is_symlink/lock but
+-- no generic read/fsync/durable_rename. This module uses only those proven
+-- primitives and never invents fsync or deletes an original.
 local M = {}
 
 local plans = {}
+local MAX_CHUNK = 64 * 1024
+local MAX_PARTS = 1024
 
 local function identifier(value) return type(value) == 'string' and value ~= '' end
 
@@ -92,10 +96,15 @@ local function inventory(input)
       return nil, 'stat:' .. tostring(stat_why or file.role)
     else
       plan_files[#plan_files + 1] = { relative = file.path, role = file.role,
-        bytes = stat.size, state = 'planned', offset = 0 }
+        bytes = stat.size, state = 'planned', offset = 0, parts = {},
+        verify_index = 1 }
     end
   end
   return plan_files
+end
+
+local function dirname(path)
+  return path:match('^(.*)/[^/]*$') or '.'
 end
 
 local function destination(plan, file)
@@ -103,45 +112,14 @@ local function destination(plan, file)
   return plan.archive_root .. '/' .. relative
 end
 
-local function dirname(path)
-  return path:match('^(.*)/[^/]*$') or '.'
+local function part_path(dest, index)
+  return string.format('%s.part.%04d', dest, index)
 end
 
--- plan(input) -> durable per-file plan | nil, reason
--- input = { job_id, cfg, relay_proof, inbox_proof, deps, archive_root }
-function M.plan(input)
-  if type(input) ~= 'table' then return nil, 'proof_missing' end
-  local proven, proof_why = prove(input)
-  if not proven then return nil, proof_why end
-  if not identifier(input.job_id) then return nil, 'job_id' end
-  local deps = input.deps
-  if deps == nil then
-    deps = M.providers(input.fs or remuda.fs, input.digest or remuda.digest)
-    if deps == nil then return nil, 'deps_missing' end
-  end
-  local files, inv_why = inventory({ deps = deps, cfg = input.cfg,
-    config_path = input.config_path, base_path = input.base_path })
-  if not files then return nil, inv_why end
-  local archive_root = input.archive_root or
-    ((input.cfg and input.cfg.archive_root) or
-      (dirname(input.cfg and input.cfg.config_path or input.base_path) ..
-        '/archive/' .. input.job_id))
-  local plan = { job_id = input.job_id, phase = 'planned',
-    archive_root = archive_root, files = files, deps = deps,
-    relay_certificate_id = input.relay_proof.certificate_id,
-    relay_verification_id = input.relay_proof.verification_id,
-    inbox_hash = input.inbox_proof.compatibility_hash or input.inbox_proof.hash,
-    copied = 0, retired = 0, blocked = nil }
-  plans[input.job_id] = plan
-  return plan
-end
-
--- Actual archive providers using the proven shell capabilities only:
--- fs.write_atomic/mkdir_new/realpath/lock. Bytes are read in bounded chunks and
--- staged locally; the publish step rewrites the staged bytes through
--- write_atomic (durable), verifies the exact digest, then retires the source by
--- rename. Both parents receive a durable write_atomic fence after the rename.
--- There is no generic fsync/durable_rename and none is invented.
+-- Actual providers using the proven shell capabilities only. Each call reads
+-- and writes at most one 64KiB chunk; the manifest is small. Verification
+-- re-reads one chunk per call. There is no generic fsync/durable_rename and
+-- none is invented.
 function M.providers(fs, digest)
   if type(fs) ~= 'table' or type(fs.write_atomic) ~= 'function'
       or type(fs.mkdir_new) ~= 'function' then
@@ -150,15 +128,28 @@ function M.providers(fs, digest)
   if type(digest) ~= 'table' or type(digest.sha256) ~= 'function' then
     return nil, 'digest'
   end
-  local max_file = 32 * 1024 * 1024
-  local function read_all(path, limit)
+  local function hash(bytes)
+    local ok, value = pcall(digest.sha256, bytes)
+    if not ok or type(value) ~= 'string' or #value ~= 64 then return nil, 'digest' end
+    return value
+  end
+  local function read_chunk(path, offset, limit)
     local file, why = io.open(path, 'rb')
     if not file then return nil, tostring(why or 'open') end
-    local raw = file:read('*a')
+    local size = file:seek('end')
+    if offset > size then file:close(); return nil, 'offset' end
+    local ok, seek_why = file:seek('set', offset)
+    if not ok then file:close(); return nil, tostring(seek_why or 'seek') end
+    local chunk
+    if offset == size then
+      chunk = ''
+    else
+      chunk = file:read(limit)
+    end
     file:close()
-    if type(raw) ~= 'string' then return nil, 'read' end
-    if #raw > (limit or max_file) then return nil, 'oversize' end
-    return raw
+    if chunk == nil then return nil, 'read' end
+    if #chunk > limit then return nil, 'oversize' end
+    return chunk
   end
   local function ensure_dir(path)
     local current = path
@@ -186,68 +177,78 @@ function M.providers(fs, digest)
     file:close()
     return { size = size }
   end
-  local function digest_file(path)
-    local raw, why = read_all(path)
-    if not raw then return nil, why end
-    local ok, value = pcall(digest.sha256, raw)
-    if not ok or type(value) ~= 'string' or #value ~= 64 then return nil, 'digest' end
+  local function copy_chunk(src, part, offset, limit)
+    if limit < 1 or limit > MAX_CHUNK then return nil, 'budget' end
+    local chunk, why = read_chunk(src, offset, limit)
+    if not chunk then return nil, why end
+    if #chunk == 0 then return { bytes = 0, digest = hash('') } end
+    local digest_value, hash_why = hash(chunk)
+    if not digest_value then return nil, hash_why end
+    local ok, write_why = fs.write_atomic(part, chunk, { private = true })
+    if not ok then return nil, tostring(write_why or 'part_write') end
+    return { bytes = #chunk, digest = digest_value }
+  end
+  local function verify_part(part, expected, limit)
+    if limit < 1 or limit > MAX_CHUNK then return nil, 'budget' end
+    local chunk, why = read_chunk(part, 0, limit)
+    if not chunk then return nil, why end
+    local value, hash_why = hash(chunk)
+    if not value then return nil, hash_why end
+    if value ~= expected then return nil, 'digest' end
+    return true
+  end
+  local function manifest_root(parts, bytes)
+    local fields = { 'relay-archive-manifest-v1', tostring(bytes) }
+    for _, part in ipairs(parts) do
+      fields[#fields + 1] = part.index .. ':' .. part.bytes .. ':' .. part.digest
+    end
+    return hash(table.concat(fields, '\0'))
+  end
+  local function write_manifest(path, manifest)
+    local json = remuda and remuda.json
+    if type(json) ~= 'table' or type(json.encode) ~= 'function' then
+      return nil, 'json'
+    end
+    local encoded = { version = manifest.version, bytes = manifest.bytes,
+      root = manifest.root }
+    encoded.parts = json.array and json.array(manifest.parts or {})
+      or (manifest.parts or {})
+    local ok, text = pcall(json.encode, encoded)
+    if not ok then return nil, 'manifest_encode:' .. tostring(text) end
+    local wrote, why = fs.write_atomic(path, text, { private = true })
+    if not wrote then return nil, tostring(why or 'manifest_write') end
+    return true
+  end
+  local function read_manifest(path)
+    local file = io.open(path, 'rb')
+    if not file then return nil, 'missing' end
+    local raw = file:read(262144)
+    file:close()
+    if type(raw) ~= 'string' or #raw > 262144 then return nil, 'manifest_read' end
+    local json = remuda and remuda.json
+    if type(json) ~= 'table' or type(json.decode) ~= 'function' then
+      return nil, 'json'
+    end
+    local ok, value = pcall(json.decode, raw)
+    if not ok or type(value) ~= 'table' then return nil, 'manifest_decode' end
     return value
   end
-  local function copy_chunk(src, staging, offset, limit)
-    local file, why = io.open(src, 'rb')
-    if not file then return nil, tostring(why or 'open') end
-    local size = file:seek('end')
-    if offset > size then file:close(); return nil, 'offset' end
-    local ok, seek_why = file:seek('set', offset)
-    if not ok then file:close(); return nil, tostring(seek_why or 'seek') end
-    local chunk
-    if offset == size then
-      chunk = ''
-    else
-      chunk = file:read(limit)
-      if chunk == nil then file:close(); return nil, 'read' end
+  local function rename_once(src, manifest_path, retained, retained_manifest,
+      root, bytes)
+    local manifest, manifest_why = read_manifest(manifest_path)
+    if not manifest then return nil, manifest_why end
+    if manifest.root ~= root or tonumber(manifest.bytes) ~= tonumber(bytes) then
+      return nil, 'manifest_mismatch'
     end
-    file:close()
-    local target
-    if offset == 0 then
-      target = io.open(staging, 'wb')
-    else
-      local size = stat(staging)
-      if not size or size.size ~= offset then return nil, 'staging_mismatch' end
-      target = io.open(staging, 'ab')
-    end
-    if not target then return nil, 'staging_open' end
-    local wrote, write_why = target:write(chunk)
-    target:close()
-    if not wrote then return nil, tostring(write_why or 'stage_write') end
-    return #chunk
-  end
-  local function close_copy(staging)
-    local size = stat(staging)
-    if not size then return nil, 'staging_missing' end
-    return true
-  end
-  local function publish_verified(staging, verified)
-    local raw, why = read_all(staging)
-    if not raw then return nil, why end
-    local ok, write_why = fs.write_atomic(verified, raw, { private = true })
-    if not ok then return nil, tostring(write_why or 'publish') end
-    return true
-  end
-  local function rename_once(src, verified, retained)
-    local src_digest, src_why = digest_file(src)
-    if not src_digest then return nil, src_why end
-    local verified_digest, verified_why = digest_file(verified)
-    if not verified_digest then return nil, verified_why end
-    if src_digest ~= verified_digest then return nil, 'verified_mismatch' end
     local existing = stat(retained)
     if existing then
-      local same, same_why = digest_file(retained)
-      if not same then return nil, same_why end
-      if same ~= src_digest then return nil, 'collision' end
-      -- Exact retained destination is reusable. The source path already has a
-      -- durable identical retained artifact, so it is retired without deleting
-      -- or overwriting either copy.
+      local prior, prior_why = read_manifest(retained_manifest)
+      if not prior then return nil, 'collision:' .. tostring(prior_why) end
+      if prior.root ~= root or tonumber(prior.bytes) ~= tonumber(bytes) then
+        return nil, 'collision'
+      end
+      -- Exact retained identity is reusable; neither copy is overwritten and
+      -- nothing is deleted.
       return true
     end
     local ok, why = os.rename(src, retained)
@@ -255,21 +256,56 @@ function M.providers(fs, digest)
       if tostring(why):lower():find('cross', 1, true) then return 'cross_device' end
       return nil, tostring(why or 'rename')
     end
+    local wrote, write_why = write_manifest(retained_manifest,
+      { version = 1, root = root, bytes = bytes })
+    if not wrote then return nil, tostring(write_why or 'retained_manifest') end
     return true
   end
   local function sync_user_parents(src, retained)
-    local token = digest.sha256(tostring(os.time()) .. '\0' .. tostring(src))
+    local token, token_why = hash(tostring(os.time()) .. '\0' .. tostring(src))
+    if not token then return nil, token_why end
     for _, path in ipairs({ dirname(src), dirname(retained) }) do
       local fence = path .. '/.relay-archive-fence'
-      local ok, why = fs.write_atomic(fence, tostring(token), { private = true })
+      local ok, why = fs.write_atomic(fence, token, { private = true })
       if not ok then return nil, tostring(why or 'parent_fence') end
     end
     return true
   end
   return { stat = stat, ensure_dir = ensure_dir, copy_chunk = copy_chunk,
-    close_copy = close_copy, digest_file = digest_file,
-    publish_verified = publish_verified, rename_once = rename_once,
-    sync_user_parents = sync_user_parents, max_file = max_file }
+    verify_part = verify_part, manifest_root = manifest_root,
+    write_manifest = write_manifest, read_manifest = read_manifest,
+    rename_once = rename_once, sync_user_parents = sync_user_parents,
+    max_chunk = MAX_CHUNK, max_parts = MAX_PARTS }
+end
+
+-- plan(input) -> durable per-file plan | nil, reason
+-- input = { job_id, cfg, relay_proof, inbox_proof, deps, archive_root }
+function M.plan(input)
+  if type(input) ~= 'table' then return nil, 'proof_missing' end
+  local proven, proof_why = prove(input)
+  if not proven then return nil, proof_why end
+  if not identifier(input.job_id) then return nil, 'job_id' end
+  local deps = input.deps
+  if deps == nil then
+    deps = M.providers(input.fs or (remuda and remuda.fs),
+      input.digest or (remuda and remuda.digest))
+    if deps == nil then return nil, 'deps_missing' end
+  end
+  local files, inv_why = inventory({ deps = deps, cfg = input.cfg,
+    config_path = input.config_path, base_path = input.base_path })
+  if not files then return nil, inv_why end
+  local archive_root = input.archive_root or
+    ((input.cfg and input.cfg.archive_root) or
+      (dirname(input.cfg and input.cfg.config_path or input.base_path) ..
+        '/archive/' .. input.job_id))
+  local plan = { job_id = input.job_id, phase = 'planned',
+    archive_root = archive_root, files = files, deps = deps,
+    relay_certificate_id = input.relay_proof.certificate_id,
+    relay_verification_id = input.relay_proof.verification_id,
+    inbox_hash = input.inbox_proof.compatibility_hash or input.inbox_proof.hash,
+    copied = 0, retired = 0, blocked = nil }
+  plans[input.job_id] = plan
+  return plan
 end
 
 local function next_file(plan)
@@ -279,9 +315,8 @@ local function next_file(plan)
   return nil
 end
 
--- advance(job_id, budget) -> exactly one per-file transition.
--- The source is never unlinked. A verified destination is never overwritten by
--- an unverified original: a collision blocks unless the exact digest matches.
+-- advance(job_id, budget) -> exactly one bounded per-file transition.
+-- Copy/verify reads and writes at most `budget.max_bytes` (<=64KiB) per call.
 function M.advance(job_id, budget)
   local plan = plans[job_id]
   if not plan then return nil, 'plan_missing' end
@@ -294,16 +329,16 @@ function M.advance(job_id, budget)
   end
   local deps = plan.deps
   if type(deps) ~= 'table' then return nil, 'deps_missing' end
-  local limit = tonumber(budget and budget.max_bytes) or 65536
-  if limit < 1 or limit > 65536 then return nil, 'budget' end
+  local limit = tonumber(budget and budget.max_bytes) or MAX_CHUNK
+  if limit < 1 or limit > MAX_CHUNK then return nil, 'budget' end
   local dest = destination(plan, file)
-  local staging = dest .. '.part'
-  local verified = dest .. '.verified'
+  local manifest_path = dest .. '.manifest'
   local retained = dest .. '.original'
+  local retained_manifest = retained .. '.manifest'
   plan.phase = 'archiving'
   if file.state == 'planned' then
-    if type(deps.copy_chunk) ~= 'function' or type(deps.digest_file) ~= 'function'
-        or type(deps.stat) ~= 'function' then
+    if type(deps.copy_chunk) ~= 'function' or type(deps.verify_part) ~= 'function'
+        or type(deps.write_manifest) ~= 'function' or type(deps.stat) ~= 'function' then
       plan.blocked = 'copy_provider_missing'
       return nil, 'blocked:' .. plan.blocked
     end
@@ -312,60 +347,77 @@ function M.advance(job_id, budget)
       if not made then plan.blocked = 'mkdir:' .. tostring(make_why or file.role)
         return nil, 'blocked:' .. plan.blocked end
     end
-    local digest, digest_why = deps.digest_file(file.relative)
-    if not digest then plan.blocked = 'digest:' .. tostring(digest_why or file.role)
-      return nil, 'blocked:' .. plan.blocked end
-    file.digest = digest
-    local existing, existing_why = deps.stat(verified)
+    local existing = deps.stat(manifest_path)
     if existing ~= nil then
-      local same, same_why = deps.digest_file(verified)
-      if not same then plan.blocked = 'collision:' .. tostring(same_why or file.role)
-        return nil, 'blocked:' .. plan.blocked end
-      if same ~= digest then
-        plan.blocked = 'collision:' .. file.role
+      local manifest, manifest_why = deps.read_manifest(manifest_path)
+      if not manifest or tonumber(manifest.bytes) ~= file.bytes
+          or type(manifest.root) ~= 'string' or type(manifest.parts) ~= 'table'
+          or #manifest.parts > MAX_PARTS then
+        plan.blocked = 'collision:' .. tostring(manifest_why or file.role)
         return nil, 'blocked:' .. plan.blocked
       end
-      file.state = 'copied_verified'
+      file.parts, file.root = manifest.parts, manifest.root
+      file.offset, file.verify_index = file.bytes, 1
+      file.state = 'verifying'
     else
+      file.parts, file.offset, file.verify_index = {}, 0, 1
       file.state = 'copying'
-      if file.bytes == 0 then
-        -- Create the empty staging artifact once; the next action publishes it.
-        local empty, empty_why = deps.copy_chunk(file.relative, staging, 0, 1)
-        if empty == nil then plan.blocked = 'copy:' .. tostring(empty_why or file.role)
-          return nil, 'blocked:' .. plan.blocked end
-        if empty ~= 0 then plan.blocked = 'source_changed:' .. file.role
-          return nil, 'blocked:' .. plan.blocked end
-      end
     end
     return { job_id = job_id, phase = plan.phase, file = file.relative,
       state = file.state, bytes = file.bytes, offset = file.offset }
   end
   if file.state == 'copying' then
-    if file.offset >= file.bytes then
-      -- Empty ack/drain sidecars are valid zero-byte artifacts.
-      local copy_done, copy_why = deps.close_copy(staging)
-      if copy_done ~= true then plan.blocked = 'copy:' .. tostring(copy_why or file.role)
+    if file.offset < file.bytes then
+      if #file.parts >= MAX_PARTS then
+        plan.blocked = 'parts:' .. file.role
+        return nil, 'blocked:' .. plan.blocked
+      end
+      local index = #file.parts + 1
+      local copy, copy_why = deps.copy_chunk(file.relative,
+        part_path(dest, index), file.offset, math.min(limit, file.bytes - file.offset))
+      if copy == nil then plan.blocked = 'copy:' .. tostring(copy_why or file.role)
         return nil, 'blocked:' .. plan.blocked end
-      local digest, digest_why = deps.digest_file(staging)
-      if not digest then plan.blocked = 'digest:' .. tostring(digest_why or file.role)
+      local bytes = tonumber(copy.bytes) or 0
+      if bytes < 0 or bytes > limit then plan.blocked = 'copy_budget:' .. file.role
         return nil, 'blocked:' .. plan.blocked end
-      if digest ~= file.digest then plan.blocked = 'source_changed:' .. file.role
-        return nil, 'blocked:' .. plan.blocked end
-      local published, publish_why = deps.publish_verified(staging, verified)
-      if published ~= true then plan.blocked = 'publish:' .. tostring(publish_why or file.role)
-        return nil, 'blocked:' .. plan.blocked end
+      file.parts[#file.parts + 1] = { index = index, bytes = bytes,
+        digest = copy.digest }
+      file.offset = file.offset + bytes
+      return { job_id = job_id, phase = plan.phase, file = file.relative,
+        state = file.state, bytes = file.bytes, offset = file.offset,
+        part = index, part_bytes = bytes }
+    end
+    local root, root_why = deps.manifest_root(file.parts, file.bytes)
+    if not root then plan.blocked = 'manifest:' .. tostring(root_why or file.role)
+      return nil, 'blocked:' .. plan.blocked end
+    local wrote, write_why = deps.write_manifest(manifest_path,
+      { version = 1, bytes = file.bytes, root = root, parts = file.parts })
+    if wrote ~= true then plan.blocked = 'manifest:' .. tostring(write_why or file.role)
+      return nil, 'blocked:' .. plan.blocked end
+    file.root, file.verify_index = root, 1
+    file.state = 'verifying'
+    if #file.parts == 0 then
+      file.state = 'copied_verified'
+      plan.copied = plan.copied + 1
+    end
+    return { job_id = job_id, phase = plan.phase, file = file.relative,
+      state = file.state, bytes = file.bytes, root = root }
+  end
+  if file.state == 'verifying' then
+    if file.verify_index > #file.parts then
       file.state = 'copied_verified'
       plan.copied = plan.copied + 1
       return { job_id = job_id, phase = plan.phase, file = file.relative,
-        state = file.state, digest = digest, bytes = file.bytes }
+        state = file.state, bytes = file.bytes, root = file.root }
     end
-    local copied, copy_why = deps.copy_chunk(file.relative, staging,
-      file.offset, math.min(limit, file.bytes - file.offset))
-    if copied == nil then plan.blocked = 'copy:' .. tostring(copy_why or file.role)
+    local part = file.parts[file.verify_index]
+    local ok, verify_why = deps.verify_part(part_path(dest, part.index),
+      part.digest, limit)
+    if ok ~= true then plan.blocked = 'verify:' .. tostring(verify_why or file.role)
       return nil, 'blocked:' .. plan.blocked end
-    file.offset = file.offset + (tonumber(copied) or 0)
+    file.verify_index = file.verify_index + 1
     return { job_id = job_id, phase = plan.phase, file = file.relative,
-      state = file.state, bytes = file.bytes, offset = file.offset }
+      state = file.state, part = part.index, verified = file.verify_index - 1 }
   end
   if file.state == 'copied_verified' then
     if type(deps.rename_once) ~= 'function' or type(deps.sync_user_parents) ~= 'function' then
@@ -374,10 +426,11 @@ function M.advance(job_id, budget)
     end
     file.state = 'retirement_pending'
     return { job_id = job_id, phase = plan.phase, file = file.relative,
-      state = file.state, verified = verified }
+      state = file.state, manifest = manifest_path }
   end
   if file.state == 'retirement_pending' then
-    local retired, retire_why = deps.rename_once(file.relative, verified, retained)
+    local retired, retire_why = deps.rename_once(file.relative, manifest_path,
+      retained, retained_manifest, file.root, file.bytes)
     if retired == 'cross_device' then
       -- Keep the original; no delete, no copy fallback.
       plan.blocked = 'cross_device:' .. file.role
@@ -405,7 +458,8 @@ function M.status(job_id)
   local files = {}
   for _, file in ipairs(plan.files) do
     files[#files + 1] = { relative = file.relative, role = file.role,
-      bytes = file.bytes, state = file.state, digest = file.digest }
+      bytes = file.bytes, state = file.state, root = file.root,
+      parts = #(file.parts or {}) }
   end
   return { job_id = job_id, phase = plan.phase, blocked = plan.blocked,
     relay_certificate_id = plan.relay_certificate_id,
