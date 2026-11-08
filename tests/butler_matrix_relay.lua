@@ -6262,6 +6262,11 @@ end
 -- once; each waiting mail goes out when ITS fetch answers or fails.
 
 rx_tests = {
+  { "test_rx_metadata_corruption_deferral_survives_restart", function()
+    local run = dofile("tests/fixtures/mail_metadata_relay_corruption.lua")
+    run({ module = relay_module, home = HOME, owner = OWNER, sync = rx_sync, message = rx_msg,
+      fixture = rx_fixture, with_dir = rx_with_dir, production = rx_production_disk })
+  end },
   { "test_rx_outbox_retired_dispatch_stops_without_retry", function()
     local dir, path = invite_fixture(OWNER)
     rx_with_dir(dir, function()
