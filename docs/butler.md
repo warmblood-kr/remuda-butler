@@ -273,25 +273,24 @@ welcome mail carries the same text. Edit the files, not the block: Butler
 rewrites it. A layer whose text contains a `remuda-butler:managed id=` marker is
 withheld as unreadable, so the shared file must not contain one.
 
-The instruction paragraph names the cluster file's one stable location and tells
-the agent to use it for guidance shared across the cluster. Butler's loader
-reads this node's copy automatically when a session starts, relaunches or is
-about to compact, and the cluster layer in the block is that loaded snapshot.
-The shared file is capped at 8 KiB; a larger one is reported, not loaded. When
-the layer is missing, empty, too large or unavailable, the agent continues with
-the layers that loaded, reports the gap when it matters, never invents or
-auto-creates shared rules, and never treats the shared URI as a local
-filesystem path. An
-agent that needs the current source rather than its session's snapshot may
-inspect it read-only with `remuda vfs get remuda:///butler/guidance/cluster.md`
-(add `--local` to read only this node's copy) when the task calls for checking
-the source. That inspection does not bypass a rejected status, does not apply a
-newer file over the block, and never infers the contents from a failed read or
-an unavailable status. An agent publishes shared guidance only when the owner
-or its leader explicitly asks, with
-`remuda vfs put FILE remuda:///butler/guidance/cluster.md`. A put does not
-guarantee every peer has synced it, and running sessions keep the snapshot they
-loaded until they refresh it.
+The instruction paragraph separates two things. Butler's automatic loader reads
+`remuda:///butler/guidance/cluster.md`, this node's copy, when a session starts,
+relaunches or is about to compact; the cluster layer in the block is that loaded
+snapshot, capped at 8 KiB (a larger file is reported, not loaded). Separately,
+`remuda:///remuda-guidance/index.md` is the shared guidance index: it is not
+loaded automatically, and an agent that needs cluster rules beyond the snapshot
+reads it with `remuda vfs get remuda:///remuda-guidance/index.md` (add `--local`
+to stay on this node's copy), then the files it names. If the index is missing,
+unreadable or unavailable, the agent continues and reports the gap. When the
+loader layer is missing, empty, too large or unavailable, the agent continues
+with the layers that loaded, reports the gap when it matters, never invents or
+auto-creates shared rules, and never treats a URI as a local filesystem path.
+Reading the index or the loader source does not bypass a rejected status, apply
+a newer or rejected file over the block, or infer contents from a failed read or
+an unavailable status. An agent publishes shared guidance only when the owner or
+its leader explicitly asks, with `remuda vfs put FILE` to the index or the path
+it names, or to the loader file. A put does not guarantee every peer has synced
+it, and running sessions keep the snapshot they loaded until they refresh it.
 
 Butler reads the files again when a session starts (a new launch, a relaunch,
 or a daemon restart that starts the root again) and just before it compacts a

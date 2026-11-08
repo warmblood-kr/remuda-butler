@@ -199,10 +199,12 @@ done
 require_text() { # file needle description
   grep -qF "$2" "$OUT/$1" || { echo "FAIL golden guidance: $1 lacks $3" >&2; exit 1; }
 }
-# The shared cluster guidance text names the loader's one stable URI.
+# The shared cluster guidance text names the loader's one stable URI, and the
+# agent-read entrypoint index was added by the owner's decision (remuda-butler#609).
 CLUSTER_URI=$(sed -n 's/^guidance_layers.CLUSTER_URI = "\(.*\)"$/\1/p' "$REPO/packages/butler/guidance_layers.lua")
 [[ $CLUSTER_URI == remuda:///butler/guidance/cluster.md ]] || {
   echo "FAIL golden guidance: unexpected loader CLUSTER_URI '$CLUSTER_URI'" >&2; exit 1; }
+INDEX_URI=remuda:///remuda-guidance/index.md
 for f in agents-root.md agents-topic.md agents-launch.md welcome.txt; do
   require_text "$f" '## Delegation: STICC' "the STICC section"
   require_text "$f" '**Calibrate:** ask the member to confirm' "the STICC calibrate step"
@@ -223,11 +225,14 @@ for f in agents-root.md agents-topic.md agents-launch.md welcome.txt; do
   require_text "$f" 'live Matrix sync and prepared-text approval on' "the approval prerequisites"
   require_text "$f" 'typed (seen)' "the typed(seen) observation caveat"
   require_text "$f" 'does not approve prepared text' "the owner-Matrix-only approval rule"
-  require_text "$f" 'cluster-shared Remuda VFS file' "the shared Remuda VFS wording"
-  require_text "$f" "Use \`$CLUSTER_URI\` for guidance shared across every" "the explicit use instruction"
-  require_text "$f" "remuda vfs get $CLUSTER_URI" "the VFS inspection command"
-  require_text "$f" "remuda vfs put FILE $CLUSTER_URI" "the VFS publish command"
-  require_text "$f" 'never invent or' "the no-invented-shared-rules rule"
+  require_text "$f" 'Guidance shared across every node of a cluster lives in the Remuda VFS' "the shared Remuda VFS wording"
+  require_text "$f" "Butler loads \`$CLUSTER_URI\` automatically" "the automatic loader"
+  require_text "$f" "$INDEX_URI" "the shared guidance index"
+  require_text "$f" 'it is not loaded automatically' "the automatic-load versus agent-read distinction"
+  require_text "$f" 'missing, unreadable or unavailable' "the index gap handling"
+  require_text "$f" "remuda vfs get $INDEX_URI" "the VFS index read command"
+  require_text "$f" "remuda vfs put FILE $INDEX_URI" "the VFS index publish command"
+  require_text "$f" 'never invent' "the no-invented-shared-rules rule"
   require_text "$f" 'missing, empty, too large or' "the graceful cluster cases"
   require_text "$f" 'starts, relaunches or is about to compact' "the loader refresh points"
   require_text "$f" '8 KiB' "the shared file size cap"

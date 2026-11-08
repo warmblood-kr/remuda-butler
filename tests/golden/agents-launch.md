@@ -187,21 +187,25 @@ Butler loaded these guidance layers in this order when this session started.
 A later layer adds to or overrides an earlier one. Edit the files named here,
 not this block: Butler rewrites it on every session start.
 
-Use `remuda:///butler/guidance/cluster.md` for guidance shared across every
-node of the cluster: the cluster-shared Remuda VFS file. Butler loads this
-node's copy when a session starts, relaunches or is about to compact (8 KiB
-cap; a larger file is reported, not loaded), and the cluster layer below is
-that loaded snapshot: read it. When the layer is missing, empty, too large or
-unavailable, continue with the layers that loaded and report the gap when it
-matters; never invent or auto-create shared rules. To read the current source
-yourself, run `remuda vfs get remuda:///butler/guidance/cluster.md` (it may ask
-other nodes; `--local` keeps it to this node's copy) when a task calls for
-checking it: do not bypass a rejected status, apply a newer file over the
-block, or infer contents from a failed read or unavailable status. Publish
-only when the owner or your leader explicitly asks, with
-`remuda vfs put FILE remuda:///butler/guidance/cluster.md`; a put does not
-guarantee every peer has synced it, and running sessions keep the snapshot
-they loaded until they refresh it.
+Guidance shared across every node of a cluster lives in the Remuda VFS.
+Butler loads `remuda:///butler/guidance/cluster.md` automatically when a
+session starts, relaunches or is about to compact (8 KiB cap; a larger file
+is reported, not loaded); the cluster layer below is this node's snapshot, so
+read the embedded text. The shared guidance index, when one exists, is
+`remuda:///remuda-guidance/index.md`, and it is not loaded automatically: when
+a task needs cluster rules beyond the snapshot, read the index yourself with
+`remuda vfs get remuda:///remuda-guidance/index.md` (it may ask other nodes;
+`--local` keeps it to this node's copy), then the files it names. If the index
+is missing, unreadable or unavailable, continue and report the gap when it
+matters. Do not bypass a rejected loader status, apply a newer or rejected file
+over the block, or infer contents from a failed read or unavailable status.
+When the loader layer is missing, empty, too large or unavailable, continue
+with the layers that loaded, report the gap when it matters, and never invent
+or auto-create shared rules. Publish shared guidance only when the owner or
+your leader explicitly asks, with
+`remuda vfs put FILE remuda:///remuda-guidance/index.md` (or the path it names,
+or the loader file above); a put does not guarantee every peer has synced it,
+and running sessions keep the snapshot they loaded until they refresh it.
 
 - framework: built in, version sha256:11011698e22d
 - cluster: not available (this Remuda core has no cluster file store; update Remuda)
