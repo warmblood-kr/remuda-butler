@@ -1,3 +1,4 @@
+DROP TABLE IF EXISTS relay_verify_witness;
 DROP TABLE IF EXISTS relay_verify_certificates;
 DROP TABLE IF EXISTS relay_verify_progress;
 DROP TABLE IF EXISTS relay_sidecar;

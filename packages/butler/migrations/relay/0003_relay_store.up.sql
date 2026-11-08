@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS relay_verify_progress (
   bytes INTEGER NOT NULL DEFAULT 0,
   nodes INTEGER NOT NULL DEFAULT 0,
   certificate_id TEXT,
+  witness_id TEXT,
+  phase TEXT NOT NULL DEFAULT 'witness',
+  phase_cursor TEXT,
   owner_id TEXT,
   epoch INTEGER
 );
@@ -29,6 +32,7 @@ CREATE TABLE IF NOT EXISTS relay_verify_certificates (
   certificate_id TEXT PRIMARY KEY,
   verification_id TEXT NOT NULL,
   source_id TEXT NOT NULL,
+  witness_id TEXT NOT NULL,
   data_revision INTEGER NOT NULL,
   processed_rows INTEGER NOT NULL,
   bytes INTEGER NOT NULL,
@@ -37,6 +41,28 @@ CREATE TABLE IF NOT EXISTS relay_verify_certificates (
   epoch INTEGER NOT NULL,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS relay_verify_witness (
+  witness_id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('source','sidecar')),
+  role TEXT NOT NULL,
+  stamp TEXT,
+  bytes INTEGER NOT NULL,
+  raw_sha256 TEXT NOT NULL,
+  root_digest TEXT NOT NULL,
+  chunk_size INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(store_id, source_id, kind)
+);
+CREATE TRIGGER IF NOT EXISTS relay_witness_no_insert BEFORE INSERT ON relay_verify_witness
+WHEN EXISTS(SELECT 1 FROM relay_verify_witness w WHERE w.store_id=NEW.store_id
+  AND w.source_id=NEW.source_id AND w.kind=NEW.kind)
+BEGIN SELECT RAISE(ABORT,'witness_immutable'); END;
+CREATE TRIGGER IF NOT EXISTS relay_witness_no_update BEFORE UPDATE ON relay_verify_witness
+BEGIN SELECT RAISE(ABORT,'witness_immutable'); END;
+CREATE TRIGGER IF NOT EXISTS relay_witness_no_delete BEFORE DELETE ON relay_verify_witness
+BEGIN SELECT RAISE(ABORT,'witness_immutable'); END;
 CREATE TABLE IF NOT EXISTS relay_manifest (
   source_id TEXT PRIMARY KEY,
   role TEXT NOT NULL CHECK(role IN ('primary','backup_evidence','acks','drain')),
@@ -196,6 +222,11 @@ WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
 CREATE TRIGGER IF NOT EXISTS relay_rev_source_del AFTER DELETE ON relay_import_source
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
+CREATE TRIGGER IF NOT EXISTS relay_rev_source_status AFTER UPDATE OF status ON relay_import_source
+WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
+ AND OLD.status IS NOT NEW.status
+ AND NOT (OLD.status IN ('importing','staged') AND NEW.status='verified')
 BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1; END;
 CREATE TRIGGER IF NOT EXISTS relay_rev_units_ins AFTER INSERT ON relay_import_units
 WHEN (SELECT phase FROM relay_authority WHERE singleton=1)='importing'
