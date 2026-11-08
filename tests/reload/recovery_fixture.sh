@@ -37,13 +37,13 @@ new_case() {
   local tag=$1
   S="rrf$tag"
   T=$(mktemp -d "/tmp/rrf-${tag}.XXXXXX") || return 1
-  trap 'case_cleanup $?' EXIT
+  trap 'case_rc=$?; case_cleanup || exit 1; exit "$case_rc"' EXIT
   T=$(cd "$T" && pwd -P) || return 1
   chmod 700 "$T"
   local default_runtime="/tmp/remuda-$(id -un)"
   [[ "$T" != "$default_runtime" && "$T" != "$default_runtime/"* ]] || return 1
   local d
-  for d in home config data state cache runtime; do
+  for d in home config data state cache runtime tmp; do
     mkdir -m 700 "$T/$d" || return 1
     [[ -d "$T/$d" && ! -L "$T/$d" && -O "$T/$d" ]] || return 1
   done
@@ -70,7 +70,8 @@ LUA
   PENV=(env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     HOME="$T/home" XDG_CONFIG_HOME="$T/config" XDG_DATA_HOME="$T/data" \
     XDG_STATE_HOME="$T/state" XDG_CACHE_HOME="$T/cache" \
-    REMUDA_RUNTIME_DIR="$T/runtime" RRF_INIT_SERIAL="$SERIAL" RRF_FAKE_COUNTER="$T/fake-callback")
+    REMUDA_RUNTIME_DIR="$T/runtime" RRF_INIT_SERIAL="$SERIAL" RRF_FAKE_COUNTER="$T/fake-callback" \
+    REMUDA_NO_UPDATE_CHECK=1 TMPDIR="$T/tmp")
   return 0
 }
 
@@ -111,6 +112,16 @@ candidate_pids() {
   done | sort -u
 }
 
+# Every process whose environment names this case's runtime, including a host
+# whose argv does not. This is the orphan check for `sleep 300` hosts.
+runtime_env_pids() {
+  # Do not put the searched token in this pipeline's own argv: ps would match
+  # the awk command itself. The awk environment carries only EXPECT_RUNTIME.
+  EXPECT_RUNTIME="$T/runtime" ps eww -ax 2>/dev/null |
+    EXPECT_RUNTIME="$T/runtime" awk 'BEGIN { rt = "REMUDA_RUNTIME_DIR=" ENVIRON["EXPECT_RUNTIME"] } index($0, rt) { print $1 }' |
+    sort -u
+}
+
 daemon_id() {
   [[ -f "$SOCK.daemon-id" ]] || return 1
   cat "$SOCK.daemon-id"
@@ -143,8 +154,11 @@ host_line() {
 
 wait_old_gone() {
   local old=$1 i
-  for i in $(seq 40); do
-    kill -0 "$old" 2>/dev/null || return 0
+  for i in $(seq 120); do
+    if ! kill -0 "$old" 2>/dev/null; then
+      wait "$old" 2>/dev/null || true
+      return 0
+    fi
     sleep 0.1
   done
   return 1
@@ -160,20 +174,20 @@ no_candidates() {
 }
 
 case_cleanup() {
-  local rc=${1:-0}
-  [[ -n ${T:-} && -d "$T" ]] || return "$rc"
+  [[ -n ${T:-} && -d "$T" ]] || return 0
   if [[ -n ${DAEMON_PID:-} && ${PENV+x} ]]; then
     runp stop -f >/dev/null 2>&1 || true
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
-  local i pids
-  for i in $(seq 60); do
-    pids=$(daemon_pids)
-    [[ -z "$pids" ]] && break
+  local i
+  for i in $(seq 80); do
+    if [[ -z "$(daemon_pids)" && -z "$(candidate_pids)" && -z "$(runtime_env_pids)" ]]; then
+      break
+    fi
     sleep 0.1
   done
-  if [[ -n "$(daemon_pids)" || -n "$(candidate_pids)" ]]; then
-    note "private daemon/candidate still up; keeping $T"
+  if [[ -n "$(daemon_pids)" || -n "$(candidate_pids)" || -n "$(runtime_env_pids)" ]]; then
+    note "private daemon/candidate/host still up; keeping $T"
     return 1
   fi
   local leftovers
@@ -183,7 +197,7 @@ case_cleanup() {
     return 1
   fi
   rm -rf -- "$T"
-  return "$rc"
+  return 0
 }
 
 stop_case() {
@@ -193,13 +207,17 @@ stop_case() {
     runp stop -f >/dev/null 2>&1 || true
     wait "$DAEMON_PID" 2>/dev/null || true
   fi
-  local i
-  for i in $(seq 60); do
-    [[ -z "$(daemon_pids)" ]] && break
+  local i hosts
+  for i in $(seq 80); do
+    if [[ -z "$(daemon_pids)" && -z "$(candidate_pids)" && -z "$(runtime_env_pids)" ]]; then
+      break
+    fi
     sleep 0.1
   done
   [[ -z "$(daemon_pids)" ]] || { note "daemon still up"; return 1; }
   [[ -z "$(candidate_pids)" ]] || { note "candidate still up"; return 1; }
+  hosts=$(runtime_env_pids)
+  [[ -z "$hosts" ]] || { note "host/runtime-env orphan: $hosts"; return 1; }
   return 0
 }
 
@@ -259,6 +277,7 @@ case_a() {
   info_after=$(session_info hosted)
   [[ "$info_after" == "$info_before" ]] || { echo "host identity changed: $info_before -> $info_after"; return 1; }
 
+  stop_case
   echo "PASS A: hosted session survived same-binary reload; pid $old -> $new_pid; init serial $first_serial -> $after_serial; daemon-id stable"
   echo "  host before: $host_before"
   echo "  host after:  $host_after"
@@ -306,6 +325,7 @@ case_b() {
   [[ "$(session_info inproc)" == "$info_before" ]] || { echo "session changed after an actual refusal"; return 1; }
   no_candidates || { echo "candidate left behind after an actual refusal"; return 1; }
 
+  stop_case
   echo "PASS B: in-process session blocked both --check and actual reload; pid $old, daemon-id, socket and session unchanged; no candidate"
   echo "  blocker: $(grep '^blocker:' <<<"$check")"
 }
@@ -395,6 +415,7 @@ case_c() {
   [[ "$info_after" == "$info_before" ]] || { echo "host identity changed across reload: $info_before -> $info_after"; return 1; }
   [[ -n "$(host_line hosted)" ]] || { echo "host missing after reload"; return 1; }
 
+  stop_case
   echo "PASS C: core fake schedule gone, old fake callback never replayed; real after fired once; real schedule ticked $ticks then stopped after cancel; host survived"
   echo "  fake before: $before_fake; after: $after_fake; old fake callback file: empty"
 echo "  C scope: core primitives only; no private Butler install, so real Butler graph recovery is a separate fixture"
