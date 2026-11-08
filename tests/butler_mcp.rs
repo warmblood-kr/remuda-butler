@@ -4,10 +4,20 @@
 use remuda_core::protocol::{Request, Response};
 use remuda_native::{client, daemon, mcp};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 const PATIENCE: Duration = Duration::from_secs(10);
+/// A private child answers a local read in milliseconds; these bounds keep a
+/// stopped or nonresponding daemon from holding Drop open.
+const READY_ATTEMPT: Duration = Duration::from_millis(200);
+const HOMES_WAIT: Duration = Duration::from_secs(2);
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+const REAP_WAIT: Duration = Duration::from_secs(2);
 
 fn scratch(tag: &str) -> PathBuf {
     let configured = std::env::var_os("REMUDA_RUNTIME_DIR")
@@ -19,12 +29,13 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// The daemon thread shares the test process's environment, and an environment
-/// variable is per process, so its Butler homes cannot be separated by env.
-/// They are resolved from `os.getenv` and `remuda.storage.dir` in the daemon's
-/// own Lua image (paths.lua), so this replaces both there, before any mod loads,
-/// for this daemon's data and config homes. Both live under its scratch dir
-/// (see #225, #211). Other environment names and storage kinds pass through.
+/// A private child daemon is a different process, so its Butler homes can be
+/// separated per test without changing the test process's environment. The
+/// homes are resolved from `os.getenv` and `remuda.storage.dir` in the
+/// daemon's own Lua image (paths.lua); this replaces both there, after the
+/// daemon answers and before any test loads a mod. Both live under its scratch
+/// dir (see #225, #211). Other environment names and storage kinds pass
+/// through.
 fn own_butler_homes(path: &Path) -> String {
     let base = path.parent().unwrap_or(path).join("butler-homes");
     let (data, config) = (base.join("data"), base.join("config"));
@@ -44,8 +55,293 @@ fn own_butler_homes(path: &Path) -> String {
     )
 }
 
-/// Start a daemon and return once it actually answers, not once it was spawned.
-fn daemon_at(path: &Path) -> impl Drop {
+/// One request with a bounded wait for the reply. The existing client API owns
+/// the transport worker and interrupts it through `ipc::wake` on the deadline,
+/// so no helper thread outlives the call. The private local connect is outside
+/// the deadline; a unix socket connect to this scratch path is immediate.
+fn bounded_request(
+    path: &Path,
+    request: &Request,
+    wait: Duration,
+) -> std::io::Result<Response> {
+    client::request_with_timeout(path, request, wait)
+}
+
+/// ae9's `Shutdown` has four fields and 661 adds `keep_sessions`. Building the
+/// pin-correct variant through serde keeps one test source valid on both; the
+/// 661 field defaults to false, which is what this private child wants.
+fn shutdown_request() -> Request {
+    serde_json::from_value(json!({
+        "Shutdown": {
+            "requester_daemon_id": null,
+            "requester_session_id": null,
+            "requester_session_name": null,
+            "override_hosted": false,
+        }
+    }))
+    .expect("Shutdown request for this core pin")
+}
+
+#[cfg(unix)]
+fn owners() -> &'static Mutex<HashMap<PathBuf, u64>> {
+    static OWNERS: OnceLock<Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+    OWNERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(unix)]
+fn owners_lock() -> std::sync::MutexGuard<'static, HashMap<PathBuf, u64>> {
+    owners()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(unix)]
+static NEXT_OWNER: AtomicU64 = AtomicU64::new(1);
+
+/// Reserve one socket path before spawning and release it on every failure
+/// path. A live guard keeps the reservation until Drop has reaped its child.
+#[cfg(unix)]
+struct Reservation {
+    path: PathBuf,
+    generation: u64,
+    committed: bool,
+}
+
+#[cfg(unix)]
+impl Reservation {
+    fn take(path: &Path) -> Self {
+        let generation = NEXT_OWNER.fetch_add(1, Ordering::Relaxed);
+        let mut map = owners_lock();
+        assert!(
+            !map.contains_key(path),
+            "restart daemon at {path:?} before the previous guard was dropped"
+        );
+        map.insert(path.to_path_buf(), generation);
+        drop(map);
+        Self {
+            path: path.to_path_buf(),
+            generation,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self) -> u64 {
+        self.committed = true;
+        self.generation
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut map = owners_lock();
+        if map.get(&self.path) == Some(&self.generation) {
+            map.remove(&self.path);
+        }
+    }
+}
+
+/// An owned private daemon child. The guard is constructed immediately after
+/// spawn, so a readiness or prelude panic still runs Drop and reaps this exact
+/// child. `generation` says whether this guard still owns the path.
+#[cfg(unix)]
+struct OwnedDaemon {
+    child: Child,
+    path: PathBuf,
+    generation: u64,
+}
+
+#[cfg(unix)]
+impl OwnedDaemon {
+    fn spawn(path: &Path) -> Self {
+        use remuda_native::ipc;
+        let root = path
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or_else(|| panic!("private socket {path:?} has no runtime root"));
+        assert_eq!(
+            path,
+            daemon::socket_path_in(root, "s"),
+            "private socket must be <runtime>/remuda/s.sock"
+        );
+        if path.exists() {
+            match ipc::connect(path) {
+                Ok(_) => panic!("refusing to adopt the live daemon at {path:?}"),
+                Err(error) if ipc::may_start_daemon(path, &error) => {
+                    std::fs::remove_file(path).expect("remove stale private socket");
+                }
+                Err(error) => panic!("cannot use private socket {path:?}: {error}"),
+            }
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .unwrap_or_else(|error| panic!("create {parent:?}: {error}"));
+        }
+        let reservation = Reservation::take(path);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_remuda"));
+        command
+            .args(["-s", "s", "daemon"])
+            .env("REMUDA_RUNTIME_DIR", root)
+            // Keep the test process's cwd: fixture paths in the Lua tests are
+            // relative to `tests/fixtures`, and the daemon image resolves them.
+            .current_dir(std::env::current_dir().expect("test process cwd"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        for name in [
+            "REMUDA_SERVER",
+            "REMUDA_BUTLER_TOKEN",
+            "REMUDA_BUTLER_CONFIG",
+            "REMUDA_BUTLER_AGENT_ID",
+            "REMUDA_BUTLER_LEADER_ID",
+            "REMUDA_BUTLER_SESSION_NAME",
+            "REMUDA_BUTLER_AGENT_ALIAS",
+            "REMUDA_BUTLER_AGENT_KIND",
+            "REMUDA_SESSION_CAPABILITY",
+            "REMUDA_SESSION_NAME",
+            "REMUDA_SESSION_ID",
+            "REMUDA_DAEMON_ID",
+        ] {
+            command.env_remove(name);
+        }
+        let child = command
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn private daemon at {path:?}: {error}"));
+        let generation = reservation.commit();
+        Self {
+            child,
+            path: path.to_path_buf(),
+            generation,
+        }
+    }
+
+    /// A real protocol answer is required, not a connect. An exited child is a
+    /// failure at once, so a foreign listener cannot satisfy readiness.
+    fn wait_ready(&mut self) {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            assert!(
+                !matches!(self.child.try_wait(), Ok(Some(_))),
+                "private daemon exited before readiness at {:?}",
+                self.path
+            );
+            if let Ok(Response::Value(value)) = bounded_request(
+                &self.path,
+                &Request::Eval {
+                    code: "return 'ready'".into(),
+                    name: None,
+                },
+                READY_ATTEMPT,
+            ) {
+                if value == "ready" {
+                    return;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "daemon never answered at {:?}",
+                self.path
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The prelude stays after readiness, before any test loads a mod.
+    fn install_own_homes(&self) {
+        let reply = bounded_request(
+            &self.path,
+            &Request::Eval {
+                code: own_butler_homes(&self.path),
+                name: None,
+            },
+            HOMES_WAIT,
+        )
+        .expect("install own Butler homes");
+        assert!(
+            matches!(reply, Response::Value(_)),
+            "install own Butler homes: {reply:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+impl Drop for OwnedDaemon {
+    fn drop(&mut self) {
+        let owns = owners_lock().get(&self.path) == Some(&self.generation);
+        let running = matches!(self.child.try_wait(), Ok(None));
+        if owns && running {
+            let _ = bounded_request(&self.path, &shutdown_request(), SHUTDOWN_WAIT);
+        } else if !owns && running {
+            // Never send to a path this guard no longer owns; end our child.
+            let _ = self.child.kill();
+        }
+        // "Reaped" means wait() succeeded or try_wait() reported the exit; a
+        // failed kill/wait must not be treated as cleanup, or the reservation
+        // and socket would be released while a child may still hold them.
+        let mut reaped = false;
+        let mut reap_error: Option<std::io::Error> = None;
+        let deadline = Instant::now() + REAP_WAIT;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => {
+                    reaped = true;
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => reap_error = Some(error),
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if !reaped {
+            if let Err(error) = self.child.kill() {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    reap_error = Some(error);
+                }
+            }
+            match self.child.wait() {
+                Ok(_) => reaped = true,
+                Err(error) => reap_error = Some(error),
+            }
+        }
+        if owns && reaped {
+            let mut map = owners_lock();
+            if map.get(&self.path) == Some(&self.generation) {
+                let _ = std::fs::remove_file(&self.path);
+                map.remove(&self.path);
+            }
+        } else if owns {
+            // Keep the reservation so a restart at this path is refused. Do not
+            // panic: this may run while another test is already unwinding.
+            eprintln!(
+                "private daemon {} did not reap at {:?} (kept reservation): {:?}",
+                self.child.id(),
+                self.path,
+                reap_error
+            );
+        }
+    }
+}
+
+/// Start a private child daemon and return once it answers and has its own
+/// Butler homes. Unix uses the owned child above; a named pipe name cannot be
+/// inverted to a runtime root, so other platforms keep the previous in-process
+/// fixture (the MCP suite runs on Unix; this is an explicit platform limit).
+#[cfg(unix)]
+fn daemon_at(path: &Path) -> OwnedDaemon {
+    let mut daemon = OwnedDaemon::spawn(path);
+    daemon.wait_ready();
+    daemon.install_own_homes();
+    daemon
+}
+
+#[cfg(not(unix))]
+fn daemon_at(path: &Path) -> Cleanup {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -58,14 +354,20 @@ fn daemon_at(path: &Path) -> impl Drop {
         assert!(Instant::now() < deadline, "daemon never bound {path:?}");
         std::thread::sleep(Duration::from_millis(10));
     }
-    // After the daemon answers, before any test loads a mod: the same prelude
-    // again for a daemon the test restarts at the same path.
-    let _ = client::request(path, &Request::Eval { code: own_butler_homes(path), name: None })
-        .expect("install own Butler homes");
+    let _ = client::request(
+        path,
+        &Request::Eval {
+            code: own_butler_homes(path),
+            name: None,
+        },
+    )
+    .expect("install own Butler homes");
     Cleanup(path.to_path_buf())
 }
 
+#[cfg(not(unix))]
 struct Cleanup(PathBuf);
+#[cfg(not(unix))]
 impl Drop for Cleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
@@ -341,12 +643,12 @@ fn eval(path: &Path, code: &str) -> String {
     }
 }
 
-/// In-process daemons (`daemon_at`) run on threads of the test process, so they
-/// read one process environment. Without homes of their own, every daemon that
-/// loads the whole Butler mod resolves the same agents.jsonl, takes the same
-/// root Butler id and would take the same single-instance lock (see #225, #211).
+/// Private child daemons (`daemon_at`) each get their own Butler homes and
+/// therefore their own root identity: without distinct homes, every daemon
+/// that loads the whole Butler mod would resolve the same agents.jsonl, take
+/// the same root Butler id and the same single-instance lock (see #225, #211).
 #[test]
-fn in_process_daemons_that_load_butler_get_their_own_root_identity() {
+fn private_child_daemons_that_load_butler_get_their_own_root_identity() {
     let root_id = |tag: &str| {
         let dir = scratch(tag);
         let path = daemon::socket_path_in(&dir, "s");
@@ -3180,4 +3482,158 @@ fn reading_other_mail_keeps_a_queued_reshow() {
         "#,
     );
     assert_eq!(got, "1", "the queued re-show must survive reading other mail");
+}
+
+// Durable lifecycle negatives for the owned private child. The original 74
+// test bodies and assertions are unchanged (one function renamed for accuracy);
+// these exercise failure paths the suite previously could not reach (a live
+// guard, restart, panic before the prelude, and a silent listener). Unix-gated
+// because the fixture is Unix-only.
+
+#[cfg(unix)]
+#[test]
+fn owned_daemon_refuses_to_adopt_a_live_daemon() {
+    let dir = scratch("owned-adopt-live");
+    let path = daemon::socket_path_in(&dir, "s");
+    let first = daemon_at(&path);
+    let second = std::panic::catch_unwind(|| daemon_at(&path));
+    assert!(second.is_err(), "daemon_at adopted a live private daemon");
+    assert_eq!(eval(&path, "return 'still-here'"), "still-here");
+    drop(first);
+}
+
+#[cfg(unix)]
+#[test]
+fn owned_daemon_restarts_at_the_same_path_and_keeps_the_replacement() {
+    let dir = scratch("owned-restart-same-path");
+    let path = daemon::socket_path_in(&dir, "s");
+    drop(daemon_at(&path));
+    let replacement = daemon_at(&path);
+    assert_eq!(eval(&path, "return 'replacement'"), "replacement");
+    drop(replacement);
+}
+
+#[cfg(unix)]
+#[test]
+fn owned_daemon_drop_is_bounded_when_the_child_is_stopped() {
+    let dir = scratch("owned-drop-stopped");
+    let path = daemon::socket_path_in(&dir, "s");
+    let daemon = daemon_at(&path);
+    let pid = daemon.child.id() as i32;
+    assert_eq!(
+        unsafe { libc::kill(pid, libc::SIGSTOP) },
+        0,
+        "SIGSTOP private child {pid}"
+    );
+    let started = Instant::now();
+    drop(daemon);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(6),
+        "Drop held {elapsed:?} on a stopped child"
+    );
+    assert!(
+        unsafe { libc::kill(pid, 0) } != 0,
+        "private child {pid} survived Drop"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn owned_daemon_reaps_after_a_prelude_panic_and_reuses_the_path() {
+    let dir = scratch("owned-prelude-panic");
+    let path = daemon::socket_path_in(&dir, "s");
+    let blocked = path.parent().expect("socket parent").join("butler-homes");
+    std::fs::create_dir_all(path.parent().expect("socket parent")).expect("create socket dir");
+    std::fs::write(&blocked, b"blocked").expect("block the prelude home");
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+    let seen_in = std::sync::Arc::clone(&seen);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut daemon = OwnedDaemon::spawn(&path);
+        seen_in.store(daemon.child.id() as i32, Ordering::SeqCst);
+        daemon.wait_ready();
+        // This Eval setup panics; unwinding must run the guard's Drop.
+        daemon.install_own_homes();
+    }));
+    assert!(panic.is_err(), "the blocked prelude did not panic");
+    let pid = seen.load(Ordering::SeqCst);
+    assert!(pid > 0, "the spawned guard did not record its child");
+    assert!(
+        unsafe { libc::kill(pid, 0) } != 0,
+        "child {pid} survived a prelude unwind"
+    );
+    std::fs::remove_file(&blocked).expect("unblock the prelude home");
+    let retry = daemon_at(&path);
+    assert_eq!(eval(&path, "return 'reused'"), "reused");
+    drop(retry);
+}
+
+#[cfg(unix)]
+#[test]
+fn owned_daemon_reaps_after_the_child_exits_before_readiness() {
+    let dir = scratch("owned-exit-before-ready");
+    let path = daemon::socket_path_in(&dir, "s");
+    let seen = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+    let seen_in = std::sync::Arc::clone(&seen);
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut daemon = OwnedDaemon::spawn(&path);
+        let pid = daemon.child.id() as i32;
+        seen_in.store(pid, Ordering::SeqCst);
+        assert_eq!(
+            unsafe { libc::kill(pid, libc::SIGKILL) },
+            0,
+            "SIGKILL private child {pid}"
+        );
+        // An exited child must make readiness panic; unwind runs Drop.
+        daemon.wait_ready();
+    }));
+    assert!(panic.is_err(), "readiness accepted an exited child");
+    let pid = seen.load(Ordering::SeqCst);
+    assert!(pid > 0, "the spawned guard did not record its child");
+    assert!(
+        unsafe { libc::kill(pid, 0) } != 0,
+        "child {pid} survived a pre-readiness unwind"
+    );
+    let retry = daemon_at(&path);
+    assert_eq!(eval(&path, "return 'reused-after-exit'"), "reused-after-exit");
+    drop(retry);
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_request_times_out_on_a_silent_private_listener() {
+    let dir = scratch("owned-silent-listener");
+    let path = daemon::socket_path_in(&dir, "s");
+    std::fs::create_dir_all(path.parent().expect("socket parent")).expect("create socket dir");
+    let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind silent listener");
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let silent = std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            // Hold the connection open without answering, then wait for the
+            // test to finish observing the timeout before dropping it.
+            let _ = released.recv_timeout(Duration::from_secs(3));
+            drop(stream);
+        }
+    });
+    let started = Instant::now();
+    let result = bounded_request(
+        &path,
+        &Request::Eval {
+            code: "return 'ready'".into(),
+            name: None,
+        },
+        READY_ATTEMPT,
+    );
+    let elapsed = started.elapsed();
+    // Release and join the listener even if the request result is unexpected,
+    // so this test owns every FD/thread it creates.
+    let _ = release.send(());
+    silent.join().expect("join silent listener");
+    let error = result.expect_err("a silent listener must not answer");
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut, "{error}");
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "silent request held {elapsed:?}"
+    );
+    let _ = std::fs::remove_file(&path);
 }
