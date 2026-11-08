@@ -1,0 +1,13 @@
+DROP TABLE IF EXISTS relay_sidecar;
+DROP TABLE IF EXISTS relay_operations;
+DROP TABLE IF EXISTS relay_reply_intents;
+DROP TABLE IF EXISTS relay_events;
+DROP TABLE IF EXISTS relay_processed;
+DROP TABLE IF EXISTS relay_records;
+DROP TABLE IF EXISTS relay_cursors;
+DROP TABLE IF EXISTS relay_import_queue;
+DROP TABLE IF EXISTS relay_import_units;
+DROP TABLE IF EXISTS relay_source_fields;
+DROP TABLE IF EXISTS relay_import_source;
+DROP TABLE IF EXISTS relay_manifest;
+DROP TABLE IF EXISTS relay_authority;
