@@ -341,37 +341,42 @@ end
 -- is recorded as torn rather than skipped or included as a complete line.
 local SEAL_WINDOW = 64 * 1024
 
-local function sealed_log_end(self, path)
+local function sealed_log_end(self, path, allowance)
   local ok, size, why = pcall(self.fs.size, path)
   if not ok then return nil, fail("source_unreadable", "log", path) end
   if size == nil then
-    if error_code(why) == "not_found" then return 0, 0 end
+    if error_code(why) == "not_found" then return { end_offset = 0, torn = 0, used = 0 } end
     return nil, fail("source_unreadable", "log", path)
   end
   if type(size) ~= "number" or size % 1 ~= 0 or size < 0 then
     return nil, fail("source_unreadable", "log", path)
   end
-  if size == 0 then return 0, 0 end
-  local offset = size
+  if size == 0 then return { end_offset = 0, torn = 0, used = 0 } end
+  local offset, used = size, 0
   while offset > 0 do
-    local window = math.min(SEAL_WINDOW, offset)
+    local remaining = allowance ~= nil and (allowance - used) or SEAL_WINDOW
+    if remaining < 1 then
+      return nil, { code = "partial", field = "seal_budget", path = path, used = used }
+    end
+    local window = math.min(SEAL_WINDOW, offset, remaining)
     local start = offset - window
     local read_ok, chunk = pcall(self.fs.read_range, path, start, window)
     if not read_ok or type(chunk) ~= "table" or type(chunk.bytes) ~= "string" then
       return nil, fail("source_unreadable", "log", path)
     end
+    used = used + #chunk.bytes
     local last = chunk.bytes:match(".*()\n")
     if last then
       local finish = start + last
-      return finish, finish < size and 1 or 0
+      return { end_offset = finish, torn = finish < size and 1 or 0, used = used }
     end
     offset = start
   end
   -- The whole file is one torn line: no complete prefix is safe to seal.
-  return 0, 1
+  return { end_offset = 0, torn = 1, used = used }
 end
 
-function Source:seal(root, hex)
+function Source:seal(root, hex, budget)
   local ok, root_err = check_root(self, root)
   if not ok then return nil, root_err end
   ok, root_err = check_recipient(hex)
@@ -379,14 +384,30 @@ function Source:seal(root, hex)
   if type(self.fs.size) ~= "function" or type(self.fs.read_range) ~= "function" then
     return fail("unavailable", "fs")
   end
-  local inbox_end, inbox_torn = sealed_log_end(self,
-    self.root .. "/inboxes/" .. hex .. ".jsonl")
-  if not inbox_end then return nil, inbox_torn end
-  local read_end, read_torn = sealed_log_end(self,
-    self.root .. "/read/" .. hex .. ".jsonl")
-  if not read_end then return nil, read_torn end
-  return { recipient = hex, inbox_end = inbox_end, read_end = read_end,
-    inbox_torn = inbox_torn, read_torn = read_torn }
+  local allowance
+  if budget ~= nil then
+    if type(budget) ~= "table" or type(budget.max_bytes) ~= "number"
+      or budget.max_bytes % 1 ~= 0 or budget.max_bytes < 1 then
+      return fail("invalid_snapshot", "budget")
+    end
+    allowance = budget.max_bytes
+  end
+  local inbox, inbox_err = sealed_log_end(self,
+    self.root .. "/inboxes/" .. hex .. ".jsonl", allowance)
+  if not inbox then return nil, inbox_err end
+  local remaining = allowance and (allowance - (inbox.used or 0)) or nil
+  if remaining ~= nil and remaining < 1 then
+    return nil, { code = "partial", field = "seal_budget", used = inbox.used }
+  end
+  local reads, read_err = sealed_log_end(self,
+    self.root .. "/read/" .. hex .. ".jsonl", remaining)
+  if not reads then
+    if type(read_err) == "table" then read_err.used = (read_err.used or 0) + (inbox.used or 0) end
+    return nil, read_err
+  end
+  return { recipient = hex, inbox_end = inbox.end_offset,
+    read_end = reads.end_offset, inbox_torn = inbox.torn, read_torn = reads.torn,
+    bytes_read = (inbox.used or 0) + (reads.used or 0) }
 end
 
 -- ---------------------------------------------------------------------------

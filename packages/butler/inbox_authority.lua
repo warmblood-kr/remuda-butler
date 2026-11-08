@@ -860,8 +860,9 @@ local function seal_step(store, generation, budget)
     return migration_backlog(store, generation, code)
   end
   local sealed = 0
+  local remaining = budget.max_bytes
   for _, hex in ipairs(value.recipients) do
-    if sealed >= budget.max_statements then break end
+    if sealed >= budget.max_statements or remaining < 1 then break end
     local rows = sql_query(store,
       "SELECT inbox_end, read_end FROM migration_prefix WHERE root = ? "
         .. "AND generation = ? AND recipient = ?",
@@ -872,13 +873,14 @@ local function seal_step(store, generation, budget)
         return migration_backlog(store, generation, "sealed_source_unavailable")
       end
       local sealed_ok, sealed_value, sealed_why = pcall(source.seal, source,
-        store.root, hex)
+        store.root, hex, { max_bytes = remaining })
       if not sealed_ok or type(sealed_value) ~= "table" then
         local code = (type(sealed_value) == "table" and sealed_value.code)
           or (type(sealed_why) == "table" and sealed_why.code)
           or (type(sealed_why) == "string" and sealed_why) or "source_unreadable"
         return migration_backlog(store, generation, code)
       end
+      remaining = remaining - (sealed_value.bytes_read or 0)
       local written = sql_exec(store,
         "INSERT INTO migration_prefix (root, generation, recipient, inbox_end, "
           .. "read_end, inbox_torn, read_torn, revision, cursor_json, complete) "
@@ -925,7 +927,15 @@ local function advance_step(store, generation, budget)
       { max_bytes = budget.max_bytes, max_tasks = 1, max_ms = budget.max_ms })
     if not ok then return nil, { code = "source_unreadable", field = "sealed" } end
     if type(result) ~= "table" then
-      return nil, (type(why) == "table" and why) or { code = "source_unreadable" }
+      local code = (type(why) == "table" and why.code) or "source_unreadable"
+      -- A durable seal that cannot be read yet is a backlog item, reported with
+      -- its exact reason; it never marks coverage complete. Backend/schema
+      -- unavailability stays a hard error.
+      if code == "source_unreadable" or code == "partial"
+        or code == "source_oversize" or code == "stale_generation" then
+        return migration_backlog(store, generation, code)
+      end
+      return nil, (type(why) == "table" and why) or { code = code }
     end
     local evidence = { state = result.state, cursor = result.cursor,
       witness = result.snapshot and result.snapshot.witness or nil }
