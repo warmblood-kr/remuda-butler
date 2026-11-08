@@ -405,7 +405,15 @@ local function frame(parts)
   return table.concat(out)
 end
 
-local function chain_start(self, root, hex)
+-- The sealed domain has its own seed over the immutable generation and ends;
+-- v2 framing continues after that seed so appends beyond the seal cannot move
+-- a completed prefix.
+local SEALED_PROTOCOL = "migration-sealed-v1"
+local function chain_start(self, root, hex, cursor)
+  if cursor and cursor.protocol == SEALED_PROTOCOL then
+    return self.sha256(frame({ SEALED_PROTOCOL, root, hex, cursor.generation,
+      tostring(cursor.inbox_end), tostring(cursor.read_end) }))
+  end
   return self.sha256(frame({ PROTOCOL, root, hex }))
 end
 
@@ -806,8 +814,21 @@ local function log_unit(self, root, hex, state)
   local offset = cursor.offset or 0
   local parse_offset = cursor.parse_offset or 0
   local line_tail = cursor.line_tail or ""
+  local limit
+  if cursor.protocol == SEALED_PROTOCOL then
+    limit = (log == "read") and cursor.read_end or cursor.inbox_end
+    if type(limit) ~= "number" or limit % 1 ~= 0 or limit < 0 then
+      return fail("invalid_snapshot", "sealed_end", path)
+    end
+    if offset >= limit then
+      cursor.chain = chain_add(self, cursor.chain, path, "eof", limit, 0,
+        assert(self.sha256("")))
+      return finish_log(self, root, hex, state, cursor, {}, 0)
+    end
+  end
+  local want = limit and math.min(LOG_CHUNK, limit - offset) or LOG_CHUNK
   local ok, chunk, range_err = pcall(self.fs.read_range,
-    self.root .. "/" .. path, offset, LOG_CHUNK)
+    self.root .. "/" .. path, offset, want)
   if not ok then return fail("source_unreadable", "log", path) end
   if chunk == nil then
     if error_code(range_err) ~= "not_found" then
@@ -821,7 +842,14 @@ local function log_unit(self, root, hex, state)
     return fail("source_unreadable", "log", path)
   end
   local bytes = chunk.bytes
-  local eof = chunk.eof == true
+  local at_limit = limit ~= nil and (offset + #bytes >= limit)
+  if limit and chunk.eof == true and not at_limit then
+    -- The durable seal points past the live file: the sealed prefix was
+    -- truncated or rewritten. Never stage a shorter prefix as if it were the
+    -- sealed one.
+    return fail("stale_generation", "log", path)
+  end
+  local eof = at_limit or chunk.eof == true
   if eof and #bytes == 0 and parse_offset == 0 and line_tail ~= "" then
     -- The tail was already persisted by the previous unit.
     return fail("partial")
@@ -847,6 +875,11 @@ local function log_unit(self, root, hex, state)
     return commit_log(self, root, hex, state, cursor, delta, #bytes)
   end
   local remainder = buffer:sub(position + 1)
+  if eof and limit and remainder ~= "" then
+    -- A sealed end is always after a complete newline. A nonempty remainder at
+    -- that end means the live bytes no longer match the seal.
+    return fail("stale_generation", "log", path)
+  end
   if eof and remainder ~= "" then
     -- Torn tail: rewind to this chunk's fixed boundary. Only the prefix that
     -- came from earlier folded chunks is carried; this chunk is re-read after
@@ -895,7 +928,7 @@ local function file_unit(self, root, hex, state, pass)
       cursor.parse_offset = 0
       cursor.line_tail = ""
       cursor.after_key = nil
-      cursor.chain = chain_start(self, root, hex)
+      cursor.chain = chain_start(self, root, hex, cursor)
       return commit_log(self, root, hex, state, cursor, {}, 0)
     end
     local first = cursor.first_chain
@@ -903,11 +936,19 @@ local function file_unit(self, root, hex, state, pass)
     if type(first) ~= "string" or first ~= second then
       return invalidate(self, root, hex, state, "stale_generation")
     end
-    local witness = PROTOCOL .. ":sha256:" .. second
-    local ready_cursor = { generation = cursor.generation, protocol_version = 2,
+    local sealed = cursor.protocol == SEALED_PROTOCOL
+    local witness_protocol = sealed and SEALED_PROTOCOL or PROTOCOL
+    local witness = witness_protocol .. ":sha256:" .. second
+    local ready_cursor = { generation = cursor.generation,
+      protocol_version = sealed and 3 or 2,
       phase = "ready", offset = 0, parse_offset = 0, line_tail = "",
       chain = second, first_chain = first, next_seq = cursor.next_seq or 1,
       complete = true, witness = witness }
+    if sealed then
+      ready_cursor.protocol = SEALED_PROTOCOL
+      ready_cursor.inbox_end = cursor.inbox_end
+      ready_cursor.read_end = cursor.read_end
+    end
     local value, ready_err = self.progress.commit(root, hex, state.revision,
       ready_cursor, { { op = "ready", witness = witness, first_chain = first,
         second_chain = second } })
@@ -944,11 +985,19 @@ local function advance_result(unit, state, ready)
     processed_bytes = unit.bytes or 0, processed_tasks = 1, snapshot = nil }
 end
 
-function Source:advance(root, hex, budget)
+local function advance_impl(self, root, hex, budget, sealed)
   local ok, root_err = check_root(self, root)
   if not ok then return nil, root_err end
   ok, root_err = check_recipient(hex)
   if not ok then return nil, root_err end
+  if sealed ~= nil then
+    if type(sealed) ~= "table" or not nonempty(sealed.generation)
+      or type(sealed.inbox_end) ~= "number" or sealed.inbox_end % 1 ~= 0
+      or sealed.inbox_end < 0 or type(sealed.read_end) ~= "number"
+      or sealed.read_end % 1 ~= 0 or sealed.read_end < 0 then
+      return fail("invalid_snapshot", "sealed")
+    end
+  end
   if type(self.progress) ~= "table" or type(self.progress.load) ~= "function"
     or type(self.progress.commit) ~= "function"
     or type(self.progress.scan) ~= "function"
@@ -965,13 +1014,26 @@ function Source:advance(root, hex, budget)
       return fail("invalid_snapshot", "budget")
     end
   end
+  local function new_cursor()
+    local cursor = { phase = "logs1", log = "inbox", offset = 0,
+      parse_offset = 0, line_tail = "", next_seq = 1, complete = false }
+    if sealed then
+      cursor.generation = sealed.generation
+      cursor.protocol_version = 3
+      cursor.protocol = SEALED_PROTOCOL
+      cursor.inbox_end = sealed.inbox_end
+      cursor.read_end = sealed.read_end
+    else
+      cursor.generation = new_generation(self, root, hex)
+      cursor.protocol_version = 2
+    end
+    cursor.chain = chain_start(self, root, hex, cursor)
+    return cursor
+  end
   local state, load_err = self.progress.load(root, hex)
   if state == nil then
     if load_err and load_err.code ~= "not_found" then return nil, load_err end
-    local cursor = { generation = new_generation(self, root, hex),
-      protocol_version = 2, phase = "logs1", log = "inbox", offset = 0,
-      parse_offset = 0, line_tail = "", chain = chain_start(self, root, hex),
-      next_seq = 1, complete = false }
+    local cursor = new_cursor()
     local value, commit_err = self.progress.commit(root, hex, 0, cursor, {})
     if not value then return nil, commit_err end
     return { state = "backlog", complete = false,
@@ -979,7 +1041,30 @@ function Source:advance(root, hex, budget)
         pass = "logs1", task = "inbox", offset = 0 },
       processed_bytes = 0, processed_tasks = 0, snapshot = nil }
   end
-  if state.cursor.protocol_version ~= 2 then
+  if sealed then
+    if state.cursor.protocol == SEALED_PROTOCOL then
+      if state.cursor.generation ~= sealed.generation
+        or tonumber(state.cursor.inbox_end) ~= sealed.inbox_end
+        or tonumber(state.cursor.read_end) ~= sealed.read_end then
+        return nil, { code = "stale_generation", field = "sealed_end",
+          restart_required = true }
+      end
+    elseif state.cursor.protocol_version == 3 then
+      return nil, { code = "unsupported_protocol", required = SEALED_PROTOCOL,
+        found = state.cursor.protocol, restart_required = true }
+    else
+      -- Explicit sealed upgrade of an older v1/v2 cursor. Old staged rows stay
+      -- in place; this cursor is never resumed as if it were sealed.
+      local cursor = new_cursor()
+      local value, commit_err = self.progress.commit(root, hex, state.revision,
+        cursor, {})
+      if not value then return nil, commit_err end
+      return { state = "backlog", complete = false,
+        cursor = { generation = cursor.generation, revision = value.revision,
+          pass = "logs1", task = "inbox", offset = 0 },
+        processed_bytes = 0, processed_tasks = 0, snapshot = nil }
+    end
+  elseif state.cursor.protocol_version ~= 2 then
     return nil, { code = "unsupported_protocol", required = 2,
       found = state.cursor.protocol_version, restart_required = true }
   end
@@ -1010,6 +1095,14 @@ function Source:advance(root, hex, budget)
   end
   if not unit then return nil, unit_err end
   return advance_result(unit, state, unit.snapshot ~= nil)
+end
+
+function Source:advance(root, hex, budget)
+  return advance_impl(self, root, hex, budget, nil)
+end
+
+function Source:sealed_advance(root, hex, ends, budget)
+  return advance_impl(self, root, hex, budget, ends)
 end
 
 function M.open(config)

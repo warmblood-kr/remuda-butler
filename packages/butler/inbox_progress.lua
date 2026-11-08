@@ -58,7 +58,8 @@ local GET_KINDS = { delivery = true, read = true, dependency = true,
 local CURSOR_KEYS = { generation = true, protocol_version = true, phase = true,
   log = true, offset = true, parse_offset = true, line_tail = true,
   after_key = true, chain = true, first_chain = true, next_seq = true,
-  complete = true, witness = true }
+  complete = true, witness = true, protocol = true, inbox_end = true,
+  read_end = true }
 local CURSOR_LOGS = { inbox = true, read = true }
 
 local function valid_cursor(cursor, max_line_bytes)
@@ -69,6 +70,15 @@ local function valid_cursor(cursor, max_line_bytes)
   if not nonempty(cursor.generation) then return false end
   if cursor.protocol_version ~= nil and not is_integer(cursor.protocol_version) then
     return false
+  end
+  if cursor.protocol ~= nil and (type(cursor.protocol) ~= "string"
+    or cursor.protocol ~= "migration-sealed-v1") then
+    return false
+  end
+  for _, key in ipairs({ "inbox_end", "read_end" }) do
+    if cursor[key] ~= nil and (not is_integer(cursor[key]) or cursor[key] < 0) then
+      return false
+    end
   end
   if cursor.phase ~= nil and not PHASES[cursor.phase] then return false end
   if cursor.log ~= nil and not CURSOR_LOGS[cursor.log] then return false end

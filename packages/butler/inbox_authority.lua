@@ -896,6 +896,58 @@ local function seal_step(store, generation, budget)
     tail_watermark = migration_watermark(store, generation) }
 end
 
+-- One bounded advance unit: seal newly seen recipients first, then run sealed
+-- prefix staging for the first incomplete mailbox. Staged rows live in the
+-- shared progress backend under the tracked generation; the sealed ends never
+-- move, so arrivals after a seal stay for the tail/journal phase.
+local function advance_step(store, generation, budget)
+  local sealed_result, seal_err = seal_step(store, generation, budget)
+  if not sealed_result then return nil, seal_err end
+  if (sealed_result.sealed or 0) > 0 then return sealed_result end
+  local source = store.source
+  if type(source) ~= "table" or type(source.sealed_advance) ~= "function" then
+    return migration_backlog(store, generation, "sealed_advance_unavailable")
+  end
+  local units = 0
+  while units < budget.max_statements do
+    local rows = sql_query(store,
+      "SELECT recipient, inbox_end, read_end FROM migration_prefix WHERE root = ? "
+        .. "AND generation = ? AND complete = 0 ORDER BY recipient LIMIT 1",
+      { store.actual_root, generation })
+    if not rows then return nil, { code = "unavailable", field = "migration_prefix" } end
+    if #rows == 0 then
+      return migration_backlog(store, generation, "barrier_pending")
+    end
+    local row = rows[1]
+    local ok, result, why = pcall(source.sealed_advance, source, store.root,
+      row.recipient, { generation = generation,
+        inbox_end = tonumber(row.inbox_end), read_end = tonumber(row.read_end) },
+      { max_bytes = budget.max_bytes, max_tasks = 1, max_ms = budget.max_ms })
+    if not ok then return nil, { code = "source_unreadable", field = "sealed" } end
+    if type(result) ~= "table" then
+      return nil, (type(why) == "table" and why) or { code = "source_unreadable" }
+    end
+    local evidence = { state = result.state, cursor = result.cursor,
+      witness = result.snapshot and result.snapshot.witness or nil }
+    local cursor_json = canonical_json(store, evidence)
+    if not cursor_json then return nil, { code = "unavailable", field = "canonical" } end
+    local written = sql_exec(store,
+      "UPDATE migration_prefix SET revision = ?, cursor_json = ?, complete = ? "
+        .. "WHERE root = ? AND generation = ? AND recipient = ?",
+      { (result.cursor and result.cursor.revision) or 0, cursor_json,
+        result.complete == true and 1 or 0, store.actual_root, generation,
+        row.recipient })
+    if not written then return nil, { code = "unavailable", field = "migration_prefix" } end
+    units = units + 1
+  end
+  local pending = sql_query(store,
+    "SELECT COUNT(*) AS n FROM migration_prefix WHERE root = ? AND generation = ? "
+      .. "AND complete = 0", { store.actual_root, generation })
+  if not pending then return nil, { code = "unavailable", field = "migration_prefix" } end
+  return migration_backlog(store, generation,
+    tonumber(pending[1].n) == 0 and "barrier_pending" or "prefix_pending")
+end
+
 function Store:advance(budget)
   local refusal = close_refusal(self)
   if refusal then return nil, refusal end
@@ -916,7 +968,7 @@ function Store:advance(budget)
   end
   local generation, gate_err = ensure_tracking(self)
   if not generation then return nil, gate_err end
-  return seal_step(self, generation, { max_bytes = budget.max_bytes,
+  return advance_step(self, generation, { max_bytes = budget.max_bytes,
     max_statements = statements, max_ms = budget.max_ms })
 end
 
