@@ -44,5 +44,8 @@ Evidence on this candidate:
   a same-PK REPLACE with a different identity, source/sidecar admission
   unknown-COMMIT quarantines the lease, and a READY ingest_step returns numeric
   count/bytes/nodes.
+- Discovery reads a key length before fetching it: a 100,000B key under a
+  1024B call budget returns budget_too_small without advancing; 300,000B is
+  field_oversize; the capture remains.
 - Near-32MiB is gated separately; record measured walltime and SQL page work
   rather than claiming a range that did not finish.
