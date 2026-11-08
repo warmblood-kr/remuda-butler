@@ -133,8 +133,8 @@ isolated_env_pid_zombie() {
 }
 
 isolated_env_cleanup() {
-  local status=${1:-0}
-  [[ -n ${T:-} && -e ${T:-} ]] || return "$status"
+  local rc=${1:-0}
+  [[ -n ${T:-} && -e ${T:-} ]] || return "$rc"
   if [[ -L "$T" || ! -O "$T" || ${REMUDA_RUNTIME_DIR:-} != "$T/runtime" ]]; then
     echo "private-env: refusing cleanup outside the owned scratch: ${T:-}" >&2
     return 1
@@ -182,7 +182,7 @@ isolated_env_cleanup() {
     return 1
   fi
   rm -rf -- "$T"
-  return "$status"
+  return "$rc"
 }
 
 isolated_env_install_trap() {

@@ -88,7 +88,7 @@ fi
 
 # An unknown kill failure is not proof of exit; only "No such process" is.
 (
-  function kill() { echo "kill: unknown failure" >&2; return 1; }
+  function kill() { echo "process inspection unavailable" >&2; return 1; }
   isolated_env_pid_alive $$
 ) || note "an unknown kill failure was treated as gone"
 
