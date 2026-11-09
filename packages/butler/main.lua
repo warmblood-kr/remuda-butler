@@ -921,6 +921,9 @@ remuda._butler_sessions_config = { bus = bus, mail = mail, identity_path = ident
   registered_agent_kind = registered_agent_kind, call_callback = call_callback,
   load_status_detector = function(kind) remuda.exec("butler/session_status/" .. kind) end }
 remuda.exec("butler/sessions")
+-- Automatic cluster display facts: no enable flag, exact-instance only.
+remuda._butler_session_display_config = { bus = bus }
+remuda.exec("butler/session_display")
 local registry_list = remuda._butler_sessions_impl.registry_list
 remuda.exec("butler/doctor")
 local quota_loaded, quota_error = pcall(remuda.exec, "butler/quota")

@@ -60,6 +60,10 @@ if [[ $mode == policy ]]; then
   # The private-envelope guard is pure Lua and must run on PRs even though the
   # mutation-heavy wrappers it protects are skipped there.
   run isolated_test_guard_test.lua luajit "tests/isolated_test_guard_test.lua"
+  # Cluster enrichment parity and the automatic display publisher are pure Lua;
+  # they must run on PRs, not only in the full main-push corpus.
+  run session_enrichment_contract.lua luajit "tests/session_enrichment_contract.lua"
+  run session_display_contract.lua luajit "tests/session_display_contract.lua"
 fi
 if [[ $mode == all ]]; then
 for lua in "$REPO"/tests/*.lua; do

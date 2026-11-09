@@ -798,6 +798,8 @@ return {
       host._butler_relay_owner_unverified = true
     end
     if dialogs then dialogs.stop() end
+    local display = host._butler_session_display
+    if display and type(display.stop) == "function" then pcall(display.stop) end
     local controls = host.butler and host.butler.startup_controls
     if controls and type(controls.stop_all) == "function" then pcall(controls.stop_all) end
     if host._butler_cancel_active_choosers then host._butler_cancel_active_choosers(state) end
@@ -855,6 +857,11 @@ return {
       if booted and host._butler_reconcile and host._butler_reconcile_retry
           and host._butler_reconcile_retry.remaining_ms() <= 0 then
         host._butler_reconcile()
+      end
+    end },
+    { name = "butler-session-display", every = 2, run = function()
+      if booted and host._butler_session_display_tick then
+        host._butler_session_display_tick()
       end
     end },
     { name = "butler-done-autoclose", every = 30, run = function()
