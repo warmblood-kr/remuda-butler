@@ -213,7 +213,7 @@ local coff = remuda._butler_agent_builders.codex({ name = "codexlead",
 assert(#coff == 4 and not table.concat(coff, " "):find("--binding", 1, true),
   "an off/old Codex launch keeps the old argv")
 
--- 6. The wrapper argv for a bound launch; PTY keeps the old command.
+-- 6. The wrapper argv for a bound launch; PTY uses the supported local TUI command.
 remuda._butler_agent_builders, remuda._butler_agent_startup = {}, {}
 remuda._butler_telemetry_adapters = {}
 dofile("packages/butler/agents/opencode.lua")
@@ -228,8 +228,14 @@ for _, value in ipairs(argv) do
     "Butler never invents a session id")
 end
 local pty_argv = remuda._butler_agent_builders.opencode({ name = "lead", cwd = "/work" })
-assert(pty_argv[1] == "opencode" and pty_argv[2] == "--standalone",
-  "an unbound launch stays the PTY command")
+assert(#pty_argv == 2 and pty_argv[1] == "opencode" and pty_argv[2] == "/work",
+  "an unbound launch uses the exact OpenCode 1.19.5 local TUI argv")
+local spaced = remuda._butler_agent_builders.opencode({ name = "lead", cwd = "/work with spaces" })
+assert(#spaced == 2 and spaced[2] == "/work with spaces", "cwd stays one literal argument")
+for _, spec in ipairs({ { name = "lead" }, { name = "lead", cwd = "" } }) do
+  local bare = remuda._butler_agent_builders.opencode(spec)
+  assert(#bare == 1 and bare[1] == "opencode", "missing/empty cwd adds no argument")
+end
 
 -- 7. A relaunch reuses the private name dir (core reason `exists`) and still
 -- gets a fresh nonce leaf.

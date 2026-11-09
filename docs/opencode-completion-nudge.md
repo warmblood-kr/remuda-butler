@@ -41,12 +41,14 @@ is why loop prevention is structural rather than a timer.
 
 ## Identity
 
-`launch.lua` starts an OpenCode member as `opencode --standalone <cwd>` with
+`launch.lua` starts an OpenCode member as `opencode <cwd>` with
 `REMUDA_BUTLER_SESSION_NAME`, `REMUDA_BUTLER_AGENT_ID` and
-`REMUDA_BUTLER_AGENT_KIND=opencode` in the child's environment. `--standalone`
-gives each member a private server, so the plugin can require all three fields
-and stay inert everywhere else. It does not read the caller capability, the
-working directory, another session's transcript, or any daemon state. A
+`REMUDA_BUTLER_AGENT_KIND=opencode` in the child's environment. OpenCode 1.19.5
+rejects `--standalone`; the legacy local TUI launch omits it. These fields
+identify launch intent, not a proven private server or session binding. The
+plugin requires all three fields and stays inert when they are absent. It does
+not read the caller capability, the working directory, another session's
+transcript, or any daemon state. A
 plugin-spawned `remuda` call has no caller identity (verified: `unknown caller`),
 so the plugin never attempts one.
 

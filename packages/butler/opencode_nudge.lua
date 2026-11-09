@@ -8,10 +8,10 @@
 -- calls the daemon: it only asks the same session whether it has finished.
 --
 -- Identity is the launch contract, not a guess. `launch.lua` starts an OpenCode
--- member as `opencode --standalone <cwd>` with `REMUDA_BUTLER_SESSION_NAME`,
+-- member as `opencode <cwd>` (legacy local TUI) with `REMUDA_BUTLER_SESSION_NAME`,
 -- `REMUDA_BUTLER_AGENT_ID` and `REMUDA_BUTLER_AGENT_KIND` in the child's
--- environment, so this server belongs to that one member. Any other OpenCode
--- server lacks that environment and the plugin stays inert; it never reads the
+-- environment. These fields identify launch intent, not a session binding.
+-- A server without that environment stays inert; the plugin never reads the
 -- caller capability, the working directory, or another session's transcript.
 --
 -- The source is embedded rather than shipped beside this file because a mod is
@@ -50,7 +50,8 @@ const SHELL_REPORT = /^remuda\b.*\sbutler\s+send-to-leader(?:\s|$)/
 // Text that means the report was refused or failed, whatever the exit status.
 const REFUSAL = /unknown caller|not permitted|not authorized|no lead|denied:|runtime error|^error:/im
 
-// The launch contract: only a member's private `--standalone` server sees this.
+// The launch contract supplies identity to the member's local TUI process.
+// Environment alone does not prove a private server or session binding.
 // A server without that launch environment stays inert. A human shell that
 // inherits a member's environment is the known caveat; every field must be
 // present, and the plugin still only asks, never reports.

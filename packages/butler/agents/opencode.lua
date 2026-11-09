@@ -304,7 +304,8 @@ builders.opencode = function(spec)
     -- session and the TUI; Butler only supplies the private binding path.
     return { "remuda", "_opencode_tui", "--binding", spec.native.binding, "--cwd", spec.cwd }
   end
-  local argv = { "opencode", "--standalone" }
+  -- OpenCode 1.19.5 starts its local TUI without a --standalone option.
+  local argv = { "opencode" }
   if type(spec.cwd) == "string" and spec.cwd ~= "" then argv[#argv + 1] = spec.cwd end
   return argv
 end
