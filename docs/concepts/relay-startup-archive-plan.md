@@ -9,7 +9,7 @@
   `:763 load_state`, `:982 save_state`, `:1628 reconcile_acks`, `:3058 stop`.
 - Backup/drain: `config_path..".since.bak"`, `config_path..".acks.drain"`.
 - `relay_store_migrate.run` loops and is NOT the startup step; `M.step` performs
-  exactly one store action via import_prepare/import_source/import_acks/
+  exactly one store action via import_prepare/import_stream_begin/chunk/finish/
   ingest_step/import_batch/verify_import/activate/proof.
 - `relay_receipts.lua:417 import_all`, `:487 record`, `:497 authority_state`.
 - `approval.lua:116 attach(state,persist,post,room,home[,record])`, `:188
@@ -40,18 +40,18 @@ archive.plan(input) -> per-file plan | nil,'proof_...'
 archive.advance(job_id,budget), archive.status(job_id)
 ```
 
-`deps`: `open_store(cfg,deps)`, `identity{root_id,account_id,device_id,relay_id}`,
-`owner{acquire,check,describe,release}`, `marker{read,publish}`,
-`anchors.inspect`, `json`, `digest.sha256`, `fs`, `migrate`, and `inbox_proof()`
-returning the live producer object. Missing owner/inbox proof blocks before
-poll; never fabricated and never read from inbox_db counts.
+`deps`: `open_store(cfg,deps)`, `identity`, `owner{acquire,check,describe,
+release}`, `marker{read,publish}`, `anchors.inspect`, `json`, `digest.sha256`,
+`fs`, `migrate`, `inbox_proof()` (live producer). Missing owner/inbox proof
+blocks before poll; never fabricated or read from inbox_db counts.
 
 ## Startup sequence
 
 `init.lua` calls `authority.start` before `matrix.relay.start`; a blocked or
 non-done job sets the restart barrier and returns. One advance performs exactly
 one admission, ingest_step, import_batch page, verify page, activate or proof
-call; no caller loop and no whole-source SHA. Stamps are source-set metadata.
+call; no caller loop and no whole-source SHA. Stamps are source-set metadata; admission streams <=64KiB/call, SQL assembles
+the capture.
 SQL activates only after the relay certificate and inbox proof reread under the
 current owner. Owner/marker/source bytes are rechecked; unknown COMMIT
 quarantines; there is no FILE fallback.

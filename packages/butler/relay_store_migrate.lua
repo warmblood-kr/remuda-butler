@@ -25,6 +25,34 @@ local function read_provider(opts, path)
   return read_file(path)
 end
 
+local function read_chunk(opts, path, offset, limit)
+  if opts.fs and type(opts.fs.read_range) == 'function' then
+    local ok, chunk, err = pcall(opts.fs.read_range, path, offset, limit)
+    if not ok then return nil, tostring(chunk) end
+    if chunk == nil then return nil, tostring(err or 'read_range') end
+    return chunk
+  end
+  local file, err = io.open(path, 'rb')
+  if not file then return nil, tostring(err) end
+  local size = file:seek('end')
+  if offset > size then file:close(); return nil, 'offset' end
+  local seeked, seek_err = file:seek('set', offset)
+  if not seeked then file:close(); return nil, tostring(seek_err) end
+  local chunk = offset == size and '' or file:read(limit)
+  file:close()
+  if chunk == nil then return nil, 'read' end
+  if #chunk > limit then return nil, 'oversize' end
+  return chunk
+end
+
+local function file_size(path)
+  local file = io.open(path, 'rb')
+  if not file then return nil end
+  local size = file:seek('end')
+  file:close()
+  return size
+end
+
 local function sha(opts, raw)
   local digest = opts.digest and opts.digest.sha256
   if type(digest) ~= 'function' then return nil, 'digest provider missing' end
@@ -81,10 +109,16 @@ local function step_sources(opts)
   -- The source set is fixed at prepare. A missing primary refuses; a missing
   -- optional sidecar is omitted (not invented as an empty row). Empty existing
   -- ack/drain files still enter the set as valid 0-byte artifacts.
-  if not readable(sources[1].path) then return nil, 'primary_missing' end
+  local primary_size = file_size(sources[1].path)
+  if primary_size == nil then return nil, 'primary_missing' end
+  sources[1].bytes = primary_size
   local present = { sources[1] }
   for index = 2, #sources do
-    if readable(sources[index].path) then present[#present + 1] = sources[index] end
+    local size = file_size(sources[index].path)
+    if size ~= nil then
+      sources[index].bytes = size
+      present[#present + 1] = sources[index]
+    end
   end
   return present
 end
@@ -135,29 +169,54 @@ function M.step(store, job, opts)
     return step_result(job, 'prepare')
   end
   if job.phase == 'admit' then
-    local source = first_in(job, 'pending')
-    if not source then job.phase = 'ingest'; return step_result(job, 'admit_skip') end
-    local raw, read_err = read_provider(opts, source.path)
-    if raw == nil then
-      if source.optional then
-        source.state = 'skipped'
-        return step_result(job, 'admit_skip', { source_id = source.id,
-          skipped = true, reason = tostring(read_err or 'missing') })
+    local source
+    for _, item in ipairs(job.sources or {}) do
+      if item.state == 'pending' or item.state == 'streaming'
+          or item.state == 'stream_finish' then
+        source = item
+        break
       end
-      return nil, source.id .. '_read', { reason = read_err }
     end
-    local receipt, admit_why, detail
-    if source.role == 'acks' or source.role == 'drain' then
-      receipt, admit_why, detail = store:import_acks(source.id, raw, source.stamp)
-    else
-      receipt, admit_why, detail = store:import_source(source.id, raw)
+    if not source then job.phase = 'ingest'; return step_result(job, 'admit_skip') end
+    local kind = (source.role == 'acks' or source.role == 'drain')
+      and 'sidecar' or 'source'
+    if source.state == 'pending' then
+      local receipt, begin_why, detail = store:import_stream_begin(source.id,
+        kind, source.bytes, { stamp = source.stamp })
+      if not receipt then return nil, begin_why, detail end
+      source.ingest_id = receipt.ingest_id
+      source.offset, source.part, source.state = 0, 0, 'streaming'
+      return step_result(job, 'admit_begin', { source_id = source.id,
+        ingest_id = receipt.ingest_id, bytes = source.bytes })
     end
-    if not receipt then return nil, admit_why, detail end
+    if source.state == 'streaming' then
+      if source.offset >= source.bytes then
+        source.state = 'stream_finish'
+        return step_result(job, 'stream_done', { source_id = source.id,
+          bytes = source.bytes, parts = source.part })
+      end
+      local remaining = math.min(65536, source.bytes - source.offset)
+      local chunk, read_why = read_chunk(opts, source.path, source.offset, remaining)
+      if chunk == nil then return nil, source.id .. '_read', { reason = read_why } end
+      if #chunk == 0 then
+        source.state = 'stream_finish'
+        return step_result(job, 'stream_done', { source_id = source.id,
+          bytes = source.bytes, parts = source.part })
+      end
+      source.part = source.part + 1
+      local receipt, chunk_why, detail = store:import_stream_chunk(
+        source.ingest_id, source.part, chunk)
+      if not receipt then return nil, chunk_why, detail end
+      source.offset = source.offset + #chunk
+      return step_result(job, 'admit_chunk', { source_id = source.id,
+        ingest_id = source.ingest_id, part = source.part, part_bytes = #chunk,
+        offset = source.offset })
+    end
+    local receipt, finish_why, detail = store:import_stream_finish(source.ingest_id)
+    if not receipt then return nil, finish_why, detail end
     source.state = 'admitted'
-    source.ingest_id = receipt.ingest_id
-    return step_result(job, 'admit', { source_id = source.id,
-      ingest_id = receipt.ingest_id, revision = receipt.revision,
-      state = receipt.state, phase_name = receipt.phase })
+    return step_result(job, 'admit_finish', { source_id = source.id,
+      ingest_id = source.ingest_id, phase_name = receipt.phase })
   end
   if job.phase == 'ingest' then
     local source = first_in(job, 'admitted')

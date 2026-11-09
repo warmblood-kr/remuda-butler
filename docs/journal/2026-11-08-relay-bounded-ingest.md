@@ -65,13 +65,12 @@ Evidence on this candidate:
   may be config.store_id, data_revision frozen, verification_id final hash.
 - `authority.adapter(providers)` binds once, then start(cfg,{inbox_proof=fn})/
   advance/certificate/status/inventories for the inbox coordinator.
-- Archive HOLD6: providers copy <=64KiB chunks to durable `.part.NNNN`, write
-  a digest manifest and a durable per-file plan (chunk/verify/retire cursors),
-  re-check BOTH proofs + current owner before each advance, inspect unknown
-  renames, and treat live-source+identical-retained as retire_conflict. Native:
-  200KB 4 parts, max 65536B/call, mid-flight reload keeps offset 65536,
-  proof drift/missing owner refuse, conflict blocks.
-- `approval_record_sql` mirrors one exact approval through store:put with an
-  idempotent operation id and bounded page/get; no writer -> refusal. Native
-  open/retry/update/page pass. Remaining HOLD: streaming admission.
+- Archive HOLD6: <=64KiB `.part.NNNN` copy/verify, digest manifest, durable
+  per-file plan cursors, BOTH proofs+owner each advance, unknown-rename
+  inspect, retire_conflict. Native: 200KB 4 parts, reload keeps offset 65536.
+- Stream admission: begin/chunk/finish one <=64KiB chunk per call, raw
+  assembled in SQL into the immutable capture; 200KB 4 parts verify+activate,
+  chunk retry/order/changed edges pass, no source decode.
+- `approval_record_sql`: exact idempotent store:put, bounded page/get, no
+  writer -> refusal; native open/retry/update/page pass.
 

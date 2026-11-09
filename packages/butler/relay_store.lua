@@ -172,6 +172,36 @@ CREATE TABLE IF NOT EXISTS relay_source_ack_range (
   end_byte INTEGER NOT NULL,
   PRIMARY KEY(ingest_id,ordinal)
 );
+-- Bounded streaming admission: chunks are staged one <=64KiB call at a time
+-- and assembled into the immutable capture by SQL, so no whole source enters
+-- Lua or a bound SQL parameter.
+CREATE TABLE IF NOT EXISTS relay_source_stage (
+  ingest_id TEXT PRIMARY KEY,
+  store_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('source','sidecar')),
+  role TEXT NOT NULL,
+  stamp TEXT NOT NULL DEFAULT '',
+  expected_bytes INTEGER NOT NULL,
+  written_bytes INTEGER NOT NULL DEFAULT 0,
+  parts INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL CHECK(state IN ('staging','ready')),
+  created_at TEXT NOT NULL,
+  UNIQUE(store_id, source_id, kind)
+);
+CREATE TABLE IF NOT EXISTS relay_source_chunk (
+  ingest_id TEXT NOT NULL,
+  part INTEGER NOT NULL,
+  bytes INTEGER NOT NULL,
+  digest TEXT NOT NULL,
+  chunk TEXT NOT NULL,
+  PRIMARY KEY(ingest_id,part)
+);
+DROP TRIGGER IF EXISTS relay_stage_no_duplicate;
+CREATE TRIGGER IF NOT EXISTS relay_stage_no_duplicate BEFORE INSERT ON relay_source_stage
+WHEN EXISTS(SELECT 1 FROM relay_source_stage s WHERE s.ingest_id=NEW.ingest_id
+  OR (s.store_id=NEW.store_id AND s.source_id=NEW.source_id AND s.kind=NEW.kind))
+BEGIN SELECT RAISE(ABORT,'stage_immutable'); END;
 DROP TRIGGER IF EXISTS relay_capture_no_update;
 CREATE TRIGGER IF NOT EXISTS relay_capture_no_update BEFORE UPDATE ON relay_source_capture
 BEGIN SELECT RAISE(ABORT,'capture_immutable'); END;
@@ -411,8 +441,9 @@ BEGIN UPDATE relay_authority SET data_revision=data_revision+1 WHERE singleton=1
 ]]
 
 local METHODS = {
-  'import_prepare', 'import_source', 'import_batch', 'import_acks', 'ingest_step',
-  'verify_import', 'activate', 'writer', 'cursor', 'accept_batch',
+  'import_prepare', 'import_source', 'import_batch', 'import_acks',
+  'import_stream_begin', 'import_stream_chunk', 'import_stream_finish',
+  'ingest_step', 'verify_import', 'activate', 'writer', 'cursor', 'accept_batch',
   'dispatch_page', 'complete_dispatch', 'get', 'put', 'delete', 'page',
   'resolve_operation', 'reply_dispatch_page', 'claim_reply', 'complete_reply',
   'fail_reply', 'status', 'proof',
@@ -1884,6 +1915,223 @@ function M.open(opts)
     end
     return { accepted = true, done = false, state = 'hashing',
       source_id = source_id, ingest_id = ingest_id, revision = 1, phase = 'HASH' }
+  end
+
+  -- Streaming admission: begin -> one <=64KiB chunk per call -> finish. The
+  -- capture row is still created once and then immutable; chunks never enter
+  -- Lua as a whole source and the raw assembly happens inside SQL.
+  function store:import_stream_begin(source_id, kind, bytes, options)
+    if store.closed then return nil, 'stale_writer' end
+    local ok, owner_why = owner_ok('import_stream_begin')
+    if not ok then return nil, owner_why end
+    if store.active then return fail('active') end
+    if store.blocked_reason then return fail('blocked') end
+    if not identifier(source_id) then return fail('source') end
+    if kind ~= 'source' and kind ~= 'sidecar' then return fail('kind') end
+    if type(bytes) ~= 'number' or bytes < 0 or bytes % 1 ~= 0
+        or bytes > limits.source_bytes then return fail('source_too_large') end
+    options = type(options) == 'table' and options or {}
+    local role, stamp = source_id, tostring(options.stamp or '')
+    if kind == 'source' then
+      local declared, declared_why = known_source(source_id)
+      if not declared then return fail('source_unknown', declared_why) end
+      role, stamp = declared.role or 'primary', declared.stamp or ''
+    end
+    local ingest_id = ingest_id_for(kind, source_id)
+    local existing, existing_why = capture_row(ingest_id)
+    if existing == nil then return fail('source', existing_why) end
+    if existing then
+      if existing.kind ~= kind or existing.store_id ~= store.store_id
+          or tonumber(existing.bytes) ~= bytes then
+        return fail('source_changed')
+      end
+      if (existing.role or '') ~= role or (existing.stamp or '') ~= stamp then
+        return fail('source_changed')
+      end
+      local progress, progress_why = ingest_progress_row(ingest_id)
+      if not progress then return fail('ingest_state', progress_why) end
+      return ingest_receipt(progress, source_id)
+    end
+    local stage, stage_why = query(db,
+      'SELECT store_id,kind,role,stamp,expected_bytes,written_bytes,parts,state ' ..
+        'FROM relay_source_stage WHERE ingest_id=?', { ingest_id })
+    if not stage then return fail('stage', stage_why) end
+    if stage[1] then
+      local row = stage[1]
+      if row.store_id ~= store.store_id or row.kind ~= kind
+          or tonumber(row.expected_bytes) ~= bytes or row.role ~= role
+          or (row.stamp or '') ~= stamp then
+        return nil, 'source_changed'
+      end
+      return { accepted = true, done = false, state = 'staging',
+        source_id = source_id, ingest_id = ingest_id, revision = 1,
+        phase = 'STAGING', count = 0, bytes = tonumber(row.written_bytes) or 0,
+        nodes = 0, parts = tonumber(row.parts) or 0 }
+    end
+    local removed, remove_why = exec(db,
+      'DELETE FROM relay_source_chunk WHERE ingest_id=?', { ingest_id })
+    if removed == nil then return fail('stage', remove_why) end
+    local began = begin(db)
+    if not began then return fail('stage_begin') end
+    local inserted = exec(db,
+      'INSERT INTO relay_source_stage ' ..
+        '(ingest_id,store_id,source_id,kind,role,stamp,expected_bytes,' ..
+        'written_bytes,parts,state,created_at) VALUES (?,?,?,?,?,?,?,0,0,\'staging\',?)',
+      { ingest_id, store.store_id, source_id, kind, role, stamp, bytes,
+        os.date('!%Y-%m-%dT%H:%M:%SZ') })
+    if inserted ~= 1 then rollback(db); return fail('stage_insert', inserted) end
+    local done = commit(db)
+    if not done then
+      store.blocked_reason = 'unknown_commit'
+      store.active = false
+      pcall(store.close, store)
+      return nil, 'unknown_commit', { ingest_id = ingest_id,
+        expected_revision = 0, next_revision = 1 }
+    end
+    return { accepted = true, done = false, state = 'staging',
+      source_id = source_id, ingest_id = ingest_id, revision = 1,
+      phase = 'STAGING', count = 0, bytes = 0, nodes = 0, parts = 0 }
+  end
+
+  function store:import_stream_chunk(ingest_id, part, chunk)
+    if store.closed then return nil, 'stale_writer' end
+    local ok, owner_why = owner_ok('import_stream_chunk')
+    if not ok then return nil, owner_why end
+    if store.active then return fail('active') end
+    if store.blocked_reason then return fail('blocked') end
+    if type(ingest_id) ~= 'string' or ingest_id == '' then return fail('ingest_id') end
+    if type(part) ~= 'number' or part < 1 or part % 1 ~= 0 then return fail('part') end
+    if type(chunk) ~= 'string' then return fail('chunk') end
+    if #chunk > limits.digest_chunk_bytes then return fail('chunk_too_large') end
+    local rows, rows_why = query(db,
+      'SELECT expected_bytes,written_bytes,parts,state FROM relay_source_stage ' ..
+        'WHERE ingest_id=?', { ingest_id })
+    if not rows then return fail('stage', rows_why) end
+    local row = rows[1]
+    if not row then return fail('stage_missing') end
+    if row.state ~= 'staging' then return fail('stage_ready') end
+    local existing, existing_why = query(db,
+      'SELECT bytes,digest,chunk FROM relay_source_chunk WHERE ingest_id=? AND part=?',
+      { ingest_id, part })
+    if not existing then return fail('chunk', existing_why) end
+    if existing[1] then
+      if tonumber(existing[1].bytes) ~= #chunk or existing[1].chunk ~= chunk then
+        return fail('source_changed')
+      end
+      return { accepted = true, ingest_id = ingest_id, part = part,
+        parts = tonumber(row.parts) or 0, bytes = tonumber(row.written_bytes) or 0,
+        duplicate = true, phase = 'STAGING' }
+    end
+    if part ~= (tonumber(row.parts) or 0) + 1 then return fail('part_order') end
+    local written = (tonumber(row.written_bytes) or 0) + #chunk
+    if written > tonumber(row.expected_bytes) then return fail('source_too_large') end
+    local digest, digest_why = invoke(opts.digest.sha256, chunk)
+    if type(digest) ~= 'string' then return fail('digest', digest_why) end
+    local began = begin(db)
+    if not began then return fail('chunk_begin') end
+    local added = exec(db,
+      'INSERT INTO relay_source_chunk (ingest_id,part,bytes,digest,chunk) ' ..
+        'VALUES (?,?,?,?,?)', { ingest_id, part, #chunk, digest, chunk })
+    if added ~= 1 then rollback(db); return fail('chunk_insert', added) end
+    local updated = exec(db,
+      'UPDATE relay_source_stage SET written_bytes=written_bytes+?,parts=? ' ..
+        'WHERE ingest_id=? AND state=\'staging\' AND parts=?',
+      { #chunk, part, ingest_id, (tonumber(row.parts) or 0) })
+    if updated ~= 1 then rollback(db); return fail('chunk_order') end
+    local done = commit(db)
+    if not done then
+      store.blocked_reason = 'unknown_commit'
+      store.active = false
+      pcall(store.close, store)
+      return nil, 'unknown_commit', { ingest_id = ingest_id,
+        expected_revision = part - 1, next_revision = part }
+    end
+    return { accepted = true, ingest_id = ingest_id, part = part, parts = part,
+      bytes = written, phase = 'STAGING' }
+  end
+
+  function store:import_stream_finish(ingest_id)
+    if store.closed then return nil, 'stale_writer' end
+    local ok, owner_why = owner_ok('import_stream_finish')
+    if not ok then return nil, owner_why end
+    if store.active then return fail('active') end
+    if store.blocked_reason then return fail('blocked') end
+    if type(ingest_id) ~= 'string' or ingest_id == '' then return fail('ingest_id') end
+    local rows, rows_why = query(db,
+      'SELECT store_id,source_id,kind,role,stamp,expected_bytes,' ..
+        'written_bytes,parts,state FROM relay_source_stage WHERE ingest_id=?',
+      { ingest_id })
+    if not rows then return fail('stage', rows_why) end
+    local stage = rows[1]
+    if not stage then
+      local progress, progress_why = ingest_progress_row(ingest_id)
+      if not progress then return fail('stage_missing', progress_why) end
+      return ingest_receipt(progress, stage and stage.source_id)
+    end
+    if stage.state == 'ready' then
+      local progress, progress_why = ingest_progress_row(ingest_id)
+      if not progress then return fail('ingest_state', progress_why) end
+      return ingest_receipt(progress, stage.source_id)
+    end
+    local expected, written = tonumber(stage.expected_bytes), tonumber(stage.written_bytes)
+    if written ~= expected then return fail('stage_incomplete') end
+    local digests, digests_why = query(db,
+      'SELECT digest FROM relay_source_chunk WHERE ingest_id=? ORDER BY part',
+      { ingest_id })
+    if not digests then return fail('stage', digests_why) end
+    if #digests ~= tonumber(stage.parts) then return fail('stage_incomplete') end
+    local parts = {}
+    for _, item in ipairs(digests) do parts[#parts + 1] = item.digest end
+    local root, root_why = invoke(opts.digest.sha256,
+      'butler-relay-source-v1\0' .. tostring(expected) .. '\0' ..
+        table.concat(parts))
+    if type(root) ~= 'string' then return fail('digest', root_why) end
+    local began = begin(db)
+    if not began then return fail('finish_begin') end
+    local inserted
+    if stage.kind == 'source' then
+      inserted = exec(db,
+        'INSERT INTO relay_source_capture ' ..
+          '(ingest_id,store_id,source_id,kind,role,stamp,bytes,chunk_size,raw,created_at) ' ..
+          'SELECT ?,?,?,?,?,?,?,?,COALESCE(group_concat(chunk,\'\' ORDER BY part),\'\'),? ' ..
+          'FROM relay_source_chunk WHERE ingest_id=?',
+        { ingest_id, store.store_id, stage.source_id, 'source', stage.role,
+          stage.stamp, expected, limits.digest_chunk_bytes,
+          os.date('!%Y-%m-%dT%H:%M:%SZ'), ingest_id })
+    else
+      inserted = exec(db,
+        'INSERT INTO relay_source_capture ' ..
+          '(ingest_id,store_id,source_id,kind,role,stamp,bytes,chunk_size,raw,created_at) ' ..
+          'SELECT ?,?,?,?,?,?,?,?,COALESCE(group_concat(chunk,\'\' ORDER BY part),\'\'),? ' ..
+          'FROM relay_source_chunk WHERE ingest_id=?',
+        { ingest_id, store.store_id, stage.source_id, 'sidecar', stage.source_id,
+          stage.stamp, expected, limits.digest_chunk_bytes,
+          os.date('!%Y-%m-%dT%H:%M:%SZ'), ingest_id })
+    end
+    if inserted ~= 1 then rollback(db); return fail('finish_capture', inserted) end
+    local now = os.date('!%Y-%m-%dT%H:%M:%SZ')
+    local progress = exec(db,
+      'INSERT INTO relay_ingest_progress ' ..
+        '(ingest_id,store_id,source_id,kind,phase,revision,owner_id,epoch,' ..
+        'chunk_size,state,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+      { ingest_id, store.store_id, stage.source_id, stage.kind, 'HASH', 1,
+        store.owner_id, store.epoch, limits.digest_chunk_bytes, 'hashing', now, now })
+    if progress ~= 1 then rollback(db); return fail('finish_progress', progress) end
+    local saved = exec(db,
+      'UPDATE relay_source_stage SET state=\'ready\' WHERE ingest_id=?',
+      { ingest_id })
+    if saved ~= 1 then rollback(db); return fail('finish_stage', saved) end
+    local done = commit(db)
+    if not done then
+      store.blocked_reason = 'unknown_commit'
+      store.active = false
+      pcall(store.close, store)
+      return nil, 'unknown_commit', { ingest_id = ingest_id,
+        expected_revision = 0, next_revision = 1 }
+    end
+    return { accepted = true, done = false, state = 'hashing',
+      source_id = stage.source_id, ingest_id = ingest_id, revision = 1,
+      phase = 'HASH', count = 0, bytes = 0, nodes = 0 }
   end
 
   function store:ingest_step(ingest_id, options)
