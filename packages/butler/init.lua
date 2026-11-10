@@ -556,6 +556,26 @@ local function start_matrix_relay()
   if host._butler_matrix_config and relay and not relay.instance and not host._butler_skip_relay
     and not host._butler_standby
     and type(host.http) == "table" and type(host.http.request) == "function" then
+    -- SQL relay startup is gated on the real inbox producer proof and a real
+    -- owner capability. The job is created/persisted before any poll or legacy
+    -- state load; a blocked or incomplete job must not fall back to FILE.
+    local authority = host._butler_relay_authority
+    if type(authority) == "table" and type(authority.start) == "function" then
+      local receipt, authority_why = authority.start(host._butler_matrix_config,
+        host._butler_relay_deps)
+      if not receipt then
+        host._butler_relay_job = nil
+        host._butler_relay_restart_blocked = true
+        report_relay("degraded", "authority:" .. tostring(authority_why))
+        return
+      end
+      host._butler_relay_job = receipt.job_id
+      if receipt.phase ~= "done" then
+        host._butler_relay_restart_blocked = true
+        report_relay("degraded", "authority:" .. tostring(receipt.phase))
+        return
+      end
+    end
     matrix.relay.start(host._butler_matrix_config)
   end
 end

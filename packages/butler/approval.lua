@@ -93,9 +93,22 @@ local function request_key(asker, kind, key)
   return #asker .. ":" .. asker .. #kind .. ":" .. kind .. #key .. ":" .. key
 end
 
-local function persist()
-  if attached and attached.persist then return attached.persist() end
-  return true
+local function persist(rec)
+  local saved = true
+  if attached and attached.persist then saved = attached.persist() end
+  -- When a SQL record adapter is attached, mirror the exact changed record
+  -- after the legacy pre-cutover persist. A missing/broken adapter leaves the
+  -- record refused, never silently treated as SQL-authoritative.
+  if saved ~= false and type(rec) == "table"
+      and attached and type(attached.record) == "function" then
+    local ok, recorded, why = pcall(attached.record, rec)
+    if not ok or recorded ~= true then
+      attached.record_error = tostring(ok and why or recorded)
+    else
+      attached.record_error = nil
+    end
+  end
+  return saved
 end
 
 function approval.handler(kind, callbacks)
@@ -113,13 +126,13 @@ approval.RETENTION_S = 24 * 60 * 60
 approval.ttl_minutes = 30
 function approval.default_ttl_s() return approval.ttl_minutes * 60 end
 
-function approval.attach(state, persist_fn, post_fn, room_fn, home_room)
+function approval.attach(state, persist_fn, post_fn, room_fn, home_room, record_fn)
   assert(type(state) == "table", "approval state is required")
   if type(state.approvals) ~= "table" or state.approvals == remuda.json.null then
     state.approvals = remuda.json and remuda.json.object({}) or {}
   end
   attached = { state = state, persist = persist_fn, post = post_fn, approval_room = room_fn,
-    home_room = home_room }
+    home_room = home_room, record = record_fn }
   local recovered = false
   local restarted_ms = math.floor(os.time() * 1000)
   for _, rec in pairs(state.approvals) do
@@ -150,7 +163,9 @@ function approval.attach(state, persist_fn, post_fn, room_fn, home_room)
       end
     end
   end
-  if recovered then persist() end
+  if recovered then
+    for _, rec in pairs(state.approvals) do persist(rec) end
+  end
   for _, rec in pairs(state.approvals) do
     local notice = type(rec) == "table" and rec.recovery_notice
     if type(notice) == "table" and rec.kind == "approve_text" and rec.status == "failed" then
@@ -263,7 +278,7 @@ local function apply_approved(rec)
   local callback = handlers[rec.kind] and handlers[rec.kind].approve
   if not callback then
     rec.status, rec.error = "failed", "No approval handler is registered"
-    persist()
+    persist(rec)
     return nil, rec.error
   end
   applying[rec.id] = true
@@ -275,7 +290,7 @@ local function apply_approved(rec)
     rec.status = ok == "retry" and "approved" or ok == "queued" and "queued" or ok and "applied" or "failed"
     if err then rec.error = tostring(err)
     elseif ok then rec.error = nil end
-    persist()
+    persist(rec)
   end
   local ok, err = pcall(callback, rec, done)
   if not ok then done(false, err) end
@@ -500,7 +515,7 @@ function approval.answer(id_or_event, verdict, who, event_id)
       and rec.delivery_started ~= true then
     rec.status, rec.answered_by, rec.answered_at, rec.answer_event_id = "denied", who,
       math.floor(os.time() * 1000), event_id
-    persist()
+    persist(rec)
     local callback = handlers[rec.kind] and handlers[rec.kind].deny
     if callback then callback(rec) end
     return true, nil, rec
@@ -521,7 +536,7 @@ function approval.answer(id_or_event, verdict, who, event_id)
   rec.status, rec.answered_by, rec.answered_at, rec.answer_event_id =
     verdict == "deny" and "denied" or "approved", who, now, event_id
   rec.answer_verdict = verdict
-  persist()
+  persist(rec)
   if verdict ~= "deny" then
     apply_approved(rec)
   else
@@ -562,7 +577,13 @@ function approval.sweep(now)
       count = count + 1
     end
   end
-  if count > 0 then persist() end
+  if count > 0 then
+    for _, rec in pairs(attached.state.approvals or {}) do
+      if type(rec) == "table" and rec.status == "expired" and rec.answered_at == now then
+        persist(rec)
+      end
+    end
+  end
   for _, fn in pairs(ticks) do pcall(fn, now) end
   return count
 end

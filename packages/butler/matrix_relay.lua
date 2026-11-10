@@ -30,6 +30,24 @@ assert(matrix.delivery_policy, "load butler/matrix_delivery_policy before butler
 local json = assert(remuda.json, "Matrix requires core remuda.json")
 local relay = matrix.relay or {}
 matrix.relay = relay
+
+-- Single admission gate for every relay entry, including Matrix setup/restart
+-- (matrix_cli) and direct construction. An installed relay authority must
+-- authorize; when no authority module is installed the legacy path is
+-- unchanged. A missing/incomplete authority module is never treated as an
+-- authorization.
+function relay.authority_gate(config)
+  local authority = remuda._butler_relay_authority
+  if type(authority) ~= "table" then return true end
+  if type(authority.authorize) ~= "function" then
+    return false, "authority_incomplete"
+  end
+  local ok, allowed, why = pcall(authority.authorize, config)
+  if not ok then return false, "authority_error" end
+  if allowed ~= true then return false, tostring(why or "authority_blocked") end
+  return true
+end
+
 function relay.approval_room_for_config(cfg)
   if type(cfg) ~= "table" then return nil end
   if cfg.approval_room == "home" then return cfg.home_room end
@@ -996,6 +1014,8 @@ end
 
 function relay.new(options)
   options = options or {}
+  local admitted, gate_why = relay.authority_gate(options)
+  if not admitted then error("Matrix relay authority blocked: " .. tostring(gate_why), 0) end
   local config_path = assert(options.config_path, "Matrix relay requires config_path")
   local api = assert(options.matrix or matrix, "Matrix relay requires the L1 matrix client")
   local deliver = assert(options.deliver, "Matrix relay requires a delivery function")
@@ -3017,6 +3037,11 @@ end
 function relay.start(config)
   if relay.instance then return false end
   if not config or not config.config_path then return false end
+  local admitted, gate_why = relay.authority_gate(config)
+  if not admitted then
+    diagnostic("error", "relay_authority_blocked:" .. tostring(gate_why))
+    return false
+  end
   local receipts = remuda._butler_relay_receipts
   if receipts and receipts.authority_state() == "mismatch" then
     -- A future/unknown authority is not the same as a missing database: do
