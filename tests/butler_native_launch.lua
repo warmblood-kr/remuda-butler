@@ -230,6 +230,40 @@ end
 local pty_argv = remuda._butler_agent_builders.opencode({ name = "lead", cwd = "/work" })
 assert(pty_argv[1] == "opencode" and pty_argv[2] == "--standalone",
   "an unbound launch stays the PTY command")
+local old_process = remuda.process
+remuda.process = { run = function(request)
+  assert(request.argv[1] == "opencode" and request.argv[2] == "--version")
+  return { code = 0, stdout = "1.2.26\n" }
+end }
+local legacy_spec = { name = "lead", cwd = "/work" }
+local legacy = remuda._butler_agent_builders.opencode(legacy_spec)
+assert(#legacy == 2 and legacy[1] == "opencode" and legacy[2] == "/work" and legacy_spec._opencode_legacy,
+  "v1 launches without the unsupported standalone flag")
+remuda.process.run = function() return { code = 0, stdout = "opencode v2.2.5\n" } end
+local modern_spec = { name = "lead", cwd = "/work" }
+local modern = remuda._butler_agent_builders.opencode(modern_spec)
+assert(modern[2] == "--standalone" and modern[3] == "/work" and not modern_spec._opencode_legacy,
+  "v2 keeps the private-server flag")
+remuda.process.run = function() return { code = 1, stdout = "1.2.26\n" } end
+assert(remuda._butler_agent_builders.opencode({ name = "lead" })[2] == "--standalone",
+  "an unsuccessful version probe must not silently enable a shared server")
+remuda.process.run = function() return { code = 0, timed_out = true, stdout = "1.19.5\n" } end
+assert(remuda._butler_agent_builders.opencode({ name = "lead" })[2] == "--standalone",
+  "a timed-out version probe does not establish an older CLI")
+local old_system = remuda._butler_system
+remuda._butler_system = {
+  find_command = function(path) if path == "/home/test/.opencode/bin/opencode" then return path end end,
+  home = function() return "/home/test" end,
+  platform = function() return "unix" end,
+}
+remuda.process.run = function(request)
+  assert(request.argv[1] == "/home/test/.opencode/bin/opencode", "probe follows launch's fallback path")
+  return { code = 0, stdout = "1.19.5\n" }
+end
+assert(#remuda._butler_agent_builders.opencode({ name = "lead" }) == 1,
+  "v1 found outside PATH omits the unsupported flag")
+remuda._butler_system = old_system
+remuda.process = old_process
 
 -- 7. A relaunch reuses the private name dir (core reason `exists`) and still
 -- gets a fresh nonce leaf.

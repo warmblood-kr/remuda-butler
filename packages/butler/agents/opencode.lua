@@ -297,6 +297,32 @@ telemetry.opencode = {
   read = function(state) return { model = state.model } end,
 }
 
+-- OpenCode v1 has a private server per TUI and does not accept --standalone.
+-- Probe each launch so a binary upgrade or PATH change is observed. Unknown
+-- versions keep the existing private-server flag rather than silently using a
+-- potentially shared service with member-specific credentials.
+function remuda._butler_opencode_legacy_cli()
+  if not remuda.process or type(remuda.process.run) ~= "function" then return false end
+  local executable = "opencode"
+  local system = remuda._butler_system
+  if system then
+    local found = system.find_command("opencode")
+    if not found then
+      local home_ok, home = pcall(system.home)
+      if home_ok and type(home) == "string" and home ~= "" then
+        local suffix = system.platform() == "windows" and "\\.opencode\\bin\\opencode.exe" or "/.opencode/bin/opencode"
+        found = system.find_command(home .. suffix)
+      end
+    end
+    executable = found or executable
+  end
+  local ok, result = pcall(remuda.process.run, { argv = { executable, "--version" }, timeout = 5 })
+  if not ok or type(result) ~= "table" or result.timed_out or result.code ~= 0 then return false end
+  local version = tostring(result.stdout or ""):match("^%s*opencode%s+v?(%d+)%.%d+")
+    or tostring(result.stdout or ""):match("^%s*v?(%d+)%.%d+")
+  return version == "1"
+end
+
 builders.opencode = function(spec)
   assert(type(spec.name) == "string", "OpenCode agent spec requires a string name")
   if spec.native and spec.native.mode == "native" and type(spec.native.binding) == "string" then
@@ -304,7 +330,9 @@ builders.opencode = function(spec)
     -- session and the TUI; Butler only supplies the private binding path.
     return { "remuda", "_opencode_tui", "--binding", spec.native.binding, "--cwd", spec.cwd }
   end
-  local argv = { "opencode", "--standalone" }
+  if spec._opencode_legacy == nil then spec._opencode_legacy = remuda._butler_opencode_legacy_cli() end
+  local argv = { "opencode" }
+  if not spec._opencode_legacy then argv[#argv + 1] = "--standalone" end
   if type(spec.cwd) == "string" and spec.cwd ~= "" then argv[#argv + 1] = spec.cwd end
   return argv
 end
