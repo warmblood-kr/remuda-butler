@@ -164,6 +164,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   -- One decision per launch, made before remuda.new so the wrapper argv/env
   -- and the binding path belong to this exact launch only.
   local native_plans = {}
+  local opencode_legacy
   -- Owner scope: any session THIS Butler launches in a guarded project or worktree directory.
   local trust_checked, trust_ok = pcall(function() return chooser.trust_eligible(launch_cwd, trust_env()) end)
   local trust_eligible = trust_checked and trust_ok == true
@@ -191,6 +192,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
     remote_input_disabled = false,
     trust_path_gate = topic_trust_path, trust_eligible = trust_eligible, trust_real_cwd = trust_real_cwd,
     spec = function(candidate_kind)
+      if candidate_kind == "opencode" and opencode_legacy == nil
+          and type(remuda._butler_opencode_legacy_cli) == "function" then
+        opencode_legacy = remuda._butler_opencode_legacy_cli()
+      end
       if remuda._butler_ensure_coordination then
         remuda._butler_ensure_coordination(launch_cwd, candidate_kind, "member")
       end
@@ -200,7 +205,12 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       if (candidate_kind == "opencode" or candidate_kind == "claude"
           or candidate_kind == "codex")
           and not native_plans[candidate_kind] and remuda._butler_native_launch then
-        local decided, plan = pcall(remuda._butler_native_launch.plan, name, candidate_kind)
+        local decided, plan
+        if candidate_kind == "opencode" and opencode_legacy then
+          decided, plan = true, { mode = "pty", reason = "opencode_v1_unsupported" }
+        else
+          decided, plan = pcall(remuda._butler_native_launch.plan, name, candidate_kind)
+        end
         native_plans[candidate_kind] = decided and plan
           or { mode = "pty", reason = "native_plan_failed: " .. tostring(plan) }
         local chosen = native_plans[candidate_kind]
@@ -210,6 +220,7 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       end
       local native_plan = native_plans[candidate_kind]
       return { name = name, token = token, model = models[candidate_kind], cwd = launch_cwd,
+        _opencode_legacy = opencode_legacy,
         native = native_plan and native_plan.mode == "native" and native_plan or nil,
         sandbox = profile and profile.sandbox,
         writable = candidate_kind == "codex" and remuda._butler_codex_memory_writable
@@ -226,10 +237,10 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
         REMUDA_BUTLER_MEMORY_DIR = memory_dir or "",
         CLAUDE_CODE_FORCE_SESSION_PERSISTENCE = "1" }
       if candidate_kind == "opencode" then
-        -- Opt this member's private server into the completion nudge. The
-        -- plugin stays inert in any process without the launch identity below.
+        -- The completion nudge uses the v2 plugin API and only runs in a
+        -- member's private server. Older OpenCode versions cannot load it.
         local plugins
-        if remuda.butler.opencode_nudge then
+        if not (spec and spec._opencode_legacy) and remuda.butler.opencode_nudge then
           local dir = remuda.butler.opencode_nudge.ensure(data_home)
           if dir then plugins = { dir } end
         end
