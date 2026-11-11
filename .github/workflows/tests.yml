@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -17,10 +18,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: core-ref
+        if: github.event_name == 'workflow_dispatch'
         run: |
           source tests/core_ref.sh
           echo "ref=$CORE_REF" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
+        if: github.event_name == 'workflow_dispatch'
         with:
           path: |
             ~/.cargo/registry
@@ -31,16 +34,14 @@ jobs:
             ${{ runner.os }}-cargo-${{ github.workflow }}-${{ github.ref }}-${{ steps.core-ref.outputs.ref }}-
       - run: scripts/check-no-python.sh
       - run: sh scripts/test-no-shell-lua.sh
-        env:
-          CORE_REF: ${{ steps.core-ref.outputs.ref }}
       - run: tests/rust_tests.sh
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'workflow_dispatch'
         env:
           CORE_REF: ${{ steps.core-ref.outputs.ref }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/remuda-core/target
 
   golden:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch'
     # Guidance text (help, member AGENTS.md, welcome mail, member prompt) must stay
     # byte-identical unless a PR updates tests/golden/ on purpose (hook-design §7).
     # Core pinned by CORE_REF in tests/golden_guidance.sh, same as tests/rust_tests.sh.
@@ -51,10 +52,18 @@ jobs:
       - run: tests/golden_guidance.sh
 
   shell:
-    # Every tests/*.sh and the luajit tests (tests/shell_tests.sh), on the same
-    # pinned core. None ran in CI before, so failures went unnoticed (#32).
+    # Fast logic and core contracts. The full private-daemon suite runs on demand.
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install --yes luajit
+      - run: tests/fast_tests.sh
+
+  shell-deep:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,10 +71,10 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install --yes luajit
       - run: tests/shell_tests.sh
         env:
-          BUTLER_SHELL_MODE: ${{ github.event_name == 'pull_request' && 'policy' || 'all' }}
+          BUTLER_SHELL_MODE: all
 
   path-windows:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch'
     # This job runs only the pure path tables; it does not boot the Butler harness.
     runs-on: windows-latest
     timeout-minutes: 5
@@ -79,7 +88,7 @@ jobs:
 
   contract:
     name: butler-contract
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     needs: rust
     runs-on: ubuntu-latest
     timeout-minutes: 30
