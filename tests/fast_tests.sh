@@ -2,6 +2,7 @@
 # Fast, daemon-free logic and contract checks for every change.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+BUTLER_SHELL_MODE=classify bash tests/shell_tests.sh
 
 for test in \
   butler_inbox_db.lua relay_receipts_db.lua matrix_request_queue.lua \

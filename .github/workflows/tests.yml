@@ -88,6 +88,39 @@ jobs:
 
   contract:
     name: butler-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - id: core-ref
+        run: |
+          source tests/core_ref.sh
+          echo "ref=$CORE_REF" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: warmblood-kr/remuda
+          ref: ${{ steps.core-ref.outputs.ref }}
+          path: remuda-core
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ github.workspace }}/remuda-core/target
+          key: ${{ runner.os }}-butler-core-${{ steps.core-ref.outputs.ref }}
+      - name: Build pinned core
+        working-directory: remuda-core
+        run: cargo build -p remuda-native --bin remuda
+      - name: Run core and mail contract
+        env:
+          REMUDA_BIN: ${{ github.workspace }}/remuda-core/target/debug/remuda
+        run: |
+          source tests/core_ref.sh
+          core_ref_check
+          bash tests/lua_tests.sh tests/lua/butler_fast_contract_test.lua
+
+  contract-deep:
+    name: butler-contract-deep
     if: ${{ github.event_name == 'workflow_dispatch' }}
     needs: rust
     runs-on: ubuntu-latest
