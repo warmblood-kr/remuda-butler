@@ -118,6 +118,7 @@ jobs:
           source tests/core_ref.sh
           core_ref_check
           bash tests/lua_tests.sh tests/lua/butler_fast_contract_test.lua
+          bash tests/lib/fast_caller_identity.sh
 
   contract-deep:
     name: butler-contract-deep
