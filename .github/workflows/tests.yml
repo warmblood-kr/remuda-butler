@@ -120,6 +120,33 @@ jobs:
           bash tests/lua_tests.sh tests/lua/butler_fast_contract_test.lua
           bash tests/lib/fast_caller_identity.sh
 
+  sqlite-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      REMUDA_SQL_CORE_REF: b713e3e31a5f04e9812d19742984fe4c4c05fe1f
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: warmblood-kr/remuda
+          ref: b713e3e31a5f04e9812d19742984fe4c4c05fe1f
+          path: remuda-sqlite-core
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ github.workspace }}/remuda-sqlite-core/target
+          key: ${{ runner.os }}-butler-sqlite-core-b713e3e31a5f04e9812d19742984fe4c4c05fe1f
+      - name: Build SQLite-capable core
+        working-directory: remuda-sqlite-core
+        run: cargo build -p remuda-native --bin remuda
+      - name: Verify migration and inbox use
+        env:
+          REMUDA_BIN: ${{ github.workspace }}/remuda-sqlite-core/target/debug/remuda
+        run: bash tests/butler_simple_inbox_acceptance.sh
+
   contract-deep:
     name: butler-contract-deep
     if: ${{ github.event_name == 'workflow_dispatch' }}
