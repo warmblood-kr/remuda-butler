@@ -950,6 +950,7 @@ remuda.exec("butler/dialogs")
 remuda.exec("butler/dialog_approval")
 remuda.butler.dialogs.install()
 remuda.exec("butler/input_queue")
+remuda.exec("butler/owner_refresh")
 remuda.exec("butler/owner_input")
 remuda.exec("butler/input_queue_cli")
 remuda._butler_dialog_tick = function() remuda.butler.dialogs.tick() end
