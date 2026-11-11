@@ -39,6 +39,7 @@ remuda = {
   key = function() error("notice delivery must not press keys") end,
   butler = { dialogs = { check = function() return true end } },
 }
+dofile("packages/butler/owner_refresh.lua") -- old-core fallback, separate refresh tests cover new cores
 dofile("tests/notice_journal_stub.lua")
 dofile("packages/butler/notice.lua")
 dofile("tests/notice_policy_stub.lua")

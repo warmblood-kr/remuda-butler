@@ -54,6 +54,8 @@ local function subject(name,run,without_provider)
     local state={approvals={}}
     local function persist()return not mode.marker_fail end
     approval.attach(state,persist,function(text,_,done)notes[#notes+1]=text;if done then done({event_id='$reply'})end;return true end)
+    f._session_refresh=nil -- old-core compatibility; refresh has its own tests
+    dofile('packages/butler/owner_refresh.lua')
     local queue=dofile('packages/butler/owner_input.lua')
     local function request(id,text,ttl)
       local binding=assert(queue.binding('codex'))

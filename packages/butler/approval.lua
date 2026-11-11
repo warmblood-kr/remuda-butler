@@ -272,6 +272,8 @@ local function apply_approved(rec)
     if completed then return end
     completed = true
     applying[rec.id] = nil
+    -- A pending async handler may have been cancelled in the meantime.
+    if rec.status ~= "approved" then return end
     rec.status = ok == "retry" and "approved" or ok == "queued" and "queued" or ok and "applied" or "failed"
     if err then rec.error = tostring(err)
     elseif ok then rec.error = nil end

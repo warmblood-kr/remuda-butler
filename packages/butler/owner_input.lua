@@ -173,8 +173,19 @@ local function deliver(r)
   if not guarded_write then return store:defer(r.id,'provider_identity_unavailable')end
   local matching,why=same_target(r)
   if not matching then
+    local refresh=remuda._butler_owner_refresh
+    if refresh and type(refresh.finish)=='function' then refresh.finish(r.session,r.id)end
     if why=='session_changed'then return store:quarantine(r.id)end
     return store:defer(r.id,why)
+  end
+  local refresh=remuda._butler_owner_refresh
+  if not refresh or type(refresh.step)~='function' then return store:defer(r.id,'refresh_unavailable') end
+  local phase,refresh_why=refresh.step(r.session,r.id,r.instance_id)
+  if phase=='pending' then return end
+  refresh.finish(r.session,r.id)
+  if phase~='ready' then
+    if refresh_why=='session_changed' then return store:quarantine(r.id) end
+    return store:defer(r.id,refresh_why or 'refresh_unconfirmed')
   end
   local past=r.past_uncertain==true
   local marked=false

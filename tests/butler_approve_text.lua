@@ -268,3 +268,24 @@ do
   remuda.capture, remuda._butler_system = nil, nil
 end
 print("ok - prepared approved text cases")
+do
+  local now, scheduled, writes, refreshes = 0, {}, 0, 0
+  remuda.clock = function() return now end
+  remuda.ls = function() return {{name='agent-1',alive=true,attached=false,instance_id='i1'}} end
+  remuda.capture = function() return 'pane' end
+  remuda.type_text = function() writes=writes+1; return true end
+  remuda._session_refresh = function(name,id) assert(name=='agent-1' and id=='i1');refreshes=refreshes+1;return true end
+  remuda._butler_system = {after=function(_,cb) scheduled[#scheduled+1]=cb;return true end}
+  dofile('packages/butler/owner_refresh.lua')
+  local rec={id='ABCD',data={session='agent-1',registered_text='hello',bytes=5,request_id='ABCD',session_id='agent1',session_marker='agent-start'}}
+  local result
+  request_handler.approve(rec,function(value)result=value end)
+  assert(writes==0 and refreshes==1 and result==nil,'standalone waits for redraw')
+  now=301; table.remove(scheduled,1)()
+  assert(writes==1 and result==true and refreshes==1,'standalone writes once after bounded wait')
+  local denied={id='CANCEL',status='approved',data={session='agent-1',registered_text='hello',bytes=5,request_id='CANCEL',session_id='agent1',session_marker='agent-start'}}
+  now=1000;scheduled={};request_handler.approve(denied,function()end)
+  denied.status='denied';now=1301;table.remove(scheduled,1)()
+  assert(writes==1 and denied.status=='denied','denied while waiting must never write')
+  remuda._session_refresh=nil;remuda._butler_system=nil
+end
