@@ -486,8 +486,47 @@ caller_principal = assert(remuda._butler_caller_principal)
 -- The SQLite index is a shadow: mail files remain authoritative.
 remuda._butler_inbox_db_config = { root = mail_root, open = remuda.db and remuda.db.open }
 remuda.exec("butler/inbox_db")
+-- SQLite membership is authoritative after the one-time import succeeds.
+remuda.exec("butler/inbox_sqlite_simple")
+local simple_module = remuda._butler_simple_inbox_module
+local simple = remuda._butler_simple_inbox
+if not simple and mail_root then
+  local marker = mail_root .. "/sqlite-active"
+  local marker_file = io.open(marker, "r")
+  local was_active = marker_file ~= nil
+  if marker_file then marker_file:close() end
+  local open = remuda.db and remuda.db.open
+  if type(open) == "function" then
+    local db, why = open("inbox", { migrations = true, timeout_ms = 200 })
+    if db then
+      for _, dir in ipairs({"inboxes", "read", "messages", "objects"}) do remuda.mkdir(mail_root .. "/" .. dir) end
+      local files = remuda.list_dir(mail_root .. "/inboxes")
+      local imported, import_error = simple_module.import(db, mail_root, files, remuda.json)
+      if not imported then
+        local message = "cannot import inbox to SQLite: " .. tostring(import_error)
+        if was_active then error(message, 0) end
+        io.stderr:write("butler inbox: " .. message .. "; continuing with file inbox\n")
+        local diagnostics = remuda._butler_diagnostics
+        if diagnostics and type(diagnostics.record) == "function" then
+          pcall(diagnostics.record, "inbox_db", "degraded", "sqlite_import_failed", message)
+        end
+        if type(db.close) == "function" then pcall(db.close, db) end
+      else
+        local f, marker_error = io.open(marker, "w")
+        if not f then error("cannot mark SQLite inbox active: " .. tostring(marker_error), 0) end
+        f:write("active\n"); f:close()
+        simple = { db = db, store = simple_module }
+        remuda._butler_simple_inbox = simple
+      end
+    elseif was_active then
+      error("SQLite inbox unavailable: " .. tostring(why), 0)
+    end
+  elseif was_active then
+    error("SQLite inbox unavailable: remuda.db.open missing", 0)
+  end
+end
 remuda._butler_mail_config = { bus = bus, root = mail_root, json_quote = json_quote,
-  inbox_db = remuda._butler_inbox_db }
+  inbox_db = remuda._butler_inbox_db, simple = simple }
 remuda.exec("butler/mail")
 if remuda._butler_inbox_db then
   local imported_ok, imported, import_why = pcall(remuda._butler_inbox_db.import_all)

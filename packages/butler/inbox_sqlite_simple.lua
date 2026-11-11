@@ -1,0 +1,122 @@
+-- One-time import of legacy inbox logs and their message files.
+-- The caller owns the database connection and decides when to switch readers.
+local M = {}
+
+local function checked(db, method, sql, args)
+  local result, err = db[method](db, sql, args or {})
+  if result == nil then error(tostring(err or 'sqlite operation failed'), 0) end
+  return result
+end
+
+local function read_file(path, optional)
+  local f, err, code = io.open(path, 'rb')
+  if not f then
+    if optional and (code == 2 or tostring(err):find('No such file', 1, true)) then return '' end
+    error('cannot read ' .. path .. ': ' .. tostring(err), 0)
+  end
+  local data = assert(f:read('*a'))
+  f:close()
+  return data
+end
+
+local function safe_component(value)
+  return type(value) == 'string' and value ~= '' and not value:find('[/\\]')
+    and not value:find('..', 1, true)
+end
+
+local function insert_legacy(db, root, recipient, line, read, json)
+  local delivery = assert(json.decode(line), 'invalid inbox JSON')
+  local id = delivery.message_id
+  assert(safe_component(id), 'invalid message ID')
+  local envelope = read_file(root .. '/messages/' .. id .. '.json')
+  local message = assert(json.decode(envelope), 'invalid message envelope')
+  local object_id = message.body and message.body.object_id
+  assert(safe_component(object_id), 'invalid object ID')
+  local body = read_file(root .. '/objects/' .. object_id)
+  local note_id = delivery.resent and delivery.resent.note_object_id
+  local note
+  if note_id then
+    assert(safe_component(note_id), 'invalid note object ID')
+    note = read_file(root .. '/objects/' .. note_id)
+  end
+  checked(db, 'exec', [[INSERT OR IGNORE INTO simple_inbox
+    (recipient, message_id, envelope, body, delivery, note, is_read)
+    VALUES (?, ?, ?, ?, ?, ?, ?)]], {recipient, id, envelope, body, line, note or "", read[id] and 1 or 0})
+end
+
+-- The inbox directory uses hex-encoded recipient names. Import all logs once;
+-- the SQLite transaction commits both the data and the completion marker.
+function M.import(db, root, filenames, json)
+  local ok, result = pcall(function()
+    checked(db, 'exec', 'BEGIN IMMEDIATE')
+    checked(db, 'exec', [[CREATE TABLE IF NOT EXISTS simple_inbox (
+      seq INTEGER PRIMARY KEY AUTOINCREMENT, recipient TEXT NOT NULL,
+      message_id TEXT NOT NULL, envelope TEXT NOT NULL, body TEXT NOT NULL,
+      delivery TEXT NOT NULL, note TEXT, is_read INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(recipient, message_id))]])
+    checked(db, 'exec', 'CREATE TABLE IF NOT EXISTS simple_inbox_meta (key TEXT PRIMARY KEY)')
+    local done = checked(db, 'query', "SELECT key FROM simple_inbox_meta WHERE key = 'imported'")
+    if #done == 0 then
+      for _, filename in ipairs(filenames) do
+        local recipient = filename:match('^([0-9a-f]+)%.jsonl$')
+        if recipient then
+          local reads = read_file(root .. '/read/' .. filename, true)
+          local read = {}; for id in reads:gmatch('[^\r\n]+') do read[id] = true end
+          local deliveries = read_file(root .. '/inboxes/' .. filename)
+          for line in deliveries:gmatch('[^\r\n]+') do
+            insert_legacy(db, root, recipient, line, read, json)
+          end
+        end
+      end
+      checked(db, 'exec', "INSERT INTO simple_inbox_meta (key) VALUES ('imported')")
+    end
+    checked(db, 'exec', 'COMMIT')
+    return true
+  end)
+  if ok then return result end
+  pcall(db.exec, db, 'ROLLBACK')
+  return nil, tostring(result)
+end
+
+function M.unread(db, recipient)
+  return db:query('SELECT message_id, envelope, body, delivery, note FROM simple_inbox WHERE recipient = ? AND is_read = 0 ORDER BY seq', {recipient})
+end
+
+function M.deliver(db, recipient, id, envelope, body, delivery, note)
+  return db:exec([[INSERT INTO simple_inbox
+    (recipient, message_id, envelope, body, delivery, note, is_read)
+    VALUES (?, ?, ?, ?, ?, ?, 0)]], {recipient, id, envelope, body, delivery, note or ''})
+end
+
+function M.mark_read(db, recipient, id)
+  return db:exec('UPDATE simple_inbox SET is_read = 1 WHERE recipient = ? AND message_id = ?', {recipient, id})
+end
+
+function M.rows(db, recipient)
+  return db:query('SELECT message_id, delivery, note, is_read FROM simple_inbox WHERE recipient = ? ORDER BY seq', {recipient})
+end
+
+function M.has(db, recipient, id)
+  local rows, err = db:query('SELECT message_id FROM simple_inbox WHERE recipient = ? AND message_id = ?', {recipient, id})
+  if not rows then return nil, err end
+  return #rows > 0
+end
+
+function M.migrate_alias(db, source, target)
+  local ok, err = pcall(function()
+    checked(db, 'exec', 'BEGIN IMMEDIATE')
+    checked(db, 'exec', [[INSERT OR IGNORE INTO simple_inbox
+      (recipient,message_id,envelope,body,delivery,note,is_read)
+      SELECT ?,message_id,envelope,body,delivery,note,0
+      FROM simple_inbox WHERE recipient=? AND is_read=0 ORDER BY seq]], {target,source})
+    checked(db, 'exec', 'UPDATE simple_inbox SET is_read=1 WHERE recipient=? AND is_read=0', {source})
+    checked(db, 'exec', 'COMMIT')
+  end)
+  if ok then return true end
+  pcall(db.exec, db, 'ROLLBACK')
+  return nil, tostring(err)
+end
+
+if remuda then remuda._butler_simple_inbox_module = M end
+
+return M

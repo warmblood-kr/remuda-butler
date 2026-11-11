@@ -66,6 +66,7 @@ deep tests/butler_quota.lua
 deep tests/butler_roster_native.lua
 fast tests/butler_schedule.lua
 deep tests/butler_schedule_cli.lua
+deep tests/butler_simple_inbox_acceptance.lua
 deep tests/butler_send_policy_closure.lua
 deep tests/butler_session_status.lua
 deep tests/butler_status_command.lua

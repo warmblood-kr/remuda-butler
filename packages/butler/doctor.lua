@@ -138,6 +138,7 @@ local function probe()
     results.approval_room, results.approval_next = typed_line_switches()
   results.relay_headroom = relay_headroom()
   results.inbox_shadow = shadow_status(remuda._butler_inbox_db, "status")
+  results.inbox_sqlite = remuda._butler_simple_inbox ~= nil
   results.relay_receipt_shadow = shadow_status(remuda._butler_relay_receipts, "peek_status")
   return results
 end
@@ -160,8 +161,12 @@ local function render(probe_results, platform)
     "Approve text: " .. (probe_results.approve_text == true and "on" or "off"),
     "Approval room: " .. tostring(probe_results.approval_room or "all -> HOME (lounge not joined)"),
   }
-  lines[#lines + 1] = "Inbox storage: files authoritative; SQLite shadow "
-    .. tostring(probe_results.inbox_shadow or "unavailable")
+  if probe_results.inbox_sqlite then
+    lines[#lines + 1] = "Inbox storage: SQLite authoritative; message files retained"
+  else
+    lines[#lines + 1] = "Inbox storage: files authoritative; SQLite shadow "
+      .. tostring(probe_results.inbox_shadow or "unavailable")
+  end
   lines[#lines + 1] = "Relay storage: JSON authoritative; SQLite receipt shadow "
     .. tostring(probe_results.relay_receipt_shadow or "unavailable")
   local headroom = probe_results.relay_headroom
