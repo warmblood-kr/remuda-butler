@@ -28,10 +28,15 @@ fi
 sort "$list/declared" > "$list/sorted"
 if [[ -n $(uniq -d "$list/sorted") ]]; then echo 'duplicate Lua test tier entry' >&2; exit 2; fi
 : > "$list/actual"
-for file in "$root"/tests/*.lua "$root"/tests/lua/*_test.lua; do
+for file in "$root"/tests/*.lua; do
   [[ -f $file ]] || continue
   printf '%s\n' "${file#"$root"/}" >> "$list/actual"
 done
+if [[ -d $root/tests/lua ]]; then
+  while IFS= read -r file; do
+    printf '%s\n' "${file#"$root"/}" >> "$list/actual"
+  done < <(find "$root/tests/lua" -type f -name '*_test.lua')
+fi
 sort "$list/actual" -o "$list/actual"
 if ! diff -u "$list/sorted" "$list/actual"; then
   echo 'Lua test tier classification is incomplete' >&2; exit 2

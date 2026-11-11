@@ -17,6 +17,13 @@ if bash "$repo/tests/lib/classify_lua_tests.sh" "$tmp" >"$tmp/log" 2>&1; then
   echo 'unclassified daemon Lua test passed' >&2; exit 1
 fi
 rm "$tmp/tests/lua/unclassified_test.lua"
+mkdir -p "$tmp/tests/lua/sub"
+touch "$tmp/tests/lua/sub/nested_test.lua"
+if bash "$repo/tests/lib/classify_lua_tests.sh" "$tmp" >"$tmp/log" 2>&1; then
+  echo 'unclassified nested daemon Lua test passed' >&2; exit 1
+fi
+printf 'deep tests/lua/sub/nested_test.lua\n' >> "$tmp/tests/lua-test-tiers.txt"
+bash "$repo/tests/lib/classify_lua_tests.sh" "$tmp"
 sed -i.bak 's/^deep /fast /' "$tmp/tests/lua-test-tiers.txt"
 if bash "$repo/tests/lib/classify_lua_tests.sh" "$tmp" >"$tmp/log" 2>&1; then
   echo 'daemon test incorrectly accepted in fast tier' >&2; exit 1
