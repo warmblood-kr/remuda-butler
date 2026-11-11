@@ -512,11 +512,10 @@ end
 
 local function counts_by(db, sql, column)
   local result = {}
-  local rows = checked(db.query, db, sql)
-  if rows then
-    for _, row in ipairs(rows) do
-      if row[column] ~= nil then result[tostring(row[column])] = tonumber(row.n) or 0 end
-    end
+  local rows, err = checked(db.query, db, sql)
+  if not rows then return nil, err end
+  for _, row in ipairs(rows) do
+    if row[column] ~= nil then result[tostring(row[column])] = tonumber(row.n) or 0 end
   end
   return result
 end
@@ -531,11 +530,13 @@ local function snapshot_status()
     authority = authority_state,
   }
   if handle then
-    status.conflicts = counts_by(handle,
+    local conflicts = counts_by(handle,
       "SELECT class, COUNT(*) AS n FROM receipt_conflicts GROUP BY class", "class")
-    status.origins = counts_by(handle,
+    local origins = counts_by(handle,
       "SELECT txn_origin, COUNT(*) AS n FROM reply_receipts GROUP BY txn_origin",
       "txn_origin")
+    status.conflicts, status.origins = conflicts, origins
+    if not conflicts or not origins then status.error = "status query failed" end
   end
   return status
 end

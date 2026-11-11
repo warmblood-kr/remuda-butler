@@ -88,4 +88,14 @@ end
 local backlog = output()
 assert(backlog:find("Inbox storage: files authoritative; SQLite shadow partial", 1, true))
 assert(backlog:find("Relay storage: JSON authoritative; SQLite receipt shadow degraded", 1, true))
+for _, reason in ipairs({ "partial: row budget", "partial: time budget" }) do
+  remuda._butler_relay_receipts.peek_status = function()
+    return { available = true, partial = true, error = reason, authority = "shadow" }
+  end
+  assert(output():find("Relay storage: JSON authoritative; SQLite receipt shadow partial", 1, true), reason)
+end
+remuda._butler_relay_receipts.peek_status = function()
+  return { available = true, error = "degraded: 1 conflicting receipts", conflicts = { duplicate = 1 }, authority = "shadow" }
+end
+assert(output():find("Relay storage: JSON authoritative; SQLite receipt shadow degraded", 1, true))
 print("ok - doctor reports advisory SQLite shadows")

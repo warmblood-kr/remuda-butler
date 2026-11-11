@@ -170,6 +170,10 @@ assert(wrong.authority_state() == "mismatch", "a future authority is explicit")
 
 local db = fake_db()
 local shadow = load(function() return db end)
+shadow.status()
+db.fail = function(sql) return sql:find("FROM receipt_conflicts GROUP BY", 1, true) ~= nil end
+assert(shadow.peek_status().error, "failed conflict query must not look healthy")
+db.fail = nil
 local receipt = { source_mail_id = "m1", event_id = "e1", completed_at = "2026-11-06T00:00:00Z" }
 local first, first_why = shadow.record("r1", "butler_r1", receipt)
 assert(first == true, "first shadow write: " .. tostring(first_why))

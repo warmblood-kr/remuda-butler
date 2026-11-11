@@ -106,12 +106,17 @@ local function shadow_status(module, method)
     local why = type(status.error) == "string" and status.error or ""
     return (why == "" or why:find("unavailable:", 1, true) == 1) and "unavailable" or "error"
   end
-  if status.error and status.error ~= "partial import; backlog remains" then return "error" end
+  local why = type(status.error) == "string" and status.error or ""
+  local partial_reason = why == "partial import; backlog remains" or why == "partial: row budget"
+    or why == "partial: time budget"
+  local degraded_reason = why:match("^degraded: %d+ conflicting receipts$") ~= nil
+  if why ~= "" and not partial_reason and not degraded_reason then return "error" end
   if status.authority == "mismatch" then return "error" end
+  if degraded_reason then return "degraded" end
   for _, count in pairs(type(status.conflicts) == "table" and status.conflicts or {}) do
     if tonumber(count) and tonumber(count) > 0 then return "degraded" end
   end
-  if status.partial or (tonumber(status.skipped_lines or status.skipped) or 0) > 0 then
+  if partial_reason or status.partial or (tonumber(status.skipped_lines or status.skipped) or 0) > 0 then
     return "partial"
   end
   return "available"
