@@ -98,6 +98,30 @@ local function relay_headroom()
   return relay.json_budget(state)
 end
 
+local function shadow_status(module, method)
+  if type(module) ~= "table" or type(module[method]) ~= "function" then return "unavailable" end
+  local ok, status = pcall(module[method])
+  if not ok or type(status) ~= "table" then return "error" end
+  if status.available ~= true then
+    local why = type(status.error) == "string" and status.error or ""
+    return (why == "" or why:find("unavailable:", 1, true) == 1) and "unavailable" or "error"
+  end
+  local why = type(status.error) == "string" and status.error or ""
+  local partial_reason = why == "partial import; backlog remains" or why == "partial: row budget"
+    or why == "partial: time budget"
+  local degraded_reason = why:match("^degraded: %d+ conflicting receipts$") ~= nil
+  if why ~= "" and not partial_reason and not degraded_reason then return "error" end
+  if status.authority == "mismatch" then return "error" end
+  if degraded_reason then return "degraded" end
+  for _, count in pairs(type(status.conflicts) == "table" and status.conflicts or {}) do
+    if tonumber(count) and tonumber(count) > 0 then return "degraded" end
+  end
+  if partial_reason or status.partial or (tonumber(status.skipped_lines or status.skipped) or 0) > 0 then
+    return "partial"
+  end
+  return "available"
+end
+
 local function probe()
   local results = {}
   for _, agent in ipairs({
@@ -113,6 +137,8 @@ local function probe()
   results.typed_lines, results.shell_lines, results.approve_text, results.matrix_configured,
     results.approval_room, results.approval_next = typed_line_switches()
   results.relay_headroom = relay_headroom()
+  results.inbox_shadow = shadow_status(remuda._butler_inbox_db, "status")
+  results.relay_receipt_shadow = shadow_status(remuda._butler_relay_receipts, "peek_status")
   return results
 end
 
@@ -134,6 +160,10 @@ local function render(probe_results, platform)
     "Approve text: " .. (probe_results.approve_text == true and "on" or "off"),
     "Approval room: " .. tostring(probe_results.approval_room or "all -> HOME (lounge not joined)"),
   }
+  lines[#lines + 1] = "Inbox storage: files authoritative; SQLite shadow "
+    .. tostring(probe_results.inbox_shadow or "unavailable")
+  lines[#lines + 1] = "Relay storage: JSON authoritative; SQLite receipt shadow "
+    .. tostring(probe_results.relay_receipt_shadow or "unavailable")
   local headroom = probe_results.relay_headroom
   if type(headroom) == "table" then
     if tonumber(headroom.values) then

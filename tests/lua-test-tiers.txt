@@ -23,7 +23,7 @@ deep tests/butler_dialog_lifecycle.lua
 deep tests/butler_dialog_queue.lua
 deep tests/butler_dialog_states.lua
 deep tests/butler_dialogs.lua
-deep tests/butler_doctor_typed_lines.lua
+fast tests/butler_doctor_typed_lines.lua
 deep tests/butler_fs_seam.lua
 deep tests/butler_guard.lua
 fast tests/butler_guidance_blocks.lua
