@@ -152,6 +152,11 @@ local function load(open)
   return remuda._butler_relay_receipts
 end
 
+local open_count = 0
+local not_opened = load(function() open_count = open_count + 1; return fake_db() end)
+assert(not not_opened.peek_status().available and open_count == 0,
+  "doctor snapshot must not open or migrate the database")
+
 -- No core database: the shadow is unavailable, never an error in the reply path.
 local unavailable = load(function() return nil, "remuda.db.open is missing" end)
 assert(unavailable.status().available == false)

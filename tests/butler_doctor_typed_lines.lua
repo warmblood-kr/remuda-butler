@@ -63,3 +63,29 @@ assert(lines_with(false):find("Next: remuda butler matrix setup", 1, true), "unc
 assert(not lines_with(true):find("Next:", 1, true), "configured Matrix gets no setup hint")
 assert(doctor.probe().matrix_configured == true, "a readable Matrix config counts as configured")
 print("ok - doctor setup hint only when Matrix is unconfigured")
+
+-- Shadow status is advisory and must not change the authoritative store.
+local initial = output()
+assert(initial:find("Inbox storage: files authoritative; SQLite shadow unavailable", 1, true))
+assert(initial:find("Relay storage: JSON authoritative; SQLite receipt shadow unavailable", 1, true))
+remuda._butler_inbox_db = { status = function() return { available = true, partial = true, skipped_lines = 2 } end }
+remuda._butler_relay_receipts = { peek_status = function() return { available = true, partial = false, skipped = 0, authority = "shadow" } end }
+local partial = output()
+assert(partial:find("Inbox storage: files authoritative; SQLite shadow partial", 1, true))
+assert(partial:find("Relay storage: JSON authoritative; SQLite receipt shadow available", 1, true))
+remuda._butler_inbox_db.status = function() return { available = false, error = "secret\nnot printed" } end
+remuda._butler_relay_receipts.peek_status = function() error("secret\nnot printed") end
+local degraded = output()
+assert(degraded:find("Inbox storage: files authoritative; SQLite shadow error", 1, true))
+assert(degraded:find("Relay storage: JSON authoritative; SQLite receipt shadow error", 1, true))
+assert(not degraded:find("secret", 1, true))
+remuda._butler_inbox_db.status = function()
+  return { available = true, partial = true, error = "partial import; backlog remains" }
+end
+remuda._butler_relay_receipts.peek_status = function()
+  return { available = true, authority = "shadow", conflicts = { duplicate = 1 } }
+end
+local backlog = output()
+assert(backlog:find("Inbox storage: files authoritative; SQLite shadow partial", 1, true))
+assert(backlog:find("Relay storage: JSON authoritative; SQLite receipt shadow degraded", 1, true))
+print("ok - doctor reports advisory SQLite shadows")

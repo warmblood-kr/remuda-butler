@@ -521,8 +521,7 @@ local function counts_by(db, sql, column)
   return result
 end
 
-function M.status()
-  opened()
+local function snapshot_status()
   local status = {
     available = handle ~= nil and failure == nil,
     imported = stats.imported,
@@ -539,6 +538,14 @@ function M.status()
       "txn_origin")
   end
   return status
+end
+
+-- Do not open or migrate a database from a diagnostic-only query.
+function M.peek_status() return snapshot_status() end
+
+function M.status()
+  opened()
+  return snapshot_status()
 end
 
 -- Internal seams for the shadow tests. They do not grant authority.
