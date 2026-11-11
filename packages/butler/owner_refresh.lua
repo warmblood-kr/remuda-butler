@@ -39,7 +39,14 @@ function M.step(session, attempt, instance)
   if not state then
     state = {attempt=attempt, instance=instance, start=point.now}
     states[session] = state
-    local called, result = pcall(remuda._session_refresh, session, instance)
+    local called, result, reason = pcall(remuda._session_refresh, session, instance)
+    if called and result ~= true and reason == 'agent io error: session owner unavailable: Unsupported' then
+      states[session] = nil
+      if type(remuda._butler_session_trace) == 'function' then
+        pcall(remuda._butler_session_trace, 'notice_refresh_skipped', 'target=' .. session .. ' reason=unsupported_host')
+      end
+      return 'ready', 'refresh_unsupported'
+    end
     if not called or result ~= true then return 'failed', 'refresh_request_failed' end
     return 'pending'
   end
