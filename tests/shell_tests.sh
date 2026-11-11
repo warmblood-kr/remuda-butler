@@ -12,9 +12,25 @@ set -uo pipefail
 # Default remains the complete local suite. CI can request its PR policy/unit
 # subset; unknown scripts fail closed so a new security gate is not lost.
 mode=${BUTLER_SHELL_MODE:-all}
-case "$mode" in all|policy) ;; *) echo "unknown BUTLER_SHELL_MODE: $mode" >&2; exit 2 ;; esac
+case "$mode" in all|policy|classify) ;; *) echo "unknown BUTLER_SHELL_MODE: $mode" >&2; exit 2 ;; esac
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+classify_shell_test() {
+  local sh=$1
+  case $(basename "$sh") in
+    rust_tests.sh | golden_guidance.sh | shell_tests.sh | fast_tests.sh) return 1 ;;
+    awk-timeout.sh | core_ref.sh | hand_parsed_verbs.sh | installer_no_restart.sh | installer_readiness_budget.sh | lua_harness_guards.sh | butler_file_args.sh | butler_permissions.sh | caller_identity.sh | butler_single_instance.sh | agent_identity.sh | butler_adopt.sh | delegate_leader_id.sh | mail_by_ulid.sh | reply_forward.sh | butler_unknown_verb.sh | opencode_nudge_events.sh | inbox_db_upgrade.sh | mod_package_assets.sh | isolated_env_cleanup_test.sh | isolated_env_admission_test.sh)
+      # Policy tests and identity, file-boundary, isolation and harness
+      # security controls stay on PRs, even when they need a private daemon.
+      ;;
+    butler_coordination_config_mode.sh | butler_matrix_relay_core_ref.sh | normalize_guidance.sh | lua_tests.sh | butler_coordination_config.sh | butler_diagnostics_matrix.sh | butler_launch_fallback.sh | butler_matrix_follow_cli.sh | butler_matrix_relay.sh | butler_reload_real.sh | butler_seams.sh | close_emits_exit.sh | codex_mcp_mail.sh | live_reload.sh | member_env.sh | old_core_boot.sh | session_tree.sh)
+      [[ $mode == policy ]] && return 1 ;;
+    *) echo "unclassified shell test: $(basename "$sh")" >&2; exit 2 ;;
+  esac
+  return 0
+}
+for sh in "$REPO"/tests/*.sh; do classify_shell_test "$sh" || :; done
+if [[ $mode == classify ]]; then echo 'shell classification: PASS'; exit 0; fi
 CORE_URL=${CORE_URL:-https://github.com/warmblood-kr/remuda.git}
 # The core pin is shared: tests/core_ref.sh.
 source "$REPO/tests/core_ref.sh"
@@ -72,16 +88,7 @@ for lua in "$REPO"/tests/*.lua; do
 done
 fi
 for sh in "$REPO"/tests/*.sh; do
-  case $(basename "$sh") in
-    rust_tests.sh | golden_guidance.sh | shell_tests.sh) continue ;;
-    awk-timeout.sh | core_ref.sh | hand_parsed_verbs.sh | installer_no_restart.sh | installer_readiness_budget.sh | lua_harness_guards.sh | butler_file_args.sh | butler_permissions.sh | caller_identity.sh | butler_single_instance.sh | agent_identity.sh | butler_adopt.sh | delegate_leader_id.sh | mail_by_ulid.sh | reply_forward.sh | butler_unknown_verb.sh | opencode_nudge_events.sh | inbox_db_upgrade.sh | mod_package_assets.sh | isolated_env_cleanup_test.sh | isolated_env_admission_test.sh)
-      # Policy tests and identity, file-boundary, isolation and harness
-      # security controls stay on PRs, even when they need a private daemon.
-      ;;
-    butler_coordination_config_mode.sh | butler_matrix_relay_core_ref.sh | normalize_guidance.sh | lua_tests.sh | butler_coordination_config.sh | butler_diagnostics_matrix.sh | butler_launch_fallback.sh | butler_matrix_follow_cli.sh | butler_matrix_relay.sh | butler_reload_real.sh | butler_seams.sh | close_emits_exit.sh | codex_mcp_mail.sh | live_reload.sh | member_env.sh | old_core_boot.sh | session_tree.sh)
-      [[ $mode == policy ]] && continue ;;
-    *) echo "unclassified shell test: $(basename "$sh")" >&2; exit 2 ;;
-  esac
+  classify_shell_test "$sh" || continue
   run "$(basename "$sh")" bash "$sh"
 done
 
