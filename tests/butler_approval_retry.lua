@@ -10,7 +10,9 @@ local posts = {}
 approval.attach(state, function() saved = saved + 1; return true end,
   function(text, _, callback) posted, post_callback = text, callback; return true end)
 local attempts = 0
+local delayed_done
 approval.handler("approve_text", { approve = function(rec, done)
+  if rec.key == "text-deferred-deny" then delayed_done=done;return end
   if rec.key == "text-approved-deny" then done("retry", "pane_busy"); return end
   if rec.key == "text-crash" then
     assert(approval.begin_delivery(rec), "crash case must persist delivery marker")
@@ -68,6 +70,16 @@ local terminal_deny = approval.cli({ "deny", approved_id })
 assert(terminal_deny:find("Denied request " .. approved_id, 1, true)
   and state.approvals[approved_id].status == "denied",
   "the local operator can cancel approved-but-undelivered prepared text")
+
+local deferred_id
+approval.request({ kind="approve_text", key="text-deferred-deny", asker="agent-1", summary="deferred",
+  on_id=function(id) deferred_id=id end }, function() end)
+post_callback({event_id="$deferred"})
+assert(approval.answer("$deferred","approve","@alice:example.org","$yes2"))
+assert(approval.answer("$deferred","deny","@alice:example.org","$no2"))
+assert(state.approvals[deferred_id].status=="denied")
+delayed_done("retry","cancelled")
+assert(state.approvals[deferred_id].status=="denied","late callback must not revive denied request")
 
 local crash_id
 approval.request({ kind = "approve_text", key = "text-crash", asker = "agent-1",

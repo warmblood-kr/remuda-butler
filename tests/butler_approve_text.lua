@@ -283,5 +283,9 @@ do
   assert(writes==0 and refreshes==1 and result==nil,'standalone waits for redraw')
   now=301; table.remove(scheduled,1)()
   assert(writes==1 and result==true and refreshes==1,'standalone writes once after bounded wait')
+  local denied={id='CANCEL',status='approved',data={session='agent-1',registered_text='hello',bytes=5,request_id='CANCEL',session_id='agent1',session_marker='agent-start'}}
+  now=1000;scheduled={};request_handler.approve(denied,function()end)
+  denied.status='denied';now=1301;table.remove(scheduled,1)()
+  assert(writes==1 and denied.status=='denied','denied while waiting must never write')
   remuda._session_refresh=nil;remuda._butler_system=nil
 end

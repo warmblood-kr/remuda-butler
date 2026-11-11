@@ -551,6 +551,11 @@ function M.configure()
       end
       local system = remuda._butler_system or {}
       local function prepare()
+        if rec.status and rec.status ~= "approved" then
+          refresh.finish(data.session, rec.id)
+          complete("retry", "approval_cancelled")
+          return
+        end
         local ok, phase, why = pcall(refresh.step, data.session, rec.id, core_instance)
         if not ok or phase == "failed" then
           refresh.finish(data.session, rec.id)

@@ -48,6 +48,7 @@ local deliver = N.deliver_notice
 local garbled = "────\n❯ stale text model-refresh error: garbled input\n────"
 local draft = "────\n❯ actual draft\n────\n  ⏵⏵ auto mode on"
 
+remuda._session_refresh=function()return true end
 local phase, attempts, finishing = 'pending', {}, 0
 remuda._butler_owner_refresh={step=function(session,attempt,instance)
   assert(session=='lead' and instance=='instance-1');attempts[#attempts+1]=attempt;return phase
@@ -60,3 +61,18 @@ assert(next(remuda._butler_notice_test_journal.files)==nil,'pending should not r
 phase='ready';assert(deliver('lead')==true and #sends==1,'ready sends once')
 assert(#attempts==2 and attempts[1]==attempts[2] and finishing==1,'same preparation across ticks')
 print('ok - notice waits before journal reservation and write')
+-- Old records may have no instance binding. Old cores keep delivery; new
+-- cores resolve the live row and still prepare before delivering.
+local function new_notice()
+  bus.notices.lead={count=1,message_order={'m1'},message_ids={m1='one'},text='notice',kind='claude'}
+end
+bus.agents.lead.instance_id=nil
+remuda._session_refresh=nil
+remuda._butler_owner_refresh=nil
+new_notice();assert(deliver('lead')==true and #sends==2,'old core without instance must deliver')
+remuda._session_refresh=function()return true end
+remuda._butler_owner_refresh={step=function(_,_,instance)assert(instance=='instance-1');return 'ready' end,finish=function()end}
+new_notice();assert(deliver('lead')==true and #sends==3,'new core must resolve live instance for legacy record')
+print('ok - unbound legacy notices on old and new cores')
+remuda.ls=function()return {{name='lead',alive=true,attached=false,human_idle=math.huge}} end
+new_notice();assert(deliver('lead')==true and #sends==4,'legacy session without live instance must still deliver')
