@@ -92,4 +92,31 @@ function M.mark_read(db, recipient, id)
   return db:exec('UPDATE simple_inbox SET is_read = 1 WHERE recipient = ? AND message_id = ?', {recipient, id})
 end
 
+function M.rows(db, recipient)
+  return db:query('SELECT message_id, delivery, note, is_read FROM simple_inbox WHERE recipient = ? ORDER BY seq', {recipient})
+end
+
+function M.has(db, recipient, id)
+  local rows, err = db:query('SELECT message_id FROM simple_inbox WHERE recipient = ? AND message_id = ?', {recipient, id})
+  if not rows then return nil, err end
+  return #rows > 0
+end
+
+function M.migrate_alias(db, source, target)
+  local ok, err = pcall(function()
+    checked(db, 'exec', 'BEGIN IMMEDIATE')
+    checked(db, 'exec', [[INSERT OR IGNORE INTO simple_inbox
+      (recipient,message_id,envelope,body,delivery,note,is_read)
+      SELECT ?,message_id,envelope,body,delivery,note,0
+      FROM simple_inbox WHERE recipient=? AND is_read=0 ORDER BY seq]], {target,source})
+    checked(db, 'exec', 'UPDATE simple_inbox SET is_read=1 WHERE recipient=? AND is_read=0', {source})
+    checked(db, 'exec', 'COMMIT')
+  end)
+  if ok then return true end
+  pcall(db.exec, db, 'ROLLBACK')
+  return nil, tostring(err)
+end
+
+if remuda then remuda._butler_simple_inbox_module = M end
+
 return M

@@ -67,6 +67,13 @@ local function file_component(value)
   end))
 end
 
+local function simple_rows(name)
+  local simple = config.simple
+  local rows, err = simple.store.rows(simple.db, file_component(name))
+  if not rows then error("SQLite inbox read failed: " .. tostring(err), 0) end
+  return rows
+end
+
 local function message_id()
   return remuda._butler_new_ulid()
 end
@@ -188,6 +195,13 @@ end
 local function load_read(name)
   if bus.mail_read[name] then return bus.mail_read[name] end
   local read = {}
+  if config.simple then
+    for _, row in ipairs(simple_rows(name)) do
+      if tonumber(row.is_read) == 1 then read[row.message_id] = true end
+    end
+    bus.mail_read[name] = read
+    return read
+  end
   local disk = paths(name)
   local file = disk and io.open(disk.read, "r")
   if file then
@@ -283,6 +297,12 @@ end
 local function delivered(name, id)
   local known = bus.mail_delivered[name]
   if known and known[id] then return true end
+  if config.simple then
+    local found, err = config.simple.store.has(config.simple.db, file_component(name), id)
+    if found == nil then error("SQLite inbox lookup failed: " .. tostring(err), 0) end
+    if found then mark_delivered(name, id) end
+    return found
+  end
   local disk = paths(name)
   local file = disk and io.open(disk.inbox, "r")
   if not file then return false end
@@ -297,6 +317,32 @@ end
 
 local function load_inbox(name)
   if bus.mail_loaded[name] then return end
+  if config.simple then
+    local rows = simple_rows(name)
+    local disk, present = paths(name), {}
+    for _, id in ipairs(mailbox(name)) do present[id] = true end
+    for _, row in ipairs(rows) do
+      local id = row.message_id
+      mark_delivered(name, id)
+      local decoded_ok, delivery = pcall(remuda.json.decode, row.delivery)
+      local resent = decoded_ok and delivery and delivery.resent
+      if resent then
+        bus.mail_resent[name] = bus.mail_resent[name] or {}
+        bus.mail_resent[name][id] = { from = resent.from, to = resent.to, date = resent.date, note = row.note }
+      end
+      if tonumber(row.is_read) == 0 and not present[id] then
+        if load_message(disk, id) then
+          present[id] = true
+          mailbox(name)[#mailbox(name) + 1] = id
+        else
+          bus.mail_unreadable[name] = bus.mail_unreadable[name] or {}
+          bus.mail_unreadable[name][#bus.mail_unreadable[name] + 1] = id
+        end
+      end
+    end
+    bus.mail_loaded[name] = true
+    return
+  end
   bus.mail_loaded[name] = true
   local disk = paths(name)
   if not disk then return end
@@ -345,6 +391,12 @@ end
 -- after copying but before acknowledging the old log is safe to retry.
 local function migrate_legacy(alias, id)
   if not config.root or not alias or not id or alias == id then return true end
+  if config.simple then
+    local ok, err = config.simple.store.migrate_alias(config.simple.db, file_component(alias), file_component(id))
+    if not ok then return nil, err end
+    bus.mail_loaded[id], bus.mail_loaded[alias] = nil, nil
+    return true
+  end
   local source, target = paths(alias), paths(id)
   local legacy = io.open(source.inbox, "r")
   if not legacy then return true end
@@ -452,9 +504,15 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
     if not wrote then diagnostic("error", "body_write", id); return nil, "cannot write Butler mail body: " .. tostring(err) end
     wrote, err = write_atomic(disk.messages .. id .. ".json", envelope_json(message, object), true)
     if not wrote then diagnostic("error", "envelope_write", id); return nil, "cannot write Butler mail envelope: " .. tostring(err) end
-    wrote, err = append(disk.inbox, '{"message_id":' .. config.json_quote(id) .. '}\n')
+    if config.simple then
+      local row = '{"message_id":' .. config.json_quote(id) .. '}'
+      wrote, err = config.simple.store.deliver(config.simple.db, file_component(recipient_id),
+        id, envelope_json(message, object), body, row)
+    else
+      wrote, err = append(disk.inbox, '{"message_id":' .. config.json_quote(id) .. '}\n')
+    end
     if not wrote then diagnostic("error", "inbox_append", id); return nil, "cannot deliver Butler mail: " .. tostring(err) end
-    index_delivery(recipient_id, id)
+    if not config.simple then index_delivery(recipient_id, id) end
   end
   bus.objects[object_id], bus.messages[id] = object, message
   mailbox(recipient_id)[#mailbox(recipient_id) + 1] = id
@@ -560,11 +618,24 @@ local function deliver_forward(message)
       note_json = ',"note_object_id":' .. config.json_quote(note_id)
     end
     -- The row is the commit point, written after the note object.
-    local wrote, err = append(disk.inbox, '{"message_id":' .. config.json_quote(id) .. ',"resent":{"from":'
+    local row = '{"message_id":' .. config.json_quote(id) .. ',"resent":{"from":'
       .. address_json(caller) .. ',"to":' .. address_json(target) .. ',"date":'
-      .. config.json_quote(resent.date) .. note_json .. '}}\n')
+      .. config.json_quote(resent.date) .. note_json .. '}}'
+    local wrote, err
+    if config.simple then
+      local original = assert(find_message(id))
+      local object = assert(bus.objects[original.body.object_id])
+      local envelope_file = io.open(disk.messages .. id .. ".json", "rb")
+      if not envelope_file then return nil, "cannot read forward envelope" end
+      local envelope = envelope_file:read("*a")
+      envelope_file:close()
+      wrote, err = config.simple.store.deliver(config.simple.db, file_component(target.id),
+        id, envelope, object.content, row, note)
+    else
+      wrote, err = append(disk.inbox, row .. '\n')
+    end
     if not wrote then return nil, "cannot deliver the forward: " .. tostring(err) end
-    index_delivery(target.id, id)
+    if not config.simple then index_delivery(target.id, id) end
   end
   bus.mail_resent[target.id] = bus.mail_resent[target.id] or {}
   bus.mail_resent[target.id][id] = resent
@@ -693,9 +764,22 @@ local function inbox(name)
   end
   local disk = paths(name)
   if disk and #shown > 0 then
-    local wrote, err = append(disk.read, table.concat(shown, "\n") .. "\n")
+    local wrote, err
+    if config.simple then
+      wrote, err = config.simple.db:exec("BEGIN IMMEDIATE", {})
+      if wrote then
+        for _, id in ipairs(shown) do
+          wrote, err = config.simple.store.mark_read(config.simple.db, file_component(name), id)
+          if not wrote then break end
+        end
+        if wrote then wrote, err = config.simple.db:exec("COMMIT", {}) end
+        if not wrote then config.simple.db:exec("ROLLBACK", {}) end
+      end
+    else
+      wrote, err = append(disk.read, table.concat(shown, "\n") .. "\n")
+    end
     if not wrote then diagnostic("error", "read_state_write", shown[1]); return "mail read-state was not saved: " .. tostring(err) end
-    index_reads(name, shown)
+    if not config.simple then index_reads(name, shown) end
   end
   -- Preserve the in-memory unread state when saving the read log fails.
   for _, id in ipairs(shown) do read[id] = true end
