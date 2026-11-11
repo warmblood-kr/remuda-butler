@@ -502,12 +502,22 @@ if not simple and mail_root then
       for _, dir in ipairs({"inboxes", "read", "messages", "objects"}) do remuda.mkdir(mail_root .. "/" .. dir) end
       local files = remuda.list_dir(mail_root .. "/inboxes")
       local imported, import_error = simple_module.import(db, mail_root, files, remuda.json)
-      if not imported then error("cannot import inbox to SQLite: " .. tostring(import_error), 0) end
-      local f, marker_error = io.open(marker, "w")
-      if not f then error("cannot mark SQLite inbox active: " .. tostring(marker_error), 0) end
-      f:write("active\n"); f:close()
-      simple = { db = db, store = simple_module }
-      remuda._butler_simple_inbox = simple
+      if not imported then
+        local message = "cannot import inbox to SQLite: " .. tostring(import_error)
+        if was_active then error(message, 0) end
+        io.stderr:write("butler inbox: " .. message .. "; continuing with file inbox\n")
+        local diagnostics = remuda._butler_diagnostics
+        if diagnostics and type(diagnostics.record) == "function" then
+          pcall(diagnostics.record, "inbox_db", "degraded", "sqlite_import_failed", message)
+        end
+        if type(db.close) == "function" then pcall(db.close, db) end
+      else
+        local f, marker_error = io.open(marker, "w")
+        if not f then error("cannot mark SQLite inbox active: " .. tostring(marker_error), 0) end
+        f:write("active\n"); f:close()
+        simple = { db = db, store = simple_module }
+        remuda._butler_simple_inbox = simple
+      end
     elseif was_active then
       error("SQLite inbox unavailable: " .. tostring(why), 0)
     end

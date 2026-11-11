@@ -15,6 +15,9 @@ root="$XDG_DATA_HOME/remuda/butler/mail"
 printf '%s\n' '{"id":"A","from":{"host":"local","id":"sender","alias":"sender","session":"sender"},"to":[{"host":"local","id":"aa","alias":"aa","session":"aa"}],"subject":"Task","created_at":"2026-11-11","content_type":"text/plain","body":{"object_id":"object-A","bytes":4}}' > "$root/messages/A.json"
 printf body > "$root/objects/object-A"
 printf '%s\n' '{"message_id":"A"}' > "$root/inboxes/6161.jsonl"
+if [[ ${SIMPLE_BAD_LEGACY:-0} == 1 ]]; then
+  printf '%s\n' '{"message_id":"MISSING"}' >> "$root/inboxes/6161.jsonl"
+fi
 start_daemon() {
   "$REMUDA_BIN" -s "$S" daemon >"$T/daemon.log" 2>&1 &
   ISOLATED_DAEMON_PID=$!
@@ -24,6 +27,11 @@ start_daemon() {
   "$REMUDA_BIN" -s "$S" -e 'remuda._butler_argv={"sh","-c","sleep 60"}; remuda._butler_skip_relay=true; return remuda.exec("butler")' >/dev/null
 }
 start_daemon
+if [[ ${SIMPLE_BAD_LEGACY:-0} == 1 ]]; then
+  "$REMUDA_BIN" -s "$S" -e 'assert(not remuda._butler_simple_inbox, "incomplete import must remain file authoritative"); local s=remuda._butler_mail.inbox("aa"); assert(s:find("body",1,true),s); return "legacy message remains accessible"'
+  [[ ! -e "$root/sqlite-active" ]]
+  exit 0
+fi
 "$REMUDA_BIN" -s "$S" -e "remuda._qa_restart_phase=1; return dofile('$REPO/tests/butler_simple_inbox_acceptance.lua')"
 "$REMUDA_BIN" -s "$S" stop -f --yes
 wait "$ISOLATED_DAEMON_PID" || true
