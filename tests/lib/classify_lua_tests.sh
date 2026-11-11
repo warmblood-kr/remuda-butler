@@ -15,6 +15,9 @@ while read -r tier path extra; do
   if [[ $tier == fast && $path == tests/lua/* ]]; then
     echo "daemon Lua test cannot run in fast tier: $path" >&2; exit 2
   fi
+  case "$path" in
+    tests/lua/*/*) echo "nested daemon Lua test is not discovered by the deep runner: $path" >&2; exit 2 ;;
+  esac
   if [[ $tier == contract && $path != tests/lua/butler_fast_contract_test.lua ]]; then
     echo "not run by the contract job: $path" >&2; exit 2
   fi
