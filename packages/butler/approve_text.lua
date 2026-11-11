@@ -518,23 +518,58 @@ function M.configure()
         complete("retry", "session_changed")
         return
       end
-      local ok, why, attached, verify = M.type_text(data.session, data.registered_text, {
-        owner = rec.answered_by, event_id = rec.answer_event_id, request_id = rec.id,
-        before_write = function() return approval.begin_delivery(rec) end,
-      })
-      if ok then
-        complete(true)
-        local note = attached and " (a human is attached to the pane)" or ""
-        local function say(seen)
-          pcall(approval.reply, rec, (seen and "typed (seen)" or "typed, NOT seen in the pane; check "
-            .. M.display_inline(data.session) .. " before approving it again") .. note)
+      local function deliver()
+        local id, marker = M.session_instance(data.session)
+        if id ~= data.session_id or marker ~= data.session_marker then
+          complete("retry", "session_changed")
+          return
         end
-        if type(verify) == "function" then verify(say) else say(false) end
-      else
-        pcall(approval.reply, rec, "refused: " .. tostring(why))
-        if rec.delivery_started == true then complete(false, why)
-        else complete("retry", why) end
+        local ok, why, attached, verify = M.type_text(data.session, data.registered_text, {
+          owner = rec.answered_by, event_id = rec.answer_event_id, request_id = rec.id,
+          before_write = function() return approval.begin_delivery(rec) end,
+        })
+        if ok then
+          complete(true)
+          local note = attached and " (a human is attached to the pane)" or ""
+          local function say(seen)
+            pcall(approval.reply, rec, (seen and "typed (seen)" or "typed, NOT seen in the pane; check "
+              .. M.display_inline(data.session) .. " before approving it again") .. note)
+          end
+          if type(verify) == "function" then verify(say) else say(false) end
+        else
+          pcall(approval.reply, rec, "refused: " .. tostring(why))
+          if rec.delivery_started == true then complete(false, why)
+          else complete("retry", why) end
+        end
       end
+      local refresh = remuda._butler_owner_refresh
+      if type(remuda._session_refresh) ~= "function" then return deliver() end
+      local _, core_instance = pane_attached(data.session)
+      if not refresh or type(refresh.step) ~= "function" or type(core_instance) ~= "string" then
+        complete("retry", "refresh_unavailable")
+        return
+      end
+      local system = remuda._butler_system or {}
+      local function prepare()
+        local ok, phase, why = pcall(refresh.step, data.session, rec.id, core_instance)
+        if not ok or phase == "failed" then
+          refresh.finish(data.session, rec.id)
+          complete("retry", why or "refresh_failed")
+        elseif phase == "ready" then
+          refresh.finish(data.session, rec.id)
+          deliver()
+        elseif phase == "pending" and type(system.after) == "function" then
+          local scheduled, handle = pcall(system.after, 0.3, prepare)
+          if not scheduled or not handle then
+            refresh.finish(data.session, rec.id)
+            complete("retry", "refresh_timer_unavailable")
+          end
+        else
+          refresh.finish(data.session, rec.id)
+          complete("retry", "refresh_timer_unavailable")
+        end
+      end
+      prepare()
     end,
     deny = function(rec) pcall(approval.reply, rec, "denied") end,
     expire = function(rec) pcall(approval.reply, rec, "expired") end,
