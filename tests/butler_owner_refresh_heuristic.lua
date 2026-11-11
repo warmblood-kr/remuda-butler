@@ -31,3 +31,17 @@ seq='51';now=10100;assert(gate.step('agent','g','i1')=='pending')
 remuda.capture=function()instance='i2';return 'pane' end
 now=10400;state,why=gate.step('agent','g','i1');assert(state=='failed' and why=='session_changed')
 print('ok - output and session changes during capture hold input')
+gate.finish('agent','g'); remuda.capture=function()return 'pane' end; instance='i1'; now=11000; seq='60'; calls=0
+assert(gate.step('agent','owner:a','i1')=='pending')
+local competing, reason=gate.step('agent','notice:b','i1')
+assert(competing=='pending' and reason=='refresh_busy' and calls==1,
+  'competing attempt must not replace active refresh')
+seq='61'; now=11100; assert(gate.step('agent','owner:a','i1')=='pending')
+now=11301; assert(gate.step('agent','owner:a','i1')=='ready' and calls==1,
+  'owner attempt survives competing notice')
+gate.finish('agent','owner:a')
+assert(gate.step('agent','notice:b','i1')=='pending' and calls==2)
+print('ok - concurrent attempts serialize refresh')
+now=17000; local phase=gate.step('agent','owner:abandoned','i1')
+assert(phase=='pending','an abandoned attempt must release after timeout')
+assert(calls==3)

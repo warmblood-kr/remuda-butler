@@ -1530,6 +1530,30 @@ local function notice_seam(session, pending)
       end
       return defer_notice_send(session, pending, "journal", detail or reason)
     end,
+    prepare = function(adapter)
+      local refresh = remuda._butler_owner_refresh
+      if not refresh or type(refresh.step) ~= "function" or type(refresh.finish) ~= "function" then
+        defer_notice_send(session, pending, "busy", "refresh_unavailable")
+        return "failed"
+      end
+      local instance = adapter.instance
+      if type(instance) ~= "string" or instance == "" then
+        defer_notice_send(session, pending, "busy", "refresh_instance_unavailable")
+        return "failed"
+      end
+      local ok, phase, why = pcall(refresh.step, session, pending, instance)
+      if not ok or phase ~= "pending" and phase ~= "ready" then
+        pcall(refresh.finish, session, pending)
+        defer_notice_send(session, pending, "busy", why or "refresh_unconfirmed")
+        return "failed"
+      end
+      if phase == "pending" then
+        defer_notice_send(session, pending, "busy", why or "refresh_pending")
+        return "pending"
+      end
+      pcall(refresh.finish, session, pending)
+      return "ready"
+    end,
     reserve = function(adapter)
       local state = { count = pending.count, message_ids = {} }
       for _, id in ipairs(pending.message_order or {}) do

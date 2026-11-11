@@ -262,6 +262,13 @@ function M.send_message(session, intent)
   if not adapter then
     return seam.unavailable("native_not_written", construct_why)
   end
+  if route == "legacy" then
+    if type(seam.prepare) ~= "function" then
+      return seam.unavailable("refresh_unavailable", "refresh_unavailable")
+    end
+    if seam.prepare(adapter) ~= "ready" then return false end
+    if not current(adapter) then return false end
+  end
   local attempt, reserve_why = seam.reserve(adapter)
   if not attempt then return seam.unavailable("journal", reserve_why) end
   local first, second = adapter.send(attempt)

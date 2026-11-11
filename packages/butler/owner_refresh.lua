@@ -29,7 +29,14 @@ function M.finish(session, attempt)
 end
 function M.step(session, attempt, instance)
   local state = states[session]
-  if state and state.attempt ~= attempt then states[session], state = nil, nil end
+  if state and state.attempt ~= attempt then
+    local ok, now = pcall(remuda.clock or function() end)
+    if not ok or type(now) ~= 'number' or now ~= now or now == math.huge
+        or now < state.start or now - state.start < TIMEOUT_MS then
+      return 'pending', 'refresh_busy'
+    end
+    states[session], state = nil, nil
+  end
   if state and state.failed then return 'failed', state.failed end
   local point, why = sample(session, instance)
   if not point then if state then state.failed = why end; return 'failed', why end
