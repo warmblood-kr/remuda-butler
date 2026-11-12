@@ -362,11 +362,6 @@ local function request(session, text, asker, ttl_s, done)
     return nil, why
   end
   local live_config = remuda._butler_matrix_live_config or {}
-  if live_config.approve_text ~= true then
-    local failure = "Prepared text approvals are off. Next: remuda butler approve-text on"
-    done(nil, failure)
-    return nil, failure
-  end
   if live_config.use_messages == true then
     local failure = "Prepared text approvals require live Matrix sync; messages fallback cannot approve them."
     done(nil, failure)
@@ -479,21 +474,14 @@ function M.cli(args, agent, stdin)
       request = { about = "Register text for owner approval. Example: remuda butler approve-text request worker -",
         args = { { name = "SESSION", help = "Target Butler session" },
           { name = "STDIN", help = "Must be -; text is read from stdin" } }, next = "remuda butler approvals" },
-      on = { about = "Turn prepared text approval on. Example: remuda butler approve-text on", next = "remuda butler approve-text off" },
-      off = { about = "Turn prepared text approval off. Example: remuda butler approve-text off", next = "remuda butler approve-text on" },
     },
   }
   local report = parse_cli(spec, args or {})
   if report.kind == "help" then return report.text end
   if not report.ok then return fail(type(report.text) == "string" and report.text ~= ""
-    and report.text or "Usage: remuda butler approve-text request SESSION - | on|off") end
-  if report.verb == "on" or report.verb == "off" then
-    local cli = butler.typed_lines_cli
-    if not cli then return fail("Approve text switch is unavailable") end
-    return cli.cli({ "approve-text", report.verb }, agent)
-  end
+    and report.text or "Usage: remuda butler approve-text request SESSION -") end
   if report.verb ~= "request" or report.values.STDIN ~= "-" then
-    return fail("Usage: remuda butler approve-text request SESSION - | on|off")
+    return fail("Usage: remuda butler approve-text request SESSION -")
   end
   if not M.target_session_allowed(report.values.SESSION) then return fail("Unknown Butler session: " .. tostring(report.values.SESSION)) end
   local id, why = M.request(report.values.SESSION, stdin, agent or "operator")

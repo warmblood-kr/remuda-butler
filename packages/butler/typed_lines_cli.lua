@@ -5,23 +5,16 @@ local parse_cli = assert(remuda.cli and remuda.cli.parse,
   "Butler CLI requires remuda.cli.parse (Remuda core #465 or later); upgrade Remuda")
 local M = {}
 
-local USAGE = "Usage: remuda butler typed-lines on|off\n"
-  .. "       remuda butler shell-lines on|off\n"
-  .. "       remuda butler status-commands on|off\n"
-  .. "       remuda butler approve-text on|off"
-local SWITCH_KEYS = { ["typed-lines"] = "typed_lines", ["shell-lines"] = "shell_lines",
-  ["status-commands"] = "status_commands", ["approve-text"] = "approve_text" }
+local USAGE = "Usage: remuda butler shell-lines on|off\n"
+  .. "       remuda butler status-commands on|off"
+local SWITCH_KEYS = { ["shell-lines"] = "shell_lines", ["status-commands"] = "status_commands" }
 local SWITCH_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
-    ["typed-lines"] = { about = "Turn typed Matrix lines on or off. Example: remuda butler typed-lines on", args = {
-      { name = "STATE", help = "on or off" }, }, next = "remuda butler typed-lines on|off" },
     ["shell-lines"] = { about = "Turn Matrix shell lines on or off. Example: remuda butler shell-lines on", args = {
       { name = "STATE", help = "on or off" }, }, next = "remuda butler shell-lines on|off" },
     ["status-commands"] = { about = "Turn Matrix status commands on or off. Example: remuda butler status-commands on", args = {
       { name = "STATE", help = "on or off" }, }, next = "remuda butler status-commands on|off" },
-    ["approve-text"] = { about = "Turn text approval on or off. Example: remuda butler approve-text on", args = {
-      { name = "STATE", help = "on or off" }, }, next = "remuda butler approve-text on|off" },
   },
 }
 local WARNINGS = {
@@ -130,10 +123,6 @@ local function enable(args, key, path)
         resolve(1, "", tostring(read_error) .. "\n")
         return
       end
-      if key == "shell_lines" and latest.typed_lines ~= true then
-        resolve(1, "", "typed-lines must be on before shell-lines can be enabled. Nothing was changed.\n")
-        return
-      end
       if latest[key] == true then
         resolve(0, args[1] .. " is already on.\n", "")
         return
@@ -173,21 +162,16 @@ function M.cli(args, agent)
   if not config then return fail(tostring(config_error)) end
   local key = SWITCH_KEYS[verb]
   if state == "on" then
-    if key == "shell_lines" and config.typed_lines ~= true then
-      return fail("typed-lines must be on before shell-lines can be enabled. Nothing was changed.")
-    end
     if config[key] == true then return verb .. " is already on." end
     return enable({ verb, state }, key, path)
   end
   local updates = { [key] = false }
-  if key == "typed_lines" then updates.shell_lines = false end
   local needs_write = config[key] ~= false
-  if key == "typed_lines" and config.shell_lines ~= false then needs_write = true end
   if needs_write then
     local written, write_error = write_switches(path, updates)
     if not written then return fail(tostring(write_error)) end
   end
-  return verb .. " is now off." .. (key == "typed_lines" and " shell-lines is also off." or "")
+  return verb .. " is now off."
 end
 
 remuda.butler.typed_lines_cli = M

@@ -1384,7 +1384,7 @@ exact text the owner reviews; silence is not approval.
 Use the `butler_approve_text` MCP tool or
 `remuda butler approve-text request SESSION -` with the exact text on stdin to
 register up to 8 KiB of normalized text for the owner to review in Matrix.
-Registration needs live Matrix sync and prepared-text approval on. The
+Registration needs live Matrix sync. The
 allowlisted owner approves or denies the posted request by reply or reaction;
 the terminal `remuda butler approve` does not approve prepared text. Register
 only the intended content and target, explain its purpose to the owner, and
@@ -1392,9 +1392,7 @@ never treat a request as approval. The post shows the request's expiry (default
 30 minutes; the owner can configure `approval_ttl_minutes`). On approval Butler
 checks the target session and attempts to type the stored, normalized text
 once. `typed (seen)` is a screen observation, not proof that the agent acted;
-an uncertain outcome requires inspection before a new request. The owner
-controls the `approve-text on|off` switch at a terminal; `remuda butler doctor`
-reports it.
+an uncertain outcome requires inspection before a new request.
 ]]
 -- Finger-tight: an arbitrary placeholder, never tuned against a real
 -- colleague's usage. Tightening step: revisit once this has run on a real
@@ -1705,9 +1703,6 @@ local function launch_butler()
   local telemetry_by_kind = {}
   local choose_opts = {
     name = requested_name, cwd = butler_session_cwd, argv = remuda._butler_argv,
-    -- Root registration is protected atomically; the sender gate stays off
-    -- until this is deployed and the owner verifies every target pane.
-    remote_input_disabled = true,
     skip_probe = remuda._butler_argv ~= nil,
     spec = function(candidate_kind)
       pcall(ensure_root_permissions, candidate_kind)

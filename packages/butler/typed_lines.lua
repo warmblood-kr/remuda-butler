@@ -94,7 +94,6 @@ function M.gate(state, event, now, cfg)
   end
   if payload:match("^%s*$") then return reject("empty_line") end
   line = form == "!!" and ("!" .. payload) or payload:gsub("^ ", "", 1)
-  if cfg.typed_lines ~= true then return reject("typed_lines_off") end
 
   local recent = 0
   for _, timestamp in ipairs(state.timestamps or {}) do
