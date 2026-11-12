@@ -1921,10 +1921,8 @@ function relay.new(options)
 
   local function typed_line_refusal(reason, target)
     local safe_target = terminal_safe_field(target or "butler", 128)
-    if reason == "typed_lines_off" then
-      return "Not typed: typed lines are off on this machine. Next: remuda butler typed-lines on"
-    elseif reason == "shell_lines_off" then
-      return "Not typed: shell lines (!!) are off on this machine. Next: remuda butler typed-lines on, then remuda butler shell-lines on"
+    if reason == "shell_lines_off" then
+      return "Not typed: shell lines (!!) are off on this machine. Next: remuda butler shell-lines on"
     elseif reason == "event_too_old" then
       return "Not typed: the line is older than 5 minutes. Next: send it again"
     elseif reason == "not_live" then
@@ -2143,7 +2141,7 @@ function relay.new(options)
 
   -- Prepared-text and guard requests take the strict owner gate; the first also needs its switch.
   local function owner_gated(record)
-    return (record.kind == "approve_text" and cfg.approve_text == true) or record.kind == "guard_action"
+    return (record.kind == "approve_text") or record.kind == "guard_action"
       or record.kind == "guard_unfreeze" or record.kind == "dialog_action"
   end
 
@@ -2222,7 +2220,7 @@ function relay.new(options)
           local typed_line_candidate = not recovery_line and not approval_record and cfg.allowed_senders[ev.sender] == true
             and member_kind(ev.sender, cfg) == "HUMAN"
             and type(content.body) == "string" and content.body:sub(1, 1) == "!"
-          local typed_line_enabled = typed_line_candidate and cfg.typed_lines == true
+          local typed_line_enabled = typed_line_candidate
           if typed_line_enabled and content.body:sub(1, 2) == "!!" and content.body:sub(1, 3) ~= "!!!" then
             typed_line_enabled = cfg.shell_lines == true
           end
@@ -2240,7 +2238,7 @@ function relay.new(options)
             end
           end
           local switch_disabled = typed_line_check
-            and (typed_line_check.reason == "typed_lines_off" or typed_line_check.reason == "shell_lines_off")
+            and typed_line_check.reason == "shell_lines_off"
           if typed_line_enabled and not typed_line_check_failed then
             if switch_disabled then
               trace_typed_line(ev, room_id or cfg.room, typed_line_check.form, typed_line_check.line,
@@ -2832,7 +2830,7 @@ function relay.new(options)
         cfg.status_commands = refreshed.status_commands
         remuda._butler_matrix_live_config = cfg
       else
-        cfg.typed_lines, cfg.shell_lines, cfg.approve_text = false, false, false
+        cfg.typed_lines, cfg.shell_lines, cfg.approve_text = true, false, true
         remuda._butler_matrix_live_config = cfg
       end
     end

@@ -401,10 +401,10 @@ local function read_config(path)
     deny_room_aliases = deny_room_aliases, deny_servers = deny_servers,
     self_mxid = lines[3], allowed_senders = allowed,
     butler_senders = butler_senders,
-    typed_lines = opts.typed_lines ~= false, -- on unless the config says false (or is unreadable)
+    typed_lines = true, -- Legacy switch is ignored.
     shell_lines = opts.shell_lines ~= false, -- on unless the config says false (or is unreadable)
     status_commands = opts.status_commands == nil or opts.status_commands == true,
-    approve_text = opts.approve_text ~= false, -- on unless the config says false (or is unreadable)
+    approve_text = true, -- Legacy switch is ignored.
     untrusted_per_room_hour = untrusted_per_room_hour,
     posts_per_hour = posts_per_hour,
     b2b_max_turns = b2b_max_turns,

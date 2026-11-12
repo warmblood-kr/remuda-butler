@@ -61,7 +61,7 @@ local USAGE_SECTIONS = {
   { id = "health", title = "Health and accounts", verbs = { "doctor", "status", "quota" } },
   { id = "native", title = "Native delivery", verbs = { "native" } },
   { id = "switches", title = "Switches and input",
-    verbs = { "typed-lines", "shell-lines", "status-commands", "guard", "input-queue" } },
+    verbs = { "shell-lines", "status-commands", "guard", "input-queue" } },
 }
 local function butler_usage()
   local section_of, by_id, order = {}, {}, {}
@@ -494,9 +494,6 @@ command(12, "status", "  remuda butler status  (0=up, 75=launching, 1=failed)", 
     return message
   end
 end)
-command(13, "typed-lines", "  remuda butler typed-lines on|off", function(args, caller)
-  return typed_lines_cli.cli(args, current_agent(caller))
-end)
 command(14, "shell-lines", "  remuda butler shell-lines on|off", function(args, caller)
   return typed_lines_cli.cli(args, current_agent(caller))
 end)
@@ -572,9 +569,9 @@ end)
 command(17, "status-commands", "  remuda butler status-commands on|off", function(args, caller)
   return typed_lines_cli.cli(args, current_agent(caller))
 end)
-command(19, "approve-text", "  remuda butler approve-text request SESSION - | on|off", function(args, caller)
+command(19, "approve-text", "  remuda butler approve-text request SESSION -", function(args, caller)
   if wants_verb_help(args) then
-    return verb_help("approve-text", "Prepared text for owner approval. Forms: request SESSION - (text on stdin); on; off. Example: remuda butler approve-text request worker -", "remuda butler approve-text request --help")
+    return verb_help("approve-text", "Prepared text for owner approval. Form: request SESSION - (text on stdin). Example: remuda butler approve-text request worker -", "remuda butler approve-text request --help")
   end
   -- The verb receives the whole argv; approve_text.cli takes what follows the verb.
   local rest = {}

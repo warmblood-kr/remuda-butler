@@ -730,7 +730,7 @@ remuda._butler_contribute("butler.guidance", "prepared-text", { order = 60,
 Use the `butler_approve_text` MCP tool or
 `remuda butler approve-text request SESSION -` with the exact text on stdin to
 register up to 8 KiB of normalized text for the owner to review in Matrix.
-Registration needs live Matrix sync and prepared-text approval on. The
+Registration needs live Matrix sync. The
 allowlisted owner approves or denies the posted request by reply or reaction;
 the terminal `remuda butler approve` does not approve prepared text. Register
 only the intended content and target, explain its purpose to the owner, and
@@ -738,9 +738,7 @@ never treat a request as approval. The post shows the request's expiry (default
 30 minutes; the owner can configure `approval_ttl_minutes`). On approval Butler
 checks the target session and attempts to type the stored, normalized text
 once. `typed (seen)` is a screen observation, not proof that the agent acted;
-an uncertain outcome requires inspection before a new request. The owner
-controls the `approve-text on|off` switch at a terminal; `remuda butler doctor`
-reports it.
+an uncertain outcome requires inspection before a new request.
 ]]
   end })
 remuda._butler_contribute("butler.guidance", "leader", { order = 90,

@@ -1147,7 +1147,7 @@ reporting to a human at every firing.
 Use the `butler_approve_text` MCP tool or
 `remuda butler approve-text request SESSION -` with the exact text on stdin to
 register up to 8 KiB of normalized text for the owner to review in Matrix.
-Registration needs live Matrix sync and prepared-text approval on. The
+Registration needs live Matrix sync. The
 allowlisted owner approves or denies the posted request by reply or reaction;
 the terminal `remuda butler approve` does not approve prepared text. Register
 only the intended content and target, explain its purpose to the owner, and
@@ -1155,9 +1155,7 @@ never treat a request as approval. The post shows the request's expiry (default
 30 minutes; the owner can configure `approval_ttl_minutes`). On approval Butler
 checks the target session and attempts to type the stored, normalized text
 once. `typed (seen)` is a screen observation, not proof that the agent acted;
-an uncertain outcome requires inspection before a new request. The owner
-controls the `approve-text on|off` switch at a terminal; `remuda butler doctor`
-reports it.
+an uncertain outcome requires inspection before a new request.
 ]]
         end },
       { id = "leader", order = 90,
@@ -1224,15 +1222,13 @@ reports it.
         run = function(_, args, caller) return host._butler_command_run("status", args, caller) end },
       { id = "guard", order = 21, verb = "guard", usage = "  remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify (guard and approvals are on by default; deny and grants are off)",
         run = function(_, args, caller) return host._butler_command_run("guard", args, caller) end },
-      { id = "typed-lines", order = 13, verb = "typed-lines", usage = "  remuda butler typed-lines on|off",
-        run = function(_, args, caller) return host._butler_command_run("typed-lines", args, caller) end },
       { id = "shell-lines", order = 14, verb = "shell-lines", usage = "  remuda butler shell-lines on|off",
         run = function(_, args, caller) return host._butler_command_run("shell-lines", args, caller) end },
       { id = "agents", order = 15, verb = "agents", usage = "  remuda butler agents [--all]",
         run = function(_, args, caller) return host._butler_command_run("agents", args, caller) end },
       { id = "status-commands", order = 17, verb = "status-commands", usage = "  remuda butler status-commands on|off",
         run = function(_, args, caller) return host._butler_command_run("status-commands", args, caller) end },
-      { id = "approve-text", order = 19, verb = "approve-text", usage = "  remuda butler approve-text request SESSION - | on|off",
+      { id = "approve-text", order = 19, verb = "approve-text", usage = "  remuda butler approve-text request SESSION -",
         run = function(_, args, caller) return host._butler_command_run("approve-text", args, caller) end },
       { id = "schedule", order = 18, verb = "schedule", usage = "  remuda butler schedule list\n"
           .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION] [--once]\n'

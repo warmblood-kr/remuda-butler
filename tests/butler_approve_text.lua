@@ -152,11 +152,8 @@ local invalid_message = type(invalid_target) == "table" and invalid_target.error
 assert(invalid_message and invalid_message:find("Unknown Butler session", 1, true),
   "registration cannot target a session outside the Butler tree")
 remuda._butler_matrix_live_config.approve_text = false
-local prior_spec = request_spec
-local disabled, disabled_error = approve_text.cli({ "request", "agent-1", "-" }, "agent-1", multiline)
-local disabled_message = type(disabled) == "table" and disabled.error or disabled_error
-assert(disabled_message and disabled_message:find("Prepared text approvals are off", 1, true)
-  and request_spec == prior_spec, "switch-off registration is refused before posting")
+local legacy_disabled = approve_text.cli({ "request", "agent-1", "-" }, "agent-1", multiline)
+assert(legacy_disabled == "Registered prepared text request ABCD", "legacy off setting does not block registration")
 remuda._butler_matrix_live_config.approve_text = true
 
 assert(approve_text.reply_verdict("yes") == "approve")

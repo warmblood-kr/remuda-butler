@@ -74,10 +74,10 @@ local cases = {
   { name = "eleventh line in ten minutes refused", event = event("!hello"), state = { processed = {}, timestamps = { now - 10, now - 9, now - 8, now - 7, now - 6, now - 5, now - 4, now - 3, now - 2, now - 1 } }, ok = false },
   { name = "typed lines switch off", event = event("!hello"), cfg = {
     allowed_senders = { [owner] = true }, typed_lines = false, shell_lines = true,
-  }, ok = false, reason = "typed_lines_off" },
+  }, ok = true, line = "hello", form = "!" },
   { name = "shell line requires typed lines too", event = event("!!ls"), cfg = {
     allowed_senders = { [owner] = true }, typed_lines = false, shell_lines = true,
-  }, ok = false, reason = "typed_lines_off" },
+  }, ok = true, line = "!ls", form = "!!" },
   { name = "shell lines switch off", event = event("!!ls"), cfg = {
     allowed_senders = { [owner] = true }, typed_lines = true, shell_lines = false,
   }, ok = false, reason = "shell_lines_off" },

@@ -1101,38 +1101,6 @@ function remuda._butler_launch(kind, name, model, parent, profile)
   end
   return launch_agent(kind, name, nil, model, resolve(parent or "butler"), nil, nil, nil, profile)
 end
--- A trusted launch assignment names a leader; protect that exact bound
--- instance before the child exists. Failure is degraded and never re-enabled
--- automatically. Child count or display/OSC is never used as a role signal.
-local function protect_leader(alias)
-  local agent = bus.agents and bus.agents[alias]
-  local instance = agent and agent.instance_id
-  local session_api = type(remuda.session) == "table" and remuda.session or nil
-  local setter = session_api and session_api.remote_input
-  local state = "degraded"
-  if type(setter) ~= "function" then
-    state = "unsupported"
-    _butler_session_trace("leader_protection", tostring(alias) .. ": core has no setter")
-  elseif agent and agent.instance_binding == 1 and type(instance) == "string" and instance ~= "" then
-    local ok, value, why = pcall(setter, alias, instance, false)
-    if ok and value == true then
-      state = "protected"
-    else
-      _butler_session_trace("leader_protection",
-        tostring(alias) .. ": " .. tostring(ok and (value or why) or value))
-    end
-  else
-    _butler_session_trace("leader_protection", tostring(alias) .. ": missing_instance_binding")
-  end
-  bus.remote_input_unprotected = bus.remote_input_unprotected or {}
-  if state == "protected" then
-    bus.remote_input_unprotected[alias] = nil
-  else
-    bus.remote_input_unprotected[alias] = true
-  end
-  return state
-end
-
 function remuda._butler_topic_new(name, template, kind, model)
   return make_topic(name, template, kind, "butler", nil, model)
 end
@@ -1144,9 +1112,6 @@ function remuda._butler_topic_delegate(name, task, template, kind, parent, model
   local resolved, leader = pcall(resolve, requested_parent)
   if resolved then
     parent = leader
-    -- Protect the resolved canonical leader, not the pre-resolution alias.
-    -- A degraded result is handed off explicitly and never claims success.
-    if parent and parent ~= "" then protect_leader(parent) end
   else
     local session_live = false
     for _, row in ipairs(remuda.ls()) do
