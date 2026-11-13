@@ -6,3 +6,7 @@ tests/butler_matrix_relay.lua|2
 tests/lua/butler_task_mail_policy_test.lua|2
 # Unit test: one disposable directory tree for the import fixture.
 tests/butler_inbox_db.lua|1
+# Read-receipt tests create and remove one disposable fixture directory tree.
+tests/butler_read_receipt_delivery.lua|1
+tests/butler_read_receipt_intents.lua|1
+tests/butler_matrix_read_receipts.lua|2
