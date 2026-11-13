@@ -29,6 +29,7 @@ deep tests/butler_guard.lua
 fast tests/butler_guidance_blocks.lua
 fast tests/butler_guidance_parity.lua
 fast tests/butler_inbox_db.lua
+fast tests/butler_inbox_db_path.lua
 deep tests/butler_input_recovery.lua
 deep tests/butler_instance_binding_modes.lua
 fast tests/butler_lifecycle_reload.lua
