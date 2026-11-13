@@ -86,6 +86,23 @@ through the relay outbox.
   evidence is lost. Do not downgrade while Matrix receipts are unresolved; A2
   shape/rotation survive.
 
+## Reload
+
+A mod reload re-executes `main.lua`, but the host keeps the previous
+activation's table: `simple.store` still points at the module table that was
+current then while `remuda.exec` has already loaded the new one. Migrations run
+only inside `remuda.db.open`, so the open handle can also be behind the new
+schema. The reload path keeps the live handle (mail and the drain already hold
+it), brings the schema forward through one short-lived connection, and only
+then swaps in the new module table. The handle we keep must see the migrated
+schema too, not only the throwaway connection that applied it. A store that
+cannot be readied refuses the activation: the new mail and receipt modules call
+queries the previous table does not have, so continuing would publish a mixed
+graph that throws on every read. The lifecycle then restores the previous graph
+(its code and its store), and a cold restart is the operator recovery. Once the
+store is swapped, a later activation failure still rolls back to closures that
+work, because the new table is a superset and the schema is current.
+
 ## Evidence
 
 - `butler_read_receipt_delivery.lua` (fast): receipt/notice; batch; restart;
@@ -98,8 +115,12 @@ through the relay outbox.
 - `butler_inbox_caller_identity_test.lua`: notice rename/reuse/forward;
   single-message read/re-view, cross-member refusal, SQLite failure retry,
   deferred Matrix intent.
-- `read_receipt_upgrade.sh`: SQLite v5 5→4 (populated drain), 4→5, and a real
-  queued/uncertain Matrix intent that must not resend.
+- `read_receipt_upgrade.sh`: SQLite v5 5→4 (populated drain), 4→5, a real
+  queued/uncertain Matrix intent that must not resend, and the reload paths: a
+  stale store is replaced while the live handle is kept, an older schema is
+  migrated through that handle, a readiness failure refuses the activation, and
+  a post-swap activation failure rolls back to a graph that reads real mail and
+  delivers its receipt.
 - `butler_simple_inbox_acceptance.sh`: real SQLite inbox across restarts.
 
 ## Not in this slice
