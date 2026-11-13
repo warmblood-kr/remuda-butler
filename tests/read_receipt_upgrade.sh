@@ -192,6 +192,38 @@ boot_butler
   assert(seq[1].attempt_seq and seq[2].attempt_seq
     and seq[1].attempt_seq ~= seq[2].attempt_seq,
     "each attempt must take a distinct durable sequence, even in the same second")
+
+  -- More than one page with identical timestamps: two bounded passes must
+  -- rotate to the rows the first pass did not reach.
+  for index = 1, 60 do
+    assert(db:exec([[INSERT INTO read_receipt_intents
+      (recipient, message_id, read_at, status, deferred_at, attempt_seq)
+      VALUES (?, ?, ?, ?, ?, NULL)]],
+      { "726f7432", string.format("T%02d", index), "2026-01-01T00:00:00Z",
+        "pending", "2026-01-01T00:00:00Z" }))
+  end
+  local first_page = assert(store.pending_intent_details(db, "726f7432"))
+  assert(#first_page == 60 and first_page[1].message_id == "T01",
+    "identical-timestamp rows must still have a stable first page")
+  for index = 1, 50 do
+    assert(store.note_intent_attempt(db, "726f7432", first_page[index].message_id))
+  end
+  local second_page = assert(store.pending_intent_details(db, "726f7432"))
+  for index = 1, 10 do
+    assert(second_page[index].message_id == string.format("T%02d", 50 + index),
+      "the second pass must rotate to the unattempted rows")
+  end
+  for index = 1, 50 do
+    assert(store.note_intent_attempt(db, "726f7432", second_page[index].message_id))
+  end
+  local third_page = assert(store.pending_intent_details(db, "726f7432"))
+  assert(third_page[1].message_id == "T41",
+    "the third pass must continue rotating, not pin the first page")
+  local distinct = assert(db:query([[SELECT COUNT(DISTINCT attempt_seq) AS n
+    FROM read_receipt_intents WHERE recipient = ?]], { "726f7432" }))
+  assert(tonumber(distinct[1].n) == 60, "every attempted row must keep a distinct sequence")
+  local counter = assert(db:query("SELECT value FROM receipt_attempt_seq WHERE id = 1"))
+  assert(tonumber(counter[1].value) >= 100, "each attempt must consume one sequence value")
 ' >/dev/null
 
 # A second restart must keep exactly the agent intents and skip the already-read
