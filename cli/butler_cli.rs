@@ -150,6 +150,9 @@ fn butler_command(server: &str, path: &Path, args: &[&str]) -> ExitCode {
         ["send-to-leader", message @ ..] if !message.is_empty() => {
             send_to_leader(server, path, message)
         }
+        // Receipt identity comes from the daemon caller session in the Lua
+        // extension command, never from the CLI environment. This legacy shim
+        // passes no reader, so a read here creates no receipt intent.
         ["inbox", name] => with_daemon(server, path, |path| {
             eval(
                 path,

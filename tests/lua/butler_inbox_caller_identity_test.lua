@@ -81,6 +81,45 @@ T.test("agent_can_read_own_named_inbox_and_operator_can_read_any_named_inbox", f
   T.ok(operator:find("operator-visible secret", 1, true), "operator inbox content missing")
   T.eq(T.eval("return tostring(remuda._butler_mail.is_unread(" .. string.format("%q", bob_id)
     .. ", " .. string.format("%q", operator_message) .. "))"), "false", "operator read marks mail read")
+
+  -- Caller provenance: Alice's own read creates one intent; the operator's
+  -- read of Bob's inbox saves read state but creates no agent receipt intent.
+  local provenance = T.eval(string.format([=[
+    local simple = assert(remuda._butler_simple_inbox, "SQLite inbox is not active")
+    local function hex(value)
+      return (value:gsub(".", function(byte) return string.format("%%02x", string.byte(byte)) end))
+    end
+    local alice = assert(simple.db:query(
+      "SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { hex(%q) }))
+    local bob = assert(simple.db:query(
+      "SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { hex(%q) }))
+    local found = false
+    for _, row in ipairs(alice) do
+      if row.message_id == %q then found = true end
+    end
+    return tostring(#alice > 0) .. "|" .. #bob .. "|" .. tostring(found)
+  ]=], alice_id, bob_id, alice_message))
+  T.eq(provenance, "true|0|true", "only the agent's own read should create an intent")
+end)
+
+T.test("message_id_lookup_re_displays_without_a_read_or_intent", function()
+  local id = T.eval([[return remuda._butler_send("butler", "alice", "single lookup probe"):match("^queued (%S+)")]])
+  local result = call("inbox", { "inbox", id }, alice_id)
+  T.ok(result:match("^ok\0") and result:find("single lookup probe", 1, true),
+    "single-message lookup did not re-display the message: " .. result)
+  T.eq(T.eval("return tostring(remuda._butler_mail.is_unread(" .. string.format("%q", alice_id)
+    .. ", " .. string.format("%q", id) .. "))"), "true", "single-message lookup marked mail read")
+  local intent = T.eval(string.format([=[
+    local simple = assert(remuda._butler_simple_inbox, "SQLite inbox is not active")
+    local function hex(value)
+      return (value:gsub(".", function(byte) return string.format("%%02x", string.byte(byte)) end))
+    end
+    local rows = assert(simple.db:query(
+      "SELECT message_id FROM read_receipt_intents WHERE recipient = ? AND message_id = ?",
+      { hex(%q), %q }))
+    return tostring(#rows)
+  ]=], alice_id, id))
+  T.eq(intent, "0", "single-message lookup created a receipt intent")
 end)
 
 T.test("ended_member_session_is_unidentified_and_alias_reuse_does_not_restore_it", function()
@@ -153,4 +192,25 @@ T.test("sibling_name_verbs_do_not_read_another_members_private_inbox", function(
   T.ok(reply:match("^error\0") and reply:find("was not delivered to you", 1, true), "reply keeps message ownership: " .. reply)
   local forward = call("forward", { "forward", bob_message, "carol" }, alice_id)
   T.ok(forward:match("^error\0") and forward:find("was not delivered to you", 1, true), "forward keeps message ownership: " .. forward)
+end)
+
+-- The legacy one-argument API (used by the retained Rust CLI shim) has no
+-- daemon caller-session identity. It must save read state but never claim an
+-- agent read, so it creates no receipt intent.
+T.test("legacy_one_argument_inbox_reads_without_claiming_an_agent_read", function()
+  local id = T.eval([[return remuda._butler_send("butler", "carol", "legacy shim probe"):match("^queued (%S+)")]])
+  local text = T.eval([[return remuda._butler_inbox("carol")]])
+  T.ok(text:find("legacy shim probe", 1, true), "legacy one-argument read did not show mail")
+  T.eq(T.eval("return tostring(remuda._butler_mail.is_unread(" .. string.format("%q", carol_id)
+    .. ", " .. string.format("%q", id) .. "))"), "false", "legacy one-argument read did not save read state")
+  local intents = T.eval(string.format([=[
+    local simple = assert(remuda._butler_simple_inbox, "SQLite inbox is not active")
+    local function hex(value)
+      return (value:gsub(".", function(byte) return string.format("%%02x", string.byte(byte)) end))
+    end
+    local rows = assert(simple.db:query(
+      "SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { hex(%q) }))
+    return tostring(#rows)
+  ]=], carol_id))
+  T.eq(intents, "0", "legacy one-argument read claimed an agent receipt")
 end)

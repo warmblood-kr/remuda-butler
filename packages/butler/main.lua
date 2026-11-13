@@ -871,9 +871,17 @@ function remuda._butler_forward(from, message_id, member, note)
   return "forwarded " .. message_id .. " to " .. target.alias .. "; "
     .. notify_queued(message, target.alias, "forwarded by " .. sender.alias)
 end
-function remuda._butler_inbox(name)
+function remuda._butler_inbox(name, reader)
   local id = mail_id(name, true)
-  local result = mail.inbox(id)
+  -- Preserve caller provenance: resolve the caller's id (an id or a session
+  -- name) and pass it down. Only a caller reading its own mailbox creates a
+  -- receipt intent; operator and cross-member reads still save read state.
+  local reader_id
+  if type(reader) == "string" and reader ~= "" then
+    local ok, resolved = pcall(mail_id, reader, true)
+    if ok then reader_id = resolved end
+  end
+  local result = mail.inbox(id, { reader_id = reader_id })
   if mail.unread(id) == 0 then
     for alias, agent in pairs(bus.agents) do
       if agent.id == id then
@@ -1048,7 +1056,7 @@ remuda.tool{
   about = "Drain this agent's Butler inbox and return its queued messages in arrival order.",
   run = function(_, caller)
     local principal = caller_agent(caller, true) -- reading compares the instance; liveness is for mutating routes
-    return remuda._butler_inbox(principal)
+    return remuda._butler_inbox(principal, principal)
   end,
 }
 local send_to_leader = {

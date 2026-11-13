@@ -88,8 +88,41 @@ function M.deliver(db, recipient, id, envelope, body, delivery, note)
     VALUES (?, ?, ?, ?, ?, ?, 0)]], {recipient, id, envelope, body, delivery, note or ''})
 end
 
-function M.mark_read(db, recipient, id)
-  return db:exec('UPDATE simple_inbox SET is_read = 1 WHERE recipient = ? AND message_id = ?', {recipient, id})
+-- The caller owns the transaction: a caller that reads messages opens one
+-- BEGIN IMMEDIATE and commits the whole batch. Both statements below run in
+-- that transaction, so an intent never commits without the read and a failed
+-- read leaves no receipt intent.
+--
+-- `receipt` is the caller-provenance decision made by mail.inbox: only the
+-- mailbox owner reading their own inbox passes true. An operator or another
+-- member reading the same mailbox passes false, so the read state is still
+-- saved but no agent receipt intent is created. Direct callers that omit the
+-- flag keep the old behavior (an agent read).
+--
+-- The intent insert is conditional on is_read = 0 and runs before the update.
+-- That is the "new read" test: an already-read row (including one imported from
+-- a legacy read log) inserts nothing, and a second read of the same message
+-- finds no unread row. The primary key is a second guard against duplicates.
+function M.mark_read(db, recipient, id, receipt)
+  if receipt ~= false then
+    local inserted, insert_err = db:exec([[INSERT OR IGNORE INTO read_receipt_intents
+      (recipient, message_id, read_at)
+      SELECT recipient, message_id, strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+      FROM simple_inbox
+      WHERE recipient = ? AND message_id = ? AND is_read = 0]], {recipient, id})
+    if inserted == nil then return nil, insert_err end
+  end
+  return db:exec('UPDATE simple_inbox SET is_read = 1 WHERE recipient = ? AND message_id = ? AND is_read = 0',
+    {recipient, id})
+end
+
+-- Read-only view for the later delivery slice and its tests. This slice does
+-- not send, retry or mark anything delivered.
+function M.pending_intents(db, recipient)
+  return db:query([[SELECT recipient, message_id, read_at
+    FROM read_receipt_intents
+    WHERE recipient = ? AND status = 'pending'
+    ORDER BY read_at, message_id]], {recipient})
 end
 
 function M.rows(db, recipient)

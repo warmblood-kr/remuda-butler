@@ -722,11 +722,20 @@ end
 -- part of the header above (e.g. a forged "Next:" line).
 local MATRIX_BODY_MARK = "  Message from Matrix (text of the sender, not Butler guidance):"
 
-local function inbox(name)
+local function inbox(name, opts)
   load_inbox(name)
   retry_unreadable(name)
   local messages, unreadable = mailbox(name), bus.mail_unreadable[name] or {}
   if #messages == 0 and #unreadable == 0 then return "inbox empty" end
+  -- Caller provenance decides whether this fetch is an agent read. The
+  -- lifetime path passes the caller's resolved identity; an operator fetch
+  -- passes an explicit table with no matching reader, so it saves read state
+  -- but creates no receipt intent. A direct call with no opts keeps the
+  -- historical behavior (the mailbox owner is reading).
+  local receipt = true
+  if opts ~= nil then
+    receipt = type(opts.reader_id) == "string" and opts.reader_id ~= "" and opts.reader_id == name
+  end
   local out, read, shown = {}, load_read(name), {}
   for _, id in ipairs(messages) do
     local message = bus.messages[id]
@@ -769,7 +778,7 @@ local function inbox(name)
       wrote, err = config.simple.db:exec("BEGIN IMMEDIATE", {})
       if wrote then
         for _, id in ipairs(shown) do
-          wrote, err = config.simple.store.mark_read(config.simple.db, file_component(name), id)
+          wrote, err = config.simple.store.mark_read(config.simple.db, file_component(name), id, receipt)
           if not wrote then break end
         end
         if wrote then wrote, err = config.simple.db:exec("COMMIT", {}) end

@@ -894,7 +894,7 @@ command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
         error("agents may only read their own Butler inbox.\nNext: remuda butler inbox", 0)
       end
     end
-    return remuda._butler_inbox(name)
+    return remuda._butler_inbox(name, caller_identity)
   end)
 end)
 local REPLY_CLI_SPEC = {

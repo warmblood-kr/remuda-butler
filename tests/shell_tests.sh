@@ -19,7 +19,7 @@ classify_shell_test() {
   local sh=$1
   case $(basename "$sh") in
     rust_tests.sh | golden_guidance.sh | shell_tests.sh | fast_tests.sh | butler_simple_inbox_acceptance.sh | butler_simple_sqlite_fixture.sh) return 1 ;;
-    awk-timeout.sh | core_ref.sh | hand_parsed_verbs.sh | installer_no_restart.sh | installer_readiness_budget.sh | lua_harness_guards.sh | butler_file_args.sh | butler_permissions.sh | caller_identity.sh | butler_single_instance.sh | agent_identity.sh | butler_adopt.sh | delegate_leader_id.sh | mail_by_ulid.sh | reply_forward.sh | butler_unknown_verb.sh | opencode_nudge_events.sh | inbox_db_upgrade.sh | mod_package_assets.sh | isolated_env_cleanup_test.sh | isolated_env_admission_test.sh)
+    awk-timeout.sh | core_ref.sh | hand_parsed_verbs.sh | installer_no_restart.sh | installer_readiness_budget.sh | lua_harness_guards.sh | butler_file_args.sh | butler_permissions.sh | caller_identity.sh | butler_single_instance.sh | agent_identity.sh | butler_adopt.sh | delegate_leader_id.sh | mail_by_ulid.sh | reply_forward.sh | butler_unknown_verb.sh | opencode_nudge_events.sh | inbox_db_upgrade.sh | read_receipt_upgrade.sh | mod_package_assets.sh | isolated_env_cleanup_test.sh | isolated_env_admission_test.sh)
       # Policy tests and identity, file-boundary, isolation and harness
       # security controls stay on PRs, even when they need a private daemon.
       ;;
