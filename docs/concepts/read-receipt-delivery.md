@@ -12,8 +12,7 @@ a threaded Matrix reply.
 - The reader is the canonical id, not the envelope `to` alias, so a forward
   names the actual reader.
 - `inbox/0004` adds `attempt_seq` and a single-writer sequence for rotation.
-- `inbox/0005` adds the relay projection (`matrix_state`/`txn`/`event`/
-  `updated_at`/`error`).
+- `inbox/0005` adds the relay projection (state/txn/event/updated/error).
 
 ## Eligibility
 
@@ -26,7 +25,7 @@ hex reader id.
 - **Matrix:** a route from an allowlisted human; durable envelope flags
   (`from_agent=false`, `allowlisted_human=true`) are the trimmed-route
   fallback, else fail closed.
-- An unreadable envelope stays pending, never delivered.
+- An unreadable envelope stays pending.
 
 The guard is structured `receipt_of`, never content text.
 
@@ -35,9 +34,9 @@ The guard is structured `receipt_of`, never content text.
 `queue_receipt` reuses a message at the fixed ULID only when `receipt_of`,
 sender/recipient ULIDs, subject, time and body match.
 
-Identical bytes are reused; a differing body is a collision, never a success.
-An existing row is `already=true` with no rewrite or notice; only after the row
-is durable does the drain set `delivered`.
+Identical bytes are reused; a differing body is a collision. An existing row
+is `already=true` with no rewrite or notice; only after the row is durable does
+the drain set `delivered`.
 
 ## Failure fairness
 
@@ -83,9 +82,9 @@ through the relay outbox.
   without a send; `queued` whose evidence is gone becomes `uncertain` and is
   never resent; status/projection failures never send; identity reuse is
   refused.
-- Downgrading 5→4 drops the Matrix projection, so unresolved
-  `queued`/`uncertain` evidence is lost; do not downgrade while Matrix receipts
-  are unresolved. The A2 shape and rotation survive.
+- Downgrading 5→4 drops the Matrix projection: unresolved `queued`/`uncertain`
+  evidence is lost. Do not downgrade while Matrix receipts are unresolved; A2
+  shape/rotation survive.
 
 ## Evidence
 
@@ -99,7 +98,8 @@ through the relay outbox.
 - `butler_inbox_caller_identity_test.lua`: notice rename/reuse/forward;
   single-message read/re-view, cross-member refusal, SQLite failure retry,
   deferred Matrix intent.
-- `read_receipt_upgrade.sh`: SQLite v5 5→4 (populated drain) and 4→5.
+- `read_receipt_upgrade.sh`: SQLite v5 5→4 (populated drain), 4→5, and a real
+  queued/uncertain Matrix intent that must not resend.
 - `butler_simple_inbox_acceptance.sh`: real SQLite inbox across restarts.
 
 ## Not in this slice

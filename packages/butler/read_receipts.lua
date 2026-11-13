@@ -329,8 +329,10 @@ function M.drain_matrix()
   local processed, scanned = 0, 0
   for _, row in ipairs(recipients) do
     if processed >= MATRIX_MAX_PER_TICK or scanned >= MATRIX_SCAN_MAX then break end
-    local details = store.pending_local_intent_details or store.pending_intent_details
-    local intents, detail_err = details(db, row.recipient)
+    -- The Matrix drain must read the full projection (matrix_state/txn/event),
+    -- never the local query: durable queued/uncertain evidence is what stops a
+    -- resend when the relay result is missing.
+    local intents, detail_err = store.pending_intent_details(db, row.recipient)
     if intents == nil then
       report("error", "matrix_pending_intents", detail_err)
       counts.errors = counts.errors + 1

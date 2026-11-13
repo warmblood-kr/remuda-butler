@@ -123,6 +123,19 @@ function store.pending_intent_details(_, recipient)
   end
   return out
 end
+-- Mirrors the real store: the local query omits the Matrix projection, so a
+-- Matrix drain that picks it up loses durable queued/uncertain evidence.
+function store.pending_local_intent_details(_, recipient)
+  local out = {}
+  for _, intent in ipairs(intents) do
+    if intent.recipient == recipient and intent.status == "pending" then
+      out[#out + 1] = { recipient = intent.recipient, message_id = intent.message_id,
+        read_at = intent.read_at, receipt_id = intent.receipt_id,
+        receipt_body = intent.receipt_body, envelope = intent.envelope }
+    end
+  end
+  return out
+end
 function store.mark_intent_status(_, recipient, message_id, status)
   for _, intent in ipairs(intents) do
     if intent.recipient == recipient and intent.message_id == message_id and intent.status == "pending" then

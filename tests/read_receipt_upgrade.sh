@@ -285,6 +285,38 @@ boot_butler
   assert(tonumber(distinct[1].n) == 60, "every attempted row must keep a distinct sequence")
   local counter = assert(db:query("SELECT value FROM receipt_attempt_seq WHERE id = 1"))
   assert(tonumber(counter[1].value) >= 100, "each attempt must consume one sequence value")
+
+  -- Real SQLite Matrix intent: the Matrix drain must read the full projection.
+  -- With relay evidence gone, a durable queued/uncertain row must not resend.
+  local matrix_envelope = [[{"id":"MX1","from":{"host":"matrix","id":"","alias":"@alice:example.org","session":"@alice:example.org","kind":"matrix","leader":""},"to":[{"host":"local","id":"aa","alias":"aa","session":"aa","kind":"agent","leader":""}],"subject":"Matrix message","created_at":"2026-11-13","content_type":"text/plain","body":{"object_id":"object-MX1"},"matrix":{"sender":"@alice:example.org","room_id":"!room:example.org","event_id":"$mx1","from_agent":false,"allowlisted_human":true,"trusted":true}}]]
+  assert(store.deliver(db, "6161", "MX1", matrix_envelope, "matrix body", "{}", ""))
+  assert(db:exec("BEGIN IMMEDIATE"))
+  assert(store.mark_read(db, "6161", "MX1", true, "01MXQUEUED" .. string.rep("0", 16)))
+  assert(db:exec("COMMIT"))
+  local sent = 0
+  local saved_matrix = remuda._butler_read_receipts_config.matrix
+  remuda._butler_read_receipts_config.matrix = {
+    available = function() return true end,
+    status = function() return nil end,
+    route = function() return { room_id = "!room:example.org", event_id = "$mx1",
+      from_agent = false, allowlisted_human = true } end,
+    mail_reply = function() sent = sent + 1; return true end,
+  }
+  for _, state in ipairs({ "queued", "uncertain" }) do
+    assert(db:exec("UPDATE read_receipt_intents SET matrix_state = ? WHERE recipient = ? AND message_id = ?",
+      { state, "6161", "MX1" }))
+    local matrix_counts = assert(assert(remuda._butler_read_receipts).drain_matrix())
+    assert(matrix_counts.uncertain >= 1 and sent == 0,
+      "a " .. state .. " Matrix intent with lost relay evidence must not resend")
+    local mx = assert(db:query(
+      "SELECT status,matrix_state FROM read_receipt_intents WHERE recipient = ? AND message_id = ?",
+      { "6161", "MX1" }))
+    assert(mx[1].status == "pending" and mx[1].matrix_state == "uncertain",
+      "the " .. state .. " intent must stay pending and uncertain")
+  end
+  remuda._butler_read_receipts_config.matrix = saved_matrix
+  assert(db:exec("DELETE FROM read_receipt_intents WHERE message_id = ?", { "MX1" }))
+  assert(db:exec("DELETE FROM simple_inbox WHERE message_id = ?", { "MX1" }))
 ' >/dev/null
 
 # A second restart must keep exactly the agent intents and skip the already-read
