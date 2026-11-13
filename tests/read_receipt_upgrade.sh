@@ -89,7 +89,11 @@ boot_butler
   local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active after upgrade")
   local db = simple.db
   local version = assert(db:query("PRAGMA user_version"))
-  assert(tonumber(version[1].user_version) == 3, "0003 did not apply to the existing database")
+  assert(tonumber(version[1].user_version) == 4, "0004 did not apply to the existing database")
+  local columns = assert(db:query("PRAGMA table_info(read_receipt_intents)"))
+  local names = {}
+  for _, column in ipairs(columns) do names[column.name] = true end
+  assert(names.attempt_seq, "0004 attempt rotation column is missing")
   local rows = assert(db:query("SELECT message_id,is_read FROM simple_inbox ORDER BY seq"))
   local seen = {}
   for _, row in ipairs(rows) do seen[row.message_id] = tonumber(row.is_read) end
@@ -181,6 +185,13 @@ boot_butler
   local after_rotation = assert(store.pending_intent_details(db, "726f7431"))
   assert(after_rotation[1].message_id == "ROT-B" and after_rotation[2].message_id == "ROT-A",
     "the attempted deferred row must rotate behind the untried one")
+  assert(store.note_intent_attempt(db, "726f7431", "ROT-B"))
+  local seq = assert(db:query(
+    "SELECT message_id, attempt_seq FROM read_receipt_intents WHERE recipient = ? ORDER BY message_id",
+    { "726f7431" }))
+  assert(seq[1].attempt_seq and seq[2].attempt_seq
+    and seq[1].attempt_seq ~= seq[2].attempt_seq,
+    "each attempt must take a distinct durable sequence, even in the same second")
 ' >/dev/null
 
 # A second restart must keep exactly the agent intents and skip the already-read
@@ -191,7 +202,7 @@ boot_butler
 "$REMUDA_BIN" -s "$S" -e '
   local db = assert(remuda._butler_simple_inbox).db
   local version = assert(db:query("PRAGMA user_version"))
-  assert(tonumber(version[1].user_version) == 3, "schema version changed after restart")
+  assert(tonumber(version[1].user_version) == 4, "schema version changed after restart")
   local aa = assert(db:query("SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { "6161" }))
   assert(#aa == 2, "agent intents were lost or duplicated across restart")
   local bb = assert(db:query("SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { "6262" }))

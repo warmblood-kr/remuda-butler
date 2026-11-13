@@ -4,7 +4,7 @@ Outcome: a member fetches a message and the sender gets one automatic
 acknowledgment in its own mailbox.
 
 This is the local, SQLite slice (A2). Matrix delivery is not implemented: a
-Matrix-origin intent stays `pending` for the relay slice (A3).
+Matrix intent stays `pending` for the relay slice (A3).
 
 ## Identity and durability
 
@@ -15,10 +15,9 @@ Matrix-origin intent stays `pending` for the relay slice (A3).
   committed with the intent, so the receipt is an ordinary mail message.
   `read_receipt_intents_receipt` is a partial unique index on it. The body is
   claimed once, so a retry cannot compute a different text.
-- A direct caller without an id stores **NULL**, not `''`, so unidentified
-  intents do not collide. A pre-0003 row is claimed once by the first drain.
-- `intent.read_at` fixes `created_at`, so a retry produces the same body and
-  envelope values.
+- A direct caller without an id stores **NULL**, not `''`; a pre-0003 row is
+  claimed once by the first drain.
+- `intent.read_at` fixes `created_at`, so a retry produces the same bytes.
 - The receipt names the reader from the canonical id via the identity store,
   not the envelope's `to` alias, so a forwarded copy names the actual reader.
 
@@ -37,7 +36,7 @@ reader's canonical id.
 - An unreadable/missing envelope stays pending, never reported as delivered.
 
 The recursion guard is the structured `receipt_of` in the stored envelope,
-parsed by `load_message` and preserved across restart. Content text is never the
+parsed by `load_message` and kept across restart. Content text is never the
 guard.
 
 ## Crash-safe delivery
@@ -60,9 +59,10 @@ between acceptance and that mark is a verified retry, not a duplicate.
 A permanent collision/conflict becomes `failed` and leaves the pending page. A
 retryable error stays `pending` with durable `deferred_at`, so it sorts behind
 newer work. Permanent failures do not consume the batch, so 50 failed intents
-cannot block a normal receipt. Each attempt advances a deferred row's
-`deferred_at`, moving it behind untried rows, so a page of Matrix/transient
-items rotates instead of pinning the first 50 forever.
+cannot block a normal receipt. Migration `inbox/0004` adds `attempt_seq` and a
+single-writer sequence; each pending attempt takes the next number (NULL sorts
+first), so a Matrix/transient page rotates even at equal timestamps or after a
+restart, instead of pinning the first 50 forever.
 
 SQLite owns intents and `simple_inbox`; files store bodies. A file-only install
 has no intents and the drain is a no-op.
@@ -84,9 +84,9 @@ the sender already read is skipped.
 - `tests/butler_read_receipt_delivery.lua` (fast, isolated): A→B one correlated
   receipt/notice; batch; duplicate/restart; crash before the status mark (retry
   marks and re-asks the notifier); crash before the notice (retry notifies);
-  fixed body across an alias change; body-only partial crash; collision/conflict
-  terminally failed; 50 failures then a normal receipt in the same drain;
-  forwarded-mail reader identity; exclusions; Matrix pending; file-only no-op.
+  fixed body; collision/conflict failed; 50 failures then a normal receipt;
+  50 deferred then a recovered item next tick; 120 deferred over three ticks;
+  forwarded reader; exclusions; Matrix pending; file-only no-op.
 - `tests/lua/butler_inbox_caller_identity_test.lua`: real notice path with a
   renamed then reused alias (correct target, no wrong `--done`), and a real
   forwarded mail whose receipt names the actual reader.

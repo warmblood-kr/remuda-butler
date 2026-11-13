@@ -158,13 +158,15 @@ local function fake_db()
       end
       return 0
     end
-    if sql:find("deferred_at IS NOT NULL", 1, true) then
+    if sql:find("UPDATE receipt_attempt_seq", 1, true) then
+      db.attempt_seq = (db.attempt_seq or 0) + 1
+      return 1
+    end
+    if sql:find("SET attempt_seq", 1, true) then
       local recipient, id = params[1], params[2]
       local intent = db.intents[key(recipient, id)]
-      if intent and intent.status == "pending" and intent.deferred_at ~= nil then
-        db.attempt_clock = (db.attempt_clock or 0) + 1
-        intent.deferred_at = string.format("2026-11-13T06:%02d:%02dZ",
-          math.floor(db.attempt_clock / 60), db.attempt_clock % 60)
+      if intent and intent.status == "pending" then
+        intent.attempt_seq = db.attempt_seq
         return 1
       end
       return 0
@@ -189,11 +191,12 @@ local function fake_db()
       for _, intent in pairs(db.intents) do
         if intent.status == "pending" then
           local item = state[intent.recipient]
-            or { recipient = intent.recipient, live = false, oldest = nil }
+            or { recipient = intent.recipient, live = false, seq = -1 }
           if intent.deferred_at == nil then
             item.live = true
-          elseif item.oldest == nil or intent.deferred_at < item.oldest then
-            item.oldest = intent.deferred_at
+          else
+            local seq = intent.attempt_seq or -1
+            if seq < item.seq then item.seq = seq end
           end
           state[intent.recipient] = item
         end
@@ -202,9 +205,7 @@ local function fake_db()
       for _, item in pairs(state) do out[#out + 1] = item end
       table.sort(out, function(a, b)
         if a.live ~= b.live then return a.live end
-        if not a.live and a.oldest ~= b.oldest then
-          return (a.oldest or "") < (b.oldest or "")
-        end
+        if not a.live and a.seq ~= b.seq then return a.seq < b.seq end
         return a.recipient < b.recipient
       end)
       for index, item in ipairs(out) do out[index] = { recipient = item.recipient } end
@@ -224,13 +225,13 @@ local function fake_db()
           out[#out + 1] = { recipient = intent.recipient, message_id = intent.message_id,
             read_at = intent.read_at, receipt_id = intent.receipt_id,
             receipt_body = intent.receipt_body, envelope = envelope,
-            deferred = intent.deferred_at and 1 or 0, deferred_at = intent.deferred_at }
+            deferred = intent.deferred_at and 1 or 0, attempt_seq = intent.attempt_seq }
         end
       end
       table.sort(out, function(a, b)
         if a.deferred ~= b.deferred then return a.deferred < b.deferred end
-        if (a.deferred_at or "") ~= (b.deferred_at or "") then
-          return (a.deferred_at or "") < (b.deferred_at or "")
+        if (a.attempt_seq or -1) ~= (b.attempt_seq or -1) then
+          return (a.attempt_seq or -1) < (b.attempt_seq or -1)
         end
         if a.read_at ~= b.read_at then return a.read_at < b.read_at end
         return a.message_id < b.message_id
@@ -360,6 +361,7 @@ local E = { host = "local", id = "ee", alias = "ee", session = "ee", kind = "age
 local F = { host = "local", id = "ff", alias = "ff", session = "ff", kind = "agent", leader = "aa" }
 local G = { host = "local", id = "gg", alias = "gg", session = "gg", kind = "agent", leader = "aa" }
 local I = { host = "local", id = "ii", alias = "ii", session = "ii", kind = "agent", leader = "aa" }
+local J = { host = "local", id = "jj", alias = "jj", session = "jj", kind = "agent", leader = "aa" }
 local H = { host = "local", id = "hh", alias = "hh", session = "hh", kind = "agent", leader = "aa" }
 local SCHEDULE = { host = "local", id = "", alias = "schedule", session = "schedule" }
 local OUTSIDE = { host = "local", id = "", alias = "outside", session = "outside" }
@@ -695,12 +697,32 @@ local first_page = receipts.drain()
 assert(first_page.deferred == 50, "the first drain must retry one bounded page")
 assert(recovered_intent.status == "pending",
   "a recovered item behind the first deferred page must not be skipped")
+-- A daemon restart must not reset the rotation.
+restart()
 local second_page = receipts.drain()
 assert(second_page.delivered == 1, "the second drain did not rotate to the recovered item")
 assert(recovered_intent.status == "delivered",
   "the second drain must rotate to the recovered deferred item")
 assert(#db:rows_for(bhex("aa")) == rows_before_rotation + 1,
   "the recovered item produced the wrong number of receipts")
+
+-- 13. More than 100 deferred items: three bounded ticks must attempt all of
+--     them, with no wall-clock tie able to pin a page.
+restart()
+local stress = {}
+for index = 1, 120 do
+  stress[index] = assert(mail.queue(MATRIX, J, "stress rotation " .. index,
+    "Stress rotation " .. index, nil, nil, { sender = "@human:example.org",
+      room_id = "!room", event_id = "$stress-" .. index }), "stress message was not queued")
+end
+assert(mail.inbox("jj", { reader_id = "jj" }):find("stress rotation 120", 1, true),
+  "J did not read the stress batch")
+for _ = 1, 3 do receipts.drain() end
+for index = 1, 120 do
+  local intent = db:intent(bhex("jj"), stress[index].id)
+  assert(intent and intent.attempt_seq ~= nil,
+    "deferred item " .. index .. " was starved after three ticks")
+end
 
 assert(run("rm -rf '" .. root .. "'"))
 print("ok")

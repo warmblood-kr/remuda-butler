@@ -136,7 +136,7 @@ function M.pending_recipients(db)
     WHERE status = 'pending'
     GROUP BY recipient
     ORDER BY MIN(CASE WHEN deferred_at IS NULL THEN 0 ELSE 1 END),
-      MIN(COALESCE(deferred_at, '')), recipient]])
+      MIN(CASE WHEN attempt_seq IS NULL THEN -1 ELSE attempt_seq END), recipient]])
 end
 
 function M.pending_intent_details(db, recipient)
@@ -147,8 +147,9 @@ function M.pending_intent_details(db, recipient)
     LEFT JOIN simple_inbox s
       ON s.recipient = i.recipient AND s.message_id = i.message_id
     WHERE i.recipient = ? AND i.status = 'pending'
-    ORDER BY (i.deferred_at IS NOT NULL), COALESCE(i.deferred_at, ''), i.read_at,
-      i.message_id]], {recipient})
+    ORDER BY (i.deferred_at IS NOT NULL),
+      CASE WHEN i.attempt_seq IS NULL THEN -1 ELSE i.attempt_seq END,
+      i.read_at, i.message_id]], {recipient})
 end
 
 -- Claim the receipt identity and body exactly once. Each UPDATE only fills an
@@ -184,14 +185,18 @@ function M.defer_intent(db, recipient, message_id)
     {recipient, message_id})
 end
 
--- Deferred rows rotate. Recording the attempt time moves a tried row behind
--- every deferred row that has not been tried yet, so more than one page of
--- Matrix/transient items cannot pin the scan to the same first 50 forever. A
--- local intent is untouched (its `deferred_at` stays NULL).
+-- Pending rows rotate by a persisted sequence, not by wall-clock time, so
+-- equal timestamps, a restart or more than 100 rows cannot pin the first page.
+-- NULL is "not tried yet" and sorts first; each attempt takes the next number.
+-- This runs before eligibility, so a row deferred by this same attempt is
+-- still moved behind the unattempted rows.
 function M.note_intent_attempt(db, recipient, message_id)
+  local bumped, bump_err = db:exec(
+    "UPDATE receipt_attempt_seq SET value = value + 1 WHERE id = 1")
+  if bumped == nil then return nil, bump_err end
   return db:exec([[UPDATE read_receipt_intents
-    SET deferred_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
-    WHERE recipient = ? AND message_id = ? AND status = 'pending' AND deferred_at IS NOT NULL]],
+    SET attempt_seq = (SELECT value FROM receipt_attempt_seq WHERE id = 1)
+    WHERE recipient = ? AND message_id = ? AND status = 'pending']],
     {recipient, message_id})
 end
 
