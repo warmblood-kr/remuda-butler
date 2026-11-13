@@ -130,6 +130,15 @@ local function fake_db()
       end
       return 1
     end
+    if sql:find("SET status = 'failed'", 1, true) then
+      local recipient, id = params[1], params[2]
+      local intent = db.intents[key(recipient, id)]
+      if intent and intent.status == "pending" then
+        intent.status = "failed"
+        return 1
+      end
+      return 0
+    end
     if sql:find("UPDATE read_receipt_intents SET status", 1, true) then
       local status, recipient, id = params[1], params[2], params[3]
       local intent = db.intents[key(recipient, id)]
@@ -524,7 +533,7 @@ assert(squatter, "collision setup failed")
 local before_collision = #db:rows_for(bhex("aa"))
 local collision = receipts.drain()
 assert(collision.errors == 1, "collision was not reported as an error")
-assert(db:intent(bhex("dd"), collision_message.id).status == "pending", "collision marked the intent")
+assert(db:intent(bhex("dd"), collision_message.id).status == "failed", "collision was not terminally failed")
 assert(#db:rows_for(bhex("aa")) == before_collision, "collision added mail")
 local squatter_row
 for _, row in ipairs(db:rows_for(bhex("aa"))) do
@@ -547,8 +556,8 @@ assert(wrong, "content-conflict setup failed")
 local before_conflict = #db:rows_for(bhex("aa"))
 local conflicted = receipts.drain()
 assert(conflicted.errors > 0, "content conflict was not reported")
-assert(db:intent(bhex("ff"), conflict_message.id).status == "pending",
-  "content conflict marked the intent")
+assert(db:intent(bhex("ff"), conflict_message.id).status == "failed",
+  "content conflict was not terminally failed")
 assert(#db:rows_for(bhex("aa")) == before_conflict, "content conflict added mail")
 assert(#notices == 7, "content conflict notified")
 
@@ -579,6 +588,63 @@ remuda._butler_read_receipts_config.simple = nil
 local unavailable = receipts.drain()
 assert(unavailable.available == false, "file-only fallback claimed availability")
 assert(#db:rows_for(bhex("aa")) == 9, "file-only fallback delivered a receipt")
+
+-- 10. Fairness: 50 terminally failing pending intents must not block a later
+--     normal receipt. Permanent failures are marked failed and do not consume
+--     the delivery budget, so the normal item is delivered in the same drain.
+remuda._butler_read_receipts_config.simple = { db = db, store = store }
+local real_mail = mail
+restart()
+local many = {}
+for index = 1, 50 do
+  many[index] = assert(mail.queue(A, B, "failing body " .. index, "Failing " .. index))
+end
+assert(mail.inbox("bb", { reader_id = "bb" }):find("failing body 50", 1, true), "B did not read the failing batch")
+local normal_message = assert(mail.queue(A, C, "normal after failures", "Normal after failures"))
+assert(mail.inbox("cc", { reader_id = "cc" }):find("normal after failures", 1, true), "C did not read the normal message")
+local rows_before = #db:rows_for(bhex("aa"))
+remuda._butler_read_receipts_config.mail = { queue_receipt = function(from, to, text, subject, receipt_of, stable_id, created_at)
+  if from and from.id == "bb" and to and to.id == "aa" then
+    return nil, "synthetic permanent collision", nil, nil, "collision"
+  end
+  return real_mail.queue_receipt(from, to, text, subject, receipt_of, stable_id, created_at)
+end }
+local fair = receipts.drain()
+remuda._butler_read_receipts_config.mail = real_mail
+assert(fair.delivered == 1, "normal receipt after 50 failures was not delivered")
+assert(fair.failed == 50 and fair.errors == 50, "permanent failures were not counted or failed")
+for index = 1, 50 do
+  assert(db:intent(bhex("bb"), many[index].id).status == "failed",
+    "permanent failure " .. index .. " was not terminally failed")
+end
+assert(db:intent(bhex("cc"), normal_message.id).status == "delivered",
+  "normal intent after failures was not delivered")
+assert(#db:rows_for(bhex("aa")) == rows_before + 1, "fairness drain delivered the wrong number of receipts")
+assert(#notices == 8, "fairness drain notified the wrong number of times")
+
+-- 11. The reader identity comes from the canonical id, not the original
+--     envelope's to alias (a forwarded mail names the actual reader).
+remuda._butler_read_receipts_config.reader_address = function(id)
+  if id == "aa" then return A elseif id == "bb" then return B elseif id == "cc" then return C end
+  return nil
+end
+local forwarded = assert(mail.queue(A, B, "forward source", "Forward source"))
+assert(forwarded, "forward source was not queued")
+local forward_copy = assert(mail.forward(B, forwarded.id, C, "forward note", true))
+assert(forward_copy, "forward copy was not delivered")
+restart()
+local fwd_text = mail.inbox("cc", { reader_id = "cc" })
+assert(fwd_text:find("forward source", 1, true), "C did not read the forward")
+local forward_drain = receipts.drain()
+assert(forward_drain.delivered == 1, "forwarded-mail receipt was not delivered")
+local forward_intent = db:intent(bhex("cc"), forwarded.id)
+assert(forward_intent and forward_intent.status == "delivered", "forward intent was not delivered")
+local forward_receipt = bus.messages[forward_intent.receipt_id]
+assert(forward_receipt.from.id == "cc" and forward_receipt.from.alias == "cc",
+  "forwarded-mail receipt named the envelope to alias instead of the reader")
+assert(bus.objects["object-" .. forward_intent.receipt_id].content:find("cc fetched", 1, true),
+  "forwarded-mail receipt body named the wrong reader")
+remuda._butler_read_receipts_config.reader_address = nil
 
 assert(run("rm -rf '" .. root .. "'"))
 print("ok")

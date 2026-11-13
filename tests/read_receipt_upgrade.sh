@@ -151,6 +151,21 @@ boot_butler
   assert(cross:find("body E", 1, true), "cross-member read missed the inbox")
   local cc = assert(db:query("SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { "6363" }))
   assert(#cc == 0, "cross-member read created an agent receipt intent")
+
+  -- Direct store callers without a receipt ULID must persist NULL, not the
+  -- empty string, or the partial unique index collides on the second row.
+  local store = assert(remuda._butler_simple_inbox.store)
+  assert(store.deliver(db, "6767", "G1", "{}", "body G1", "{}", ""))
+  assert(store.deliver(db, "6767", "G2", "{}", "body G2", "{}", ""))
+  assert(db:exec("BEGIN IMMEDIATE"))
+  assert(store.mark_read(db, "6767", "G1", true, nil))
+  assert(store.mark_read(db, "6767", "G2", true, nil))
+  assert(db:exec("COMMIT"))
+  local nulls = assert(db:query(
+    "SELECT receipt_id IS NULL AS is_null FROM read_receipt_intents WHERE recipient = ? ORDER BY message_id",
+    { "6767" }))
+  assert(#nulls == 2 and tonumber(nulls[1].is_null) == 1 and tonumber(nulls[2].is_null) == 1,
+    "unidentified intents must store NULL receipt_id")
 ' >/dev/null
 
 # A second restart must keep exactly the agent intents and skip the already-read

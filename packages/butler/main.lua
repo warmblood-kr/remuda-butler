@@ -557,6 +557,19 @@ local json_field = identity.json_field
 local register_identity = identity.register_identity
 local resolve = identity.resolve
 local mail_address = identity.mail_address
+-- Resolve a local sender/reader by durable ULID, not by a possibly reused
+-- display alias. A live session under a new alias wins; an ended session
+-- keeps its last recorded alias. Unknown ids fail closed.
+local function mail_address_by_id(id)
+  if type(id) ~= "string" or id == "" then return nil end
+  local record = bus.identity_ids and bus.identity_ids[id]
+  if not record then return nil end
+  local live = bus.agents[record.alias]
+  if live and live.id == id then return mail_address(record.alias) end
+  return { host = "local", id = id, alias = record.alias or id,
+    session = record.alias or id, kind = record.kind or "",
+    leader = record.leader_id or "" }
+end
 local mail_id = identity.mail_id
 local next_token = identity.next_token
 local caller_name = identity.caller_name
@@ -661,15 +674,20 @@ end
 -- intents, and this drains them through the local mailbox. The file-only
 -- fallback stays explicit: without SQLite intents there is nothing to drain.
 -- The notice goes through the same safe mail-notice policy as ordinary mail;
--- the module calls it only for a newly accepted receipt, so a retry after
--- acceptance cannot type it twice. Matrix intents are not drained here.
+-- the module asks on every durable acceptance, and the policy's journal/ID
+-- dedupe prevents a second typed notice. Matrix intents are not drained here.
 remuda._butler_read_receipts_config = {
   simple = simple,
   mail = mail,
+  reader_address = mail_address_by_id,
   notify = function(message, recipient)
     local notice = { id = message.id, from = message.from, to = { recipient },
       kind = "read_receipt", receipt_of = message.receipt_of }
-    notify_mail_delivery(notice, message, recipient.alias,
+    -- Resolve by the durable ULID. Passing the stored display alias here would
+    -- let a renamed/reused alias redirect the notice and clear the wrong
+    -- member's --done mark; notify_mail_delivery fails closed when the id is
+    -- no longer live under that alias.
+    notify_mail_delivery(notice, message, recipient.id,
       "read receipt for " .. tostring(message.receipt_of))
   end,
 }

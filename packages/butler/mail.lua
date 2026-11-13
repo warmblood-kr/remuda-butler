@@ -491,15 +491,22 @@ local function stable_receipt_matches(existing, receipt_of, from, to, subject, c
     and existing.matrix == nil
 end
 
+-- Failure shape for the stable-receipt path: the fifth value classifies the
+-- error so the drain can distinguish a permanent collision from a retryable
+-- storage problem. Ordinary queue callers ignore it.
+local function queue_fail(err, code)
+  return nil, err, nil, nil, code
+end
+
 local function queue(from, to, text, subject, in_reply_to, references, matrix, receipt_of, stable)
   local stable_id = stable and stable.id
   from, to = address(from), address(to)
-  if to.id == "" then return nil, "recipient has no Butler ULID" end
+  if to.id == "" then return queue_fail("recipient has no Butler ULID", "recipient") end
   if from.alias == "" then from.alias, from.session = from.session, from.session end
   if stable and stable_id ~= nil then
     if type(stable_id) ~= "string" or stable_id == "" or #stable_id > 200
         or stable_id:find("[/\\]") or stable_id:find("..", 1, true) then
-      return nil, "invalid stable receipt message id"
+      return queue_fail("invalid stable receipt message id", "invalid_id")
     end
   end
   local recipient_id = to.id
@@ -540,40 +547,40 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix, r
   if existing then
     if not stable_receipt_matches(existing, receipt_of, from, to, message.subject, message.created_at) then
       diagnostic("error", "receipt_id_collision", id)
-      return nil, "message " .. id .. " already exists and is not this receipt"
+      return queue_fail("message " .. id .. " already exists and is not this receipt", "collision")
     end
     message = existing
     object = bus.objects[existing.body.object_id]
     object_id = existing.body.object_id
     if not object then
       diagnostic("error", "receipt_body_missing", id)
-      return nil, "message " .. id .. " exists but its body is unreadable"
+      return queue_fail("message " .. id .. " exists but its body is unreadable", "body_missing")
     end
     if object.content ~= body then
       diagnostic("error", "receipt_body_conflict", id)
-      return nil, "message " .. id .. " exists with different content"
+      return queue_fail("message " .. id .. " exists with different content", "content_conflict")
     end
   end
   local disk = paths(recipient_id)
   if stable_id and not disk then
-    return nil, "Butler mail storage is unavailable for a stable receipt"
+    return queue_fail("Butler mail storage is unavailable for a stable receipt", "storage")
   end
   local already = false
   if stable_id then
     local checked, value = pcall(delivered, recipient_id, id)
     if not checked then
       diagnostic("error", "receipt_delivery_state", id)
-      return nil, "cannot read Butler mail delivery state: " .. tostring(value)
+      return queue_fail("cannot read Butler mail delivery state: " .. tostring(value), "delivery_state")
     end
     already = value == true
   end
   if already and not existing then
     diagnostic("error", "receipt_envelope_missing", id)
-    return nil, "message " .. id .. " is already delivered but its envelope is unreadable"
+    return queue_fail("message " .. id .. " is already delivered but its envelope is unreadable", "envelope_missing")
   end
   if disk and not already then
     local ready, ready_err = prepare_storage()
-    if not ready then diagnostic("error", "storage_prepare", id); return nil, "cannot prepare Butler mail storage: " .. tostring(ready_err) end
+    if not ready then diagnostic("error", "storage_prepare", id); return queue_fail("cannot prepare Butler mail storage: " .. tostring(ready_err), "storage") end
     if not existing then
       if stable_id then
         -- A crash can leave one of the two files behind. Identical content is
@@ -582,23 +589,23 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix, r
         if prior_body ~= nil then
           if prior_body ~= body then
             diagnostic("error", "receipt_body_collision", id)
-            return nil, "message " .. id .. " has a different stored body"
+            return queue_fail("message " .. id .. " has a different stored body", "body_conflict")
           end
         else
           local wrote, err = write_atomic(disk.objects .. object_id, body, true)
-          if not wrote then diagnostic("error", "body_write", id); return nil, "cannot write Butler mail body: " .. tostring(err) end
+          if not wrote then diagnostic("error", "body_write", id); return queue_fail("cannot write Butler mail body: " .. tostring(err), "body_write") end
         end
         if read_text(disk.messages .. id .. ".json") ~= nil then
           diagnostic("error", "receipt_envelope_unreadable", id)
-          return nil, "message " .. id .. " has an unreadable stored envelope"
+          return queue_fail("message " .. id .. " has an unreadable stored envelope", "envelope_unreadable")
         end
         local wrote, err = write_atomic(disk.messages .. id .. ".json", envelope_json(message, object), true)
-        if not wrote then diagnostic("error", "envelope_write", id); return nil, "cannot write Butler mail envelope: " .. tostring(err) end
+        if not wrote then diagnostic("error", "envelope_write", id); return queue_fail("cannot write Butler mail envelope: " .. tostring(err), "envelope_write") end
       else
         local wrote, err = write_atomic(disk.objects .. object_id, body, true)
-        if not wrote then diagnostic("error", "body_write", id); return nil, "cannot write Butler mail body: " .. tostring(err) end
+        if not wrote then diagnostic("error", "body_write", id); return queue_fail("cannot write Butler mail body: " .. tostring(err), "body_write") end
         wrote, err = write_atomic(disk.messages .. id .. ".json", envelope_json(message, object), true)
-        if not wrote then diagnostic("error", "envelope_write", id); return nil, "cannot write Butler mail envelope: " .. tostring(err) end
+        if not wrote then diagnostic("error", "envelope_write", id); return queue_fail("cannot write Butler mail envelope: " .. tostring(err), "envelope_write") end
       end
     end
     local wrote, err
@@ -609,7 +616,7 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix, r
     else
       wrote, err = append(disk.inbox, '{"message_id":' .. config.json_quote(id) .. '}\n')
     end
-    if not wrote then diagnostic("error", "inbox_append", id); return nil, "cannot deliver Butler mail: " .. tostring(err) end
+    if not wrote then diagnostic("error", "inbox_append", id); return queue_fail("cannot deliver Butler mail: " .. tostring(err), "inbox_append") end
     if not config.simple then index_delivery(recipient_id, id) end
   end
   if not already then
@@ -709,7 +716,7 @@ local function deliver_forward(message)
   local disk = paths(target.id)
   if disk then
     local ready, ready_err = prepare_storage()
-    if not ready then return nil, "cannot prepare Butler mail storage: " .. tostring(ready_err) end
+    if not ready then return queue_fail("cannot prepare Butler mail storage: " .. tostring(ready_err), "storage") end
     local note_json = ""
     if note and note ~= "" then
       local note_id = "object-" .. message_id()

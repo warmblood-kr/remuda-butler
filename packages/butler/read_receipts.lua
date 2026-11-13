@@ -9,13 +9,16 @@
 -- Crash safety rests on the receipt ULID that was committed with the intent
 -- plus the completion status. The ID is reused on every scan, so a crash after
 -- local acceptance is a verified retry, not a duplicate. An unrelated message
--- already using that ID is a collision: the intent stays pending and is never
--- reported as a success.
+-- already using that ID is a collision: it is terminally failed and surfaced,
+-- never reported as a success, so it cannot starve later receipts.
 local config = assert(remuda._butler_read_receipts_config or {})
 local M = {}
 
--- Bound one tick so a large backlog cannot stretch the 30 s schedule.
+-- Bound one tick so a large backlog cannot stretch the 30 s schedule. Permanent
+-- failures are additionally capped but do not consume the delivery budget, so
+-- a page of failed intents cannot starve a later normal receipt.
 local MAX_PER_TICK = 50
+local MAX_FAILURES_PER_TICK = 100
 
 local function report(outcome, reason, correlation)
   local diagnostics = config.diagnostics or remuda._butler_diagnostics
@@ -48,6 +51,13 @@ end
 -- only supplies display fields, so a legacy alias row cannot spoof the reader
 -- identity.
 local function reader_address(reader_id, envelope)
+  -- Prefer the live/durable identity for the canonical reader id. A forwarded
+  -- mail or an alias rename must not make the receipt name the original
+  -- envelope's `to` alias instead of the member that actually read it.
+  if type(config.reader_address) == "function" then
+    local ok, resolved = pcall(config.reader_address, reader_id)
+    if ok and type(resolved) == "table" and resolved.id == reader_id then return resolved end
+  end
   local to = type(envelope.to) == "table" and envelope.to[1] or nil
   local alias = type(to) == "table" and (to.alias or to.session) or nil
   local session = type(to) == "table" and (to.session or to.alias) or nil
@@ -128,16 +138,26 @@ local function stable_receipt(store, db, intent, candidate_body)
   return claimed_id, claimed_body
 end
 
--- Deliver one intent. Returns an outcome string and an optional reason.
+-- Errors that cannot heal by retrying: an identity/content collision or an
+-- unreadable stored receipt. They are terminally `failed` so they do not
+-- occupy the pending page. Storage/DB errors stay pending and sort last.
+local PERMANENT_ERRORS = {
+  collision = true, content_conflict = true, body_conflict = true,
+  body_missing = true, envelope_missing = true, envelope_unreadable = true,
+  invalid_id = true,
+}
+
+-- Deliver one intent. Returns an outcome, an optional reason, and whether an
+-- error is permanent.
 function M.deliver_intent(intent)
   local simple = config.simple
   local mail = config.mail
-  if not (simple and simple.db and simple.store) then return "unavailable", "sqlite_inactive" end
-  if not (mail and type(mail.queue_receipt) == "function") then return "error", "mail_unavailable" end
+  if not (simple and simple.db and simple.store) then return "unavailable", "sqlite_inactive", false end
+  if not (mail and type(mail.queue_receipt) == "function") then return "error", "mail_unavailable", false end
   local reader_id = unhex(intent.recipient)
   if not reader_id then
     mark(simple.store, simple.db, intent, "skipped")
-    return "skipped", "invalid_recipient"
+    return "skipped", "invalid_recipient", false
   end
   local envelope = decode_envelope(intent.envelope)
   local verdict, detail = classify(reader_id, envelope)
@@ -146,30 +166,30 @@ function M.deliver_intent(intent)
     -- backlog cannot keep taking this tick's budget ahead of local work.
     local deferred, defer_err = simple.store.defer_intent(simple.db, intent.recipient, intent.message_id)
     if deferred == nil then report("error", "intent_defer", defer_err) end
-    return "deferred", detail
+    return "deferred", detail, false
   end
   if verdict == "skip" then
     local marked, mark_err = mark(simple.store, simple.db, intent, "skipped")
-    if not marked then return "error", mark_err end
-    return "skipped", detail
+    if not marked then return "error", mark_err, false end
+    return "skipped", detail, false
   end
   local sender = detail
   local reader = reader_address(reader_id, envelope)
   local candidate_body = "Read receipt: " .. tostring(reader.alias)
     .. " fetched message " .. tostring(intent.message_id) .. " from the Butler inbox."
   local rid, text, rid_err = stable_receipt(simple.store, simple.db, intent, candidate_body)
-  if not rid then return "error", rid_err end
+  if not rid then return "error", rid_err, false end
   -- `read_at` is committed with the intent, so a retry produces the same
   -- envelope bytes even if the retry happens on a later date.
-  local called, message, why, _to, already = pcall(mail.queue_receipt, reader, sender, text,
+  local called, message, why, _to, already, code = pcall(mail.queue_receipt, reader, sender, text,
     "Read receipt", intent.message_id, rid, intent.read_at)
   if not called then
     report("error", "receipt_delivery", tostring(message))
-    return "error", tostring(message)
+    return "error", tostring(message), false
   end
   if not message then
     report("error", "receipt_delivery", intent.message_id)
-    return "error", why
+    return "error", why, PERMANENT_ERRORS[code] == true
   end
   -- Ask the existing notice policy on every durable acceptance, including an
   -- accepted-but-unmarked retry. That policy dedupes by message ID and skips
@@ -181,41 +201,51 @@ function M.deliver_intent(intent)
     if not notified then report("error", "receipt_notice", tostring(notice_err)) end
   end
   local marked, mark_err = mark(simple.store, simple.db, intent, "delivered")
-  if not marked then return "error", mark_err end
-  return "delivered", already and "already_accepted" or nil
+  if not marked then return "error", mark_err, false end
+  return "delivered", already and "already_accepted" or nil, false
 end
 
 function M.drain()
   local simple = config.simple
   if not (simple and simple.db and simple.store) then
-    return { available = false, delivered = 0, skipped = 0, deferred = 0, errors = 0 }
+    return { available = false, delivered = 0, skipped = 0, deferred = 0, failed = 0, errors = 0 }
   end
   local store, db = simple.store, simple.db
   local recipients, err = store.pending_recipients(db)
   if recipients == nil then
     report("error", "pending_recipients", err)
-    return { available = true, delivered = 0, skipped = 0, deferred = 0, errors = 1 }
+    return { available = true, delivered = 0, skipped = 0, deferred = 0, failed = 0, errors = 1 }
   end
-  local counts = { available = true, delivered = 0, skipped = 0, deferred = 0, errors = 0 }
-  local processed = 0
+  local counts = { available = true, delivered = 0, skipped = 0, deferred = 0, failed = 0, errors = 0 }
+  local processed, failures = 0, 0
+  local function budget_done()
+    return processed >= MAX_PER_TICK or failures >= MAX_FAILURES_PER_TICK
+  end
   for _, row in ipairs(recipients) do
-    if processed >= MAX_PER_TICK then break end
+    if budget_done() then break end
     local intents, detail_err = store.pending_intent_details(db, row.recipient)
     if intents == nil then
       report("error", "pending_intent_details", detail_err)
       counts.errors = counts.errors + 1
     else
       for _, intent in ipairs(intents) do
-        if processed >= MAX_PER_TICK then break end
-        processed = processed + 1
-        local outcome, reason = M.deliver_intent(intent)
+        if budget_done() then break end
+        local outcome, reason, permanent = M.deliver_intent(intent)
         if outcome == "error" then
           counts.errors = counts.errors + 1
-        elseif counts[outcome] then
-          counts[outcome] = counts[outcome] + 1
-        end
-        if outcome == "error" then
+          if permanent then counts.failed = counts.failed + 1 end
+          -- A permanent collision is terminally failed; a retryable error is
+          -- durably deferred so newer receipts stay ahead of it.
+          local recorded, record_err = store.record_intent_failure(db, intent.recipient,
+            intent.message_id, permanent)
+          if recorded == nil then
+            report("error", "intent_failure_record", record_err)
+          end
+          if permanent then failures = failures + 1 else processed = processed + 1 end
           report("error", "intent_delivery", reason or intent.message_id)
+        else
+          processed = processed + 1
+          if counts[outcome] then counts[outcome] = counts[outcome] + 1 end
         end
       end
     end

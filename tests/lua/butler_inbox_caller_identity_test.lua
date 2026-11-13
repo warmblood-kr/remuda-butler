@@ -214,3 +214,94 @@ T.test("legacy_one_argument_inbox_reads_without_claiming_an_agent_read", functio
   ]=], carol_id))
   T.eq(intents, "0", "legacy one-argument read claimed an agent receipt")
 end)
+
+-- A forwarded mail's stored envelope still names the original `to` alias. The
+-- receipt must name the member that actually read the copy, resolved by the
+-- durable reader ULID.
+T.test("read_receipt_for_forwarded_mail_names_the_actual_reader", function()
+  local ids = T.eval([[
+    local bus = remuda._butler_bus
+    local sent = assert(remuda._butler_send("butler", "bob", "forwarded receipt source"))
+    local original = assert(sent:match("^queued (%S+)"))
+    local forwarded = assert(remuda._butler_forward("operator", original, "carol", "forward note"))
+    assert(forwarded, "forward failed")
+    local text = assert(remuda._butler_inbox("carol", bus.agents.carol.id))
+    assert(text:find("forwarded receipt source", 1, true), "carol did not read the forwarded mail")
+    return original .. "\n" .. bus.agents.butler.id .. "\n" .. bus.agents.carol.id
+  ]])
+  local original, butler_id, carol_id = ids:match("([^\n]+)\n([^\n]+)\n([^\n]+)")
+  assert(original and butler_id and carol_id, "forwarded receipt setup failed: " .. tostring(ids))
+  local found = T.eval(string.format([=[
+    local simple = assert(remuda._butler_simple_inbox)
+    local function hex(value)
+      return (value:gsub(".", function(byte) return string.format("%%02x", string.byte(byte)) end))
+    end
+    local rows = assert(simple.db:query(
+      "SELECT message_id, envelope FROM simple_inbox WHERE recipient = ? ORDER BY seq", { hex(%q) }))
+    for _, row in ipairs(rows) do
+      if row.envelope:find('"receipt_of":"' .. %q .. '"', 1, true) then
+        local from = row.envelope:match('"from":(%%b{})') or ""
+        return from
+      end
+    end
+    return "missing"
+  ]=], butler_id, original))
+  T.ok(found ~= "missing", "forwarded-mail receipt was not delivered to the original sender")
+  T.ok(found:find('"id":"' .. carol_id .. '"', 1, true), "receipt does not use the reader ULID: " .. found)
+  T.ok(found:find('"alias":"carol"', 1, true), "receipt names the envelope to alias, not the reader: " .. found)
+  T.ok(not found:find('"alias":"bob"', 1, true), "receipt named the original to alias: " .. found)
+end)
+
+-- A renamed/reused display alias must not redirect a receipt notice. The
+-- adapter validates by the durable recipient ULID; a stale alias is ignored.
+T.test("read_receipt_notice_is_keyed_by_durable_id_not_reused_alias", function()
+  local out = T.eval([=[
+    local bus = remuda._butler_bus
+    local mail = remuda._butler_mail
+    local adapter = assert(remuda._butler_read_receipts_config.notify)
+    local alice = assert(bus.agents.alice)
+    local alice_id = alice.id
+    local bob_id = assert(bus.agents.bob).id
+    local function address(id, alias)
+      return { host = "local", id = id, alias = alias, session = alias, kind = "codex", leader = "" }
+    end
+    local sender = address(alice_id, "alice")
+    local reader = address(bob_id, "bob")
+    local function receipt(text)
+      return assert(mail.queue(reader, sender, text, "Read receipt"))
+    end
+    remuda._butler_done = remuda._butler_done or {}
+    remuda._butler_done.alice = { id = alice_id }
+    local first = receipt("Read receipt: bob fetched one")
+    adapter(first, sender)
+    local seen_first = bus.notice_seen[alice_id] and bus.notice_seen[alice_id][first.id] == true
+    local done_first = remuda._butler_done.alice == nil
+
+    bus.agents.alice = nil
+    alice.alias, alice.session_name = "alice-new", "alice-new"
+    bus.agents["alice-new"] = alice
+    bus.identity_ids[alice_id].alias = "alice-new"
+    local other_id = "01ZZZZZZZZZZZZZZZZZZZZZZZZ"
+    bus.agents.alice = { id = other_id, alias = "alice", session_name = "alice", kind = "codex" }
+    remuda._butler_done["alice-new"] = { id = alice_id }
+    remuda._butler_done.alice = { id = other_id }
+    local stale = address(alice_id, "alice")
+    local second = receipt("Read receipt: bob fetched two")
+    adapter(second, stale)
+    local seen_renamed = bus.notice_seen[alice_id] and bus.notice_seen[alice_id][second.id] == true
+    local other_seen = bus.notice_seen[other_id]
+    local done_renamed = remuda._butler_done["alice-new"] == nil
+    local done_other = remuda._butler_done.alice ~= nil
+
+    bus.agents["alice-new"] = nil
+    local third = receipt("Read receipt: bob fetched three")
+    adapter(third, stale)
+    local ended_seen = bus.notice_seen[alice_id] and bus.notice_seen[alice_id][third.id] == true
+    local done_other_after = remuda._butler_done.alice ~= nil
+    return table.concat({ tostring(seen_first), tostring(done_first), tostring(seen_renamed),
+      tostring(other_seen == nil), tostring(done_renamed), tostring(done_other),
+      tostring(not ended_seen), tostring(done_other_after) }, "|")
+  ]=])
+  T.eq(out, "true|true|true|true|true|true|true|true",
+    "receipt notice must resolve the current target by durable id: " .. tostring(out))
+end)
