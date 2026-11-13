@@ -41,12 +41,14 @@ remuda.session = {
 
 dofile("packages/butler/sessions.lua")
 
-local function agent(name, kind, instance, parent, model)
+local function agent(name, kind, instance, parent, model, id)
   local row = {
+    id = id or ("id-" .. name),
     alias = name, session_name = name, kind = kind, parent = parent,
     instance_id = instance, instance_binding = instance and 1 or nil,
     children = {}, model = model,
   }
+  row.parent_id = parent and bus.agents[parent] and bus.agents[parent].id or nil
   bus.agents[name] = row
   if instance then live[name] = instance end
   if parent and bus.agents[parent] then
@@ -96,6 +98,7 @@ check(last_call("unbound"), nil, "an unbound agent has no instance to write")
 -- A parent that is still named but has no bound instance also omits the leader.
 agent("unbound-leader", "claude", nil, nil)
 bus.agents.worker.parent = "unbound-leader"
+bus.agents.worker.parent_id = bus.agents["unbound-leader"].id
 remuda._butler_sync_team(true)
 worker = last_call("worker")
 check(worker.team.leader, nil, "a leader without an instance is omitted")
@@ -103,6 +106,7 @@ check(worker.team.depth, 1, "the rest of the team survives an unknown leader")
 
 -- Reparenting is a roster event, so the next force sync rewrites the relation.
 bus.agents.worker.parent = "butler"
+bus.agents.worker.parent_id = bus.agents.butler.id
 remuda._butler_sync_team(true)
 worker = last_call("worker")
 check(worker.team.leader.instance_id, "i-root", "reparented worker follows its new leader")
@@ -110,6 +114,7 @@ check(worker.team.depth, 1, "reparented worker is one step from the root")
 
 -- Back under its original lead for the replacement case.
 bus.agents.worker.parent = "lead"
+bus.agents.worker.parent_id = bus.agents.lead.id
 remuda._butler_sync_team(true)
 check(last_call("worker").team.leader.instance_id, "i-lead", "worker returns under its lead")
 
@@ -139,6 +144,32 @@ check(worker.team.leader.instance_id, "i-root", "adopted child follows the root 
 local lead_clear = last_call("lead")
 check(lead_clear.team, nil, "the exited instance is cleared, not left with an old relation")
 check(lead_clear.ok, false, "the fake core refuses an exited instance")
+
+-- Alias reuse: a new incarnation under the same parent name is not the leader
+-- of a child whose recorded generation names the old identity.
+agent("reuse-lead", "codex", "i-reuse-old", "butler", nil, "id-reuse-old")
+agent("reuse-child", "codex", "i-reuse-child", "reuse-lead")
+remuda._butler_sync_team(true)
+check(last_call("reuse-child").team.leader.instance_id, "i-reuse-old", "original leader")
+agent("reuse-lead", "codex", "i-reuse-new", "butler", nil, "id-reuse-new")
+remuda._butler_sync_team(true)
+check(last_call("reuse-child").team.leader, nil, "a reused parent alias is not a leader")
+
+-- A parent whose binding is unknown cannot be a leader, even when the
+-- recorded generation id still matches.
+agent("loose-lead", "claude", "i-loose", nil, nil, "id-loose")
+agent("loose-child", "claude", "i-loose-child", "loose-lead")
+bus.agents["loose-lead"].instance_binding = nil
+remuda._butler_sync_team(true)
+check(last_call("loose-child").team.leader, nil, "a leader without a binding is omitted")
+
+-- A child with no recorded generation is uncertain: do not guess from the
+-- current alias occupant.
+agent("nil-lead", "claude", "i-nil-lead", nil, nil, "id-nil-lead")
+agent("nil-child", "claude", "i-nil-child", "nil-lead")
+bus.agents["nil-child"].parent_id = nil
+remuda._butler_sync_team(true)
+check(last_call("nil-child").team.leader, nil, "an unknown parent generation is omitted")
 
 -- Depth is bounded like the view policy: deeper relations clamp to the contract
 -- limit instead of failing the whole write.

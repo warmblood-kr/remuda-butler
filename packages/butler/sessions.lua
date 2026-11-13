@@ -133,14 +133,20 @@ local function team_payload(item, agent)
     model = team_text(telemetry.model, 64),
     depth = math.min(item.depth or 0, TEAM_DEPTH_LIMIT),
   }
-  -- A leader is included only while that exact parent instance is known. A
-  -- missing or replaced parent leaves the rest of the team intact without a
-  -- relation the client could mistake for authority.
+  -- A leader is included only while that exact parent instance is known and
+  -- the child's recorded generation still names it. The parent alias can be
+  -- reused by a new incarnation, so the alias alone is not identity; an
+  -- unknown parent_id is uncertain, not a license to guess. A missing or
+  -- replaced parent leaves the rest of the team intact without a relation the
+  -- client could mistake for authority.
   if item.depth and item.depth > 0 and agent.parent then
     local leader = bus.agents[agent.parent]
-    local leader_instance = type(leader) == "table" and team_text(leader.instance_id, 256) or nil
+    local leader_instance = type(leader) == "table" and leader.instance_binding == 1
+      and team_text(leader.instance_id, 256) or nil
+    local leader_id = type(leader) == "table" and leader.id or nil
     local leader_name = team_text(agent.parent, 256)
-    if leader_instance and leader_name then
+    if leader_instance and leader_name and type(leader_id) == "string" and leader_id ~= ""
+        and agent.parent_id == leader_id then
       team.leader = { name = leader_name, instance_id = leader_instance }
     end
   end
