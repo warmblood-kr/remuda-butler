@@ -1889,6 +1889,7 @@ local function launch_butler()
   remuda._butler_start_error = nil
   remuda._butler_start_pending = false
   reconcile_retry.reset()
+  if type(remuda._butler_sync_team) == "function" then pcall(remuda._butler_sync_team, true) end
   return selected
   end
   local attempts = choose(order, choose_opts, function(selected, kind, attempts, instance_id)
@@ -1956,6 +1957,9 @@ function remuda._butler_reconcile()
     _butler_session_trace("reconcile_error", tostring(result))
     return nil, result
   end
+  -- Telemetry (the model) can change without a roster event, so the tick is the
+  -- only place that refreshes structured team metadata on a schedule.
+  if type(remuda._butler_sync_team) == "function" then pcall(remuda._butler_sync_team) end
   return result
 end
 -- Remember an explicit remuda.close call for older cores whose session_exited

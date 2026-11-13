@@ -94,6 +94,106 @@ function remuda._butler_adopt_members(name, exited)
       if heir then table.insert(bus.agents[heir].children, alias) end
     end
   end
+  if type(remuda._butler_sync_team) == "function" then pcall(remuda._butler_sync_team, true) end
+end
+
+-- Structured team metadata (#941): the list's `team` field is the machine
+-- readable hierarchy, so the client never has to parse `session_detail` text.
+-- This is the producer. It reads the same bus roster and team_order() walk as
+-- the pane, binds every value to the agent's exact instance id, and omits what
+-- it cannot prove. A refused setter (a replaced or exited instance) only means
+-- the metadata stays unknown; it never changes launch or reconcile behavior.
+local TEAM_DEPTH_LIMIT = MAX_TREE_INDENT_DEPTH
+local TEAM_SYNC_INTERVAL = 5
+local team_sync_at = 0
+local team_synced = {} -- name -> { instance = id, team = payload }
+
+-- Core rejects empty, oversized, control or unsafe-whitespace text as a whole.
+-- An unknown model is "?", which is not a model name; omit it instead.
+local function team_text(value, limit)
+  if type(value) ~= "string" or value == "" or value == "?" or #value > limit then return nil end
+  if value:find("[%z\1-\31\127]") then return nil end
+  if value:sub(1, 1):match("%s") or value:sub(-1):match("%s") then return nil end
+  return value
+end
+local function team_payload(item, agent)
+  -- Only a bound instance may become identity. A roster row without the
+  -- binding marker is a launch in progress or an uncertain adoption, never a
+  -- source for a leader relation.
+  if agent.instance_binding ~= 1 then return nil end
+  local instance = team_text(agent.instance_id, 256)
+  if not instance then return nil end
+  local telemetry = {}
+  if type(remuda._butler_telemetry_for) == "function" then
+    local ok, value = pcall(remuda._butler_telemetry_for, agent)
+    if ok and type(value) == "table" then telemetry = value end
+  end
+  local team = {
+    agent_kind = team_text(agent.kind, 32),
+    model = team_text(telemetry.model, 64),
+    depth = math.min(item.depth or 0, TEAM_DEPTH_LIMIT),
+  }
+  -- A leader is included only while that exact parent instance is known. A
+  -- missing or replaced parent leaves the rest of the team intact without a
+  -- relation the client could mistake for authority.
+  if item.depth and item.depth > 0 and agent.parent then
+    local leader = bus.agents[agent.parent]
+    local leader_instance = type(leader) == "table" and team_text(leader.instance_id, 256) or nil
+    local leader_name = team_text(agent.parent, 256)
+    if leader_instance and leader_name then
+      team.leader = { name = leader_name, instance_id = leader_instance }
+    end
+  end
+  return instance, team
+end
+local function same_team(left, right)
+  if not left or not right then return false end
+  if left.agent_kind ~= right.agent_kind or left.model ~= right.model or left.depth ~= right.depth then
+    return false
+  end
+  local left_leader, right_leader = left.leader, right.leader
+  if (left_leader == nil) ~= (right_leader == nil) then return false end
+  return left_leader == nil
+    or (left_leader.name == right_leader.name and left_leader.instance_id == right_leader.instance_id)
+end
+
+-- `force` is used at launch, reparent and exit; the reconcile tick is throttled
+-- because telemetry is the only thing that can change without a roster event.
+function remuda._butler_sync_team(force)
+  local session_api = type(remuda.session) == "table" and remuda.session or nil
+  local set = session_api and session_api.team
+  if type(set) ~= "function" then return end -- an older core: no structured field
+  local now = type(remuda.clock) == "function" and remuda.clock() or 0
+  if not force and now - team_sync_at < TEAM_SYNC_INTERVAL then return end
+  team_sync_at = now
+  local live = {}
+  for _, item in ipairs(team_order()) do
+    local agent = bus.agents[item.id]
+    if type(agent) == "table" then
+      local instance, team = team_payload(item, agent)
+      if instance then
+        live[item.id] = true
+        local previous = team_synced[item.id]
+        if not previous or previous.instance ~= instance or not same_team(previous.team, team) then
+          local ok, written = pcall(set, item.id, instance, team)
+          if ok and written then
+            team_synced[item.id] = { instance = instance, team = team }
+          else
+            team_synced[item.id] = nil
+          end
+        end
+      end
+    end
+  end
+  -- A name that disappeared or moved to a new instance must not keep an old
+  -- relation. Clearing an exited instance is harmless: the registry already
+  -- forgot it and the setter refuses it.
+  for name, previous in pairs(team_synced) do
+    if not live[name] then
+      pcall(set, name, previous.instance, nil)
+      team_synced[name] = nil
+    end
+  end
 end
 
 function remuda._butler_sessions()

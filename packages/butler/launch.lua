@@ -187,6 +187,9 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   telemetry_by_kind[kind] = agent_telemetry
   local choose_opts = {
     name = name, cwd = launch_cwd, auto_trust = auto_trust,
+    -- The private argv seam used by the assembled daemon tests applies to a
+    -- member exactly as it does to the root: one fake process for every launch.
+    argv = remuda._butler_argv, skip_probe = remuda._butler_argv ~= nil,
     -- Members stay eligible; a leader is protected at the launch assignment
     -- that names it, not because it happens to have children.
     remote_input_disabled = false,
@@ -1034,6 +1037,9 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
       end
     end })
   end
+  -- The member's instance is now known and bound: publish kind/model/depth and
+  -- its leader relation while the launch is still fresh.
+  if type(remuda._butler_sync_team) == "function" then pcall(remuda._butler_sync_team, true) end
   return actual
   end
   local result
