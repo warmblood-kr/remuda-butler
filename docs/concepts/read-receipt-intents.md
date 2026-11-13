@@ -38,11 +38,17 @@ entry points pass the caller's resolved identity:
 - MCP `butler_inbox`: passes the resolved member principal.
 - `remuda._butler_inbox(name, reader)` resolves `reader` to an id and passes
   `reader_id` to `mail.inbox`.
+- `remuda butler inbox <message-id>` (`_butler_inbox_message`) resolves the
+  caller and reads only that message with `mail.inbox(owner, { reader_id =
+  owner, only = id })`; an unread message creates the intent, an already-read
+  one does not.
 
 The legacy Rust CLI shim (`cli/butler_cli.rs`) intentionally passes no reader:
 it has no daemon caller-session identity, and the environment is not a receipt
-trust basis. A read through that shim saves read state but creates no intent.
-The active Lua command path above is the one that can claim an agent read.
+trust basis. A read through that shim saves read state but creates no intent;
+the single-message form also requires a caller identity, so the shim cannot
+claim one.
+The Lua command path can claim an agent read.
 
 `mail.inbox(name, { reader_id = ... })` sets `receipt = true` only when
 `reader_id == name`. An operator read (`reader_id = nil`) or a different

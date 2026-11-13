@@ -833,7 +833,24 @@ local function inbox(name, opts)
   load_inbox(name)
   retry_unreadable(name)
   local messages, unreadable = mailbox(name), bus.mail_unreadable[name] or {}
-  if #messages == 0 and #unreadable == 0 then return "inbox empty" end
+  local only = type(opts) == "table" and type(opts.only) == "string" and opts.only ~= ""
+    and opts.only or nil
+  if only then
+    -- Single-message view: render and mark exactly this message. The unread
+    -- list keeps every other message; an already-read message is not in it,
+    -- so the caller renders that case without touching read state.
+    local function keep(list)
+      local out = {}
+      for _, value in ipairs(list) do if value == only then out[#out + 1] = value end end
+      return out
+    end
+    messages, unreadable = keep(messages), keep(unreadable)
+    if #messages == 0 and #unreadable == 0 then
+      return "message " .. only .. " was not delivered to you"
+    end
+  elseif #messages == 0 and #unreadable == 0 then
+    return "inbox empty"
+  end
   -- Caller provenance decides whether this fetch is an agent read. The
   -- lifetime path passes the caller's resolved identity; an operator fetch
   -- passes an explicit table with no matching reader, so it saves read state
@@ -903,7 +920,15 @@ local function inbox(name, opts)
   end
   -- Preserve the in-memory unread state when saving the read log fails.
   for _, id in ipairs(shown) do read[id] = true end
-  bus.inboxes[name] = {}
+  if only then
+    -- The single-message read removes only the message it showed; the rest of
+    -- the mailbox stays unread.
+    local remaining = {}
+    for _, id in ipairs(mailbox(name)) do if id ~= only then remaining[#remaining + 1] = id end end
+    bus.inboxes[name] = remaining
+  else
+    bus.inboxes[name] = {}
+  end
   return table.concat(out, "\n")
 end
 
