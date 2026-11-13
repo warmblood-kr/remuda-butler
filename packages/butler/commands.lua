@@ -849,7 +849,7 @@ local INBOX_CLI_SPEC = { name = "remuda butler", verbs = { inbox = { about = "Re
 command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
   local report = cli_parser(INBOX_CLI_SPEC, args)
   if report.kind == "help" then
-    return report.text .. "\nA message ID shows one of your delivered messages without changing its read state."
+    return report.text .. "\nA message ID shows one of your delivered messages; an unread one is marked read and may send a receipt."
   end
   if not report.ok then
     if type(remuda.fail) == "function" then return remuda.fail(report.text, report.code) end
@@ -894,7 +894,7 @@ command(60, "inbox", "  remuda butler inbox [name]", function(args, caller)
         error("agents may only read their own Butler inbox.\nNext: remuda butler inbox", 0)
       end
     end
-    return remuda._butler_inbox(name)
+    return remuda._butler_inbox(name, caller_identity)
   end)
 end)
 local REPLY_CLI_SPEC = {

@@ -1242,6 +1242,42 @@ function relay.new(options)
       event_id = route.last_reply_event_id }
   end
 
+  -- Read-receipt delivery status by receipt identity. `delivered` is final;
+  -- `uncertain`/`failed` must never be re-dispatched; `queued` is owned by the
+  -- relay's own outbox/retry policy.
+  function instance:receipt_reply_status(reply_id)
+    if type(reply_id) ~= "string" or reply_id == "" then return nil end
+    local result = state.reply_results[reply_id]
+    if result then
+      if result.not_sent == true then return "failed" end
+      if type(result.event_id) == "string" and result.event_id ~= "" then
+        return "delivered", result.event_id
+      end
+      if type(result.error) == "string" and result.error ~= "" then return "failed" end
+    end
+    local unsaved = confirmed_unsaved[reply_id]
+    if unsaved and type(unsaved.event_id) == "string" and unsaved.event_id ~= "" then
+      return "delivered", unsaved.event_id
+    end
+    local item = state.reply_outbox[reply_id]
+    if item then
+      if item.status == "uncertain" then return "uncertain" end
+      if item.status == "failed" then return "failed" end
+      if item.status == "in_flight" and not reply_in_flight[reply_id] then return "uncertain" end
+      return "queued"
+    end
+    return nil
+  end
+
+  function instance:read_receipt_route(mail_id)
+    local route = state.routes[mail_id]
+    if not route then return nil end
+    return { room_id = route.room_id, event_id = route.event_id, thread_root = route.thread_root,
+      in_reply_to = route.in_reply_to, from_agent = route.from_agent,
+      allowlisted_human = route.allowlisted_human, room_kind = route.room_kind,
+      context_mail_id = route.context_mail_id }
+  end
+
   function instance:mail_route_for_event(room_id, thread_root, in_reply_to)
     local fallback
     for mail_id, route in pairs(state.routes) do
@@ -1454,7 +1490,8 @@ function relay.new(options)
     local token = { generation = send_generation }
     reply_in_flight[reply_id] = token
     token.handle = api.reply({ room = item.room_id, event_id = item.event_id, text = item.text,
-      thread_root = item.thread_root, txn_id = item.txn_id, from_outbox = true }, function(result)
+      thread_root = item.thread_root, txn_id = item.txn_id, from_outbox = true,
+      content_extra = item.content_extra }, function(result)
       if reply_in_flight[reply_id] ~= token or generation ~= send_generation then return end
       reply_in_flight[reply_id] = nil
       if type(result) == "table" and (result.queue_retired == true or result.not_sent == true) then
@@ -1560,8 +1597,13 @@ function relay.new(options)
     if not state.routes[source_id] and route.from_agent ~= false then
       return nil, "Matrix route for Butler mail " .. source_id .. " was not found"
     end
-    if state.reply_results[reply_id] then
-      if callback then callback(state.reply_results[reply_id]) end
+    local result = state.reply_results[reply_id]
+    if result then
+      if result.source_mail_id ~= source_id
+          or (type(opts.txn_id) == "string" and result.txn_id ~= opts.txn_id) then
+        return nil, "Matrix reply identity " .. reply_id .. " is already used by another mail"
+      end
+      if callback then callback(result) end
       return { cancel = function() end }
     end
     local admitted, admission_why = relay.admission(state)
@@ -1575,13 +1617,19 @@ function relay.new(options)
       end
       state.routes[source_id] = { room_id = route.room_id, event_id = route.event_id,
         thread_root = route.thread_root, in_reply_to = route.in_reply_to,
-        from_agent = route.from_agent, room_kind = route.room_kind,
+        from_agent = route.from_agent, allowlisted_human = route.allowlisted_human,
+        room_kind = route.room_kind,
         created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
       route = state.routes[source_id]
       trim_map(state.routes, MAX_MAIL_ROUTES, "created_at")
       persist()
     end
     local existing = state.reply_outbox[reply_id]
+    if existing and (existing.source_mail_id ~= source_id
+        or (type(opts.text) == "string" and existing.text ~= opts.text)
+        or (type(opts.txn_id) == "string" and existing.txn_id ~= opts.txn_id)) then
+      return nil, "Matrix reply identity " .. reply_id .. " is already used by another mail"
+    end
     if existing and existing.status == "in_flight" then
       if reply_in_flight[reply_id] then return { cancel = function() end } end
       return nil, "Matrix reply is uncertain; operator resolution is required"
@@ -1590,6 +1638,12 @@ function relay.new(options)
       return nil, "Matrix reply is uncertain; operator resolution is required"
     end
     if not existing then
+      -- A machine read receipt is only allowed on a route the relay proved
+      -- came from an allowlisted human. Older trimmed routes and forged
+      -- callers fail closed rather than auto-acknowledging a stranger.
+      if opts.machine == true and route.allowlisted_human ~= true then
+        return nil, "machine reply refused for a non-allowlisted route"
+      end
       if type(opts.text) ~= "string" or opts.text == "" then return nil, "reply text must not be empty" end
       if #opts.text > MAX_MAIL_REPLY_BYTES then return nil, "Matrix mail reply exceeds 64 KiB" end
       local pending = 0
@@ -1615,11 +1669,14 @@ function relay.new(options)
       state.reply_outbox[reply_id] = { source_mail_id = source_id, room_id = route.room_id,
         event_id = route.event_id, thread_root = route.thread_root, text = opts.text,
         from_agent = route.from_agent, room_kind = route.room_kind,
+        content_extra = opts.content_extra,
         txn_id = opts.txn_id or ("butler_" .. reply_id), attempts = 0, status = "pending",
         created_at = os.date("!%Y-%m-%dT%H:%M:%SZ") }
       persist()
-      instance:note_own_turn(room, root,
-        instance:event_targets_allowlisted_human(room, route.event_id))
+      if opts.machine ~= true then
+        instance:note_own_turn(room, root,
+          instance:event_targets_allowlisted_human(room, route.event_id))
+      end
     end
     instance._send_reply(reply_id, callback)
     return { cancel = function() end }
@@ -2404,7 +2461,16 @@ function relay.new(options)
             auto_followed = subscribe(state, actual_room, follow_root, nil)
           end
           local is_agent = sender_kind == "AGENT"
-          local accepted = matrix.delivery_policy.accept_received(cfg, actual_room, subscriptions, {
+          -- A structured receipt from an agent/Butler sender is an echo of a
+          -- read acknowledgment, never new work. Body text is not the guard:
+          -- a human writing "Read receipt:" is ordinary mail.
+          local receipt_of
+          if is_agent and type(content["io.butler.receipt_of"]) == "string" then
+            local value = content["io.butler.receipt_of"]
+            if value ~= "" and #value <= 200 then receipt_of = value end
+          end
+          if receipt_of then diagnostic("filtered", "receipt_loop", event_id) end
+          local accepted = not receipt_of and matrix.delivery_policy.accept_received(cfg, actual_room, subscriptions, {
             thread_root = thread_root, is_mention = is_mention, is_room_mention = is_room_mention,
           })
           local route_mail_id = thread_id
@@ -3040,8 +3106,10 @@ function relay.start(config)
           in_reply_to = event.in_reply_to, thread_id = event.thread_id,
           room = event.room, room_kind = event.room_kind,
           context_mail_id = event.context_mail_id, from_agent = event.from_agent,
+          allowlisted_human = event.trusted == true and event.from_agent == false,
+          trusted = event.trusted ~= false,
           mentions = event.normalized_mentions,
-          trusted = event.trusted ~= false, mxc = event.mxc },
+          mxc = event.mxc },
         references = event.references,
       })
       if type(delivered) == "table" and delivered.__butler_delivery_hook_error then
@@ -3105,6 +3173,18 @@ function matrix.mail_reply_status(mail_id)
   return { source_mail_id = mail_id, reply_mail_id = route.last_reply_mail_id,
     room_id = route.room_id, thread_root = route.thread_root,
     event_id = route.last_reply_event_id }
+end
+
+function matrix.read_receipt_status(reply_id)
+  if type(reply_id) ~= "string" or reply_id == "" then return nil, "reply_id is required" end
+  if relay.instance then return relay.instance:receipt_reply_status(reply_id) end
+  return nil
+end
+
+function matrix.read_receipt_route(mail_id)
+  if type(mail_id) ~= "string" or mail_id == "" then return nil, "mail_id is required" end
+  if relay.instance then return relay.instance:read_receipt_route(mail_id) end
+  return nil
 end
 
 function matrix.quarantine(opts, callback, agent)

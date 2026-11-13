@@ -2190,8 +2190,12 @@ function remuda._butler_deliver_notices()
   for session in pairs(bus.notices) do sessions[#sessions + 1] = session end
   for _, session in ipairs(sessions) do deliver_due_notice(session, now) end
 end
--- `inbox <message-id>`: print one message delivered to the caller again,
--- read or not, without changing read state (the owner check of reply).
+-- `inbox <message-id>`: show one message delivered to the caller. An unread
+-- message is read atomically (read state plus the receipt intent) exactly like
+-- a full inbox fetch, but only that message; an already-read message is shown
+-- again without changing state. Another member's message never reaches here:
+-- the command layer resolves the caller and this function only opens the
+-- caller's own delivered set.
 function remuda._butler_inbox_message(caller, id)
   local owner = mail_id(caller, true)
   mail.unread(owner) -- loads the delivered set
@@ -2199,6 +2203,24 @@ function remuda._butler_inbox_message(caller, id)
   local object = message and message.body and bus.objects[message.body.object_id]
   if not object then
     error("message " .. tostring(id) .. " was not delivered to you. Next: remuda butler inbox", 0)
+  end
+  if mail.is_unread(owner, id) then
+    local result = mail.inbox(owner, { reader_id = owner, only = id })
+    -- A committed read leaves the same pending intent as a full fetch. Drain
+    -- immediately so the receipt is observable, and prune the typed-notice
+    -- bookkeeping for the message just read.
+    local receipts = remuda._butler_read_receipts
+    if receipts then
+      pcall(receipts.drain)
+      if type(receipts.drain_matrix) == "function" then pcall(receipts.drain_matrix) end
+    end
+    local seen = bus.notice_seen[owner]
+    if seen then
+      for message_id in pairs(seen) do
+        if not mail.is_unread(owner, message_id) then seen[message_id] = nil end
+      end
+    end
+    return result
   end
   local output = "[" .. message.id .. " from " .. tostring(message.from.host) .. "/" .. tostring(message.from.session)
     .. " · " .. tostring(message.created_at) .. "] " .. tostring(message.subject) .. "\n"

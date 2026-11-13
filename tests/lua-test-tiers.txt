@@ -33,6 +33,7 @@ deep tests/butler_input_recovery.lua
 deep tests/butler_instance_binding_modes.lua
 fast tests/butler_lifecycle_reload.lua
 deep tests/butler_matrix_mention_send.lua
+deep tests/butler_matrix_read_receipts.lua
 deep tests/butler_matrix_relay.lua
 deep tests/butler_matrix_setup.lua
 deep tests/butler_matrix_write.lua
@@ -61,6 +62,8 @@ deep tests/butler_notice_working.lua
 deep tests/butler_owner_refresh_heuristic.lua
 fast tests/butler_permissions.lua
 fast tests/butler_permissions_effective.lua
+fast tests/butler_read_receipt_delivery.lua
+fast tests/butler_read_receipt_intents.lua
 deep tests/butler_prompt_retry.lua
 deep tests/butler_quota.lua
 deep tests/butler_roster_native.lua

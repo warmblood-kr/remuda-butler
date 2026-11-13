@@ -30,6 +30,41 @@ local function call(verb, args, agent_id)
   ]])
 end
 
+local function unread(agent_id, message_id)
+  return T.eval("return tostring(remuda._butler_mail.is_unread(" .. string.format("%q", agent_id)
+    .. ", " .. string.format("%q", message_id) .. "))")
+end
+
+local function intent_state(agent_id, message_id)
+  return T.eval(string.format([=[
+    local simple = assert(remuda._butler_simple_inbox, "SQLite inbox is not active")
+    local function hex(value)
+      return (value:gsub(".", function(byte) return string.format("%%02x", string.byte(byte)) end))
+    end
+    local rows = assert(simple.db:query(
+      "SELECT status,deferred_at FROM read_receipt_intents WHERE recipient = ? AND message_id = ?",
+      { hex(%q), %q }))
+    if #rows == 0 then return "none" end
+    return tostring(rows[1].status) .. "|" .. tostring(rows[1].deferred_at)
+  ]=], agent_id, message_id))
+end
+
+local function receipt_count(agent_id, original_id)
+  return T.eval(string.format([=[
+    local simple = assert(remuda._butler_simple_inbox, "SQLite inbox is not active")
+    local function hex(value)
+      return (value:gsub(".", function(byte) return string.format("%%02x", string.byte(byte)) end))
+    end
+    local rows = assert(simple.db:query(
+      "SELECT envelope FROM simple_inbox WHERE recipient = ?", { hex(%q) }))
+    local found = 0
+    for _, row in ipairs(rows) do
+      if row.envelope:find('"receipt_of":"' .. %q .. '"', 1, true) then found = found + 1 end
+    end
+    return tostring(found)
+  ]=], agent_id, original_id))
+end
+
 local setup = T.eval([[
   local bus, mail = remuda._butler_bus, remuda._butler_mail
   local ids = { alice = bus.agents.alice.id, bob = bus.agents.bob.id, carol = bus.agents.carol.id }
@@ -81,6 +116,95 @@ T.test("agent_can_read_own_named_inbox_and_operator_can_read_any_named_inbox", f
   T.ok(operator:find("operator-visible secret", 1, true), "operator inbox content missing")
   T.eq(T.eval("return tostring(remuda._butler_mail.is_unread(" .. string.format("%q", bob_id)
     .. ", " .. string.format("%q", operator_message) .. "))"), "false", "operator read marks mail read")
+
+  -- Caller provenance: Alice's own read creates one intent; the operator's
+  -- read of Bob's inbox saves read state but creates no agent receipt intent.
+  local provenance = T.eval(string.format([=[
+    local simple = assert(remuda._butler_simple_inbox, "SQLite inbox is not active")
+    local function hex(value)
+      return (value:gsub(".", function(byte) return string.format("%%02x", string.byte(byte)) end))
+    end
+    local alice = assert(simple.db:query(
+      "SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { hex(%q) }))
+    local bob = assert(simple.db:query(
+      "SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { hex(%q) }))
+    local found = false
+    for _, row in ipairs(alice) do
+      if row.message_id == %q then found = true end
+    end
+    return tostring(#alice > 0) .. "|" .. #bob .. "|" .. tostring(found)
+  ]=], alice_id, bob_id, alice_message))
+  T.eq(provenance, "true|0|true", "only the agent's own read should create an intent")
+end)
+
+T.test("message_id_lookup_reads_only_that_message_and_creates_one_receipt", function()
+  local butler_id = T.eval("return remuda._butler_bus.agents.butler.id")
+  local setup = T.eval([[
+    local probe = remuda._butler_send("butler", "alice", "single lookup probe"):match("^queued (%S+)")
+    local other = remuda._butler_send("butler", "alice", "single lookup other"):match("^queued (%S+)")
+    return probe .. "\n" .. other
+  ]])
+  local probe, other = setup:match("([^\n]+)\n([^\n]+)")
+  local result = call("inbox", { "inbox", probe }, alice_id)
+  T.ok(result:match("^ok\0") and result:find("single lookup probe", 1, true),
+    "single-message lookup did not display the message: " .. result)
+  T.eq(unread(alice_id, probe), "false", "single-message lookup must mark that message read")
+  T.eq(unread(alice_id, other), "true", "single-message lookup must not read another message")
+  T.eq(intent_state(alice_id, probe), "delivered|nil",
+    "single-message read must create and deliver one intent")
+  T.eq(receipt_count(butler_id, probe), "1",
+    "single-message read must deliver one local receipt")
+
+  local again = call("inbox", { "inbox", probe }, alice_id)
+  T.ok(again:match("^ok\0") and again:find("single lookup probe", 1, true),
+    "re-view did not display the read message: " .. again)
+  T.eq(intent_state(alice_id, probe), "delivered|nil", "re-view must not duplicate the intent")
+  T.eq(receipt_count(butler_id, probe), "1", "re-view must not duplicate the receipt")
+end)
+
+T.test("message_id_lookup_sqlite_failure_leaves_mail_unread_and_retries", function()
+  local butler_id = T.eval("return remuda._butler_bus.agents.butler.id")
+  local id = T.eval([[return remuda._butler_send("butler", "alice", "sqlite failure probe"):match("^queued (%S+)")]])
+  local session = T.eval("for _, a in pairs(remuda._butler_bus.agents) do if a.id == "
+    .. string.format("%q", alice_id) .. " then return a.session_name end end")
+  local failed = T.eval(string.format([=[
+    local simple = assert(remuda._butler_simple_inbox, "SQLite inbox is not active")
+    local real = simple.store.mark_read
+    simple.store.mark_read = function() return nil, "synthetic mark_read failure" end
+    local ok, value = pcall(remuda._butler_command_run, "inbox", { "inbox", %q },
+      { kind = "session", session = %q, instance_id = _inst(%q) })
+    simple.store.mark_read = real
+    return (ok and "ok\0" or "error\0") .. tostring(value)
+  ]=], id, session, session))
+  T.ok(failed:find("mail read-state was not saved", 1, true),
+    "a failed SQLite read must be reported: " .. failed)
+  T.eq(unread(alice_id, id), "true", "a failed SQLite read must leave the message unread")
+  T.eq(intent_state(alice_id, id), "none", "a failed SQLite read must create no intent")
+  local retried = call("inbox", { "inbox", id }, alice_id)
+  T.ok(retried:match("^ok\0") and retried:find("sqlite failure probe", 1, true),
+    "retry after a SQLite failure did not read the message: " .. retried)
+  T.eq(unread(alice_id, id), "false", "the retry must mark the message read")
+  T.eq(intent_state(alice_id, id), "delivered|nil", "the retry must create and deliver one intent")
+  T.eq(receipt_count(butler_id, id), "1", "the retry must deliver one local receipt")
+end)
+
+T.test("message_id_lookup_creates_a_deferred_matrix_intent", function()
+  local id = T.eval(string.format([=[
+    local mail = remuda._butler_mail
+    local message = assert(mail.queue(
+      { host = "matrix", id = "", alias = "@alice:example.org",
+        session = "@alice:example.org", kind = "matrix", leader = "" },
+      { host = "local", id = %q, alias = "alice", session = "alice", kind = "codex", leader = "" },
+      "matrix single probe", "Matrix message", nil, nil,
+      { sender = "@alice:example.org", room_id = "!room:example.org", event_id = "$single" }))
+    return message.id
+  ]=], alice_id))
+  local result = call("inbox", { "inbox", id }, alice_id)
+  T.ok(result:match("^ok\0") and result:find("matrix single probe", 1, true),
+    "Matrix single-message lookup did not display the message: " .. result)
+  local state = intent_state(alice_id, id)
+  T.ok(state:match("^pending|%d%d%d%d"),
+    "Matrix single-message read must leave a deferred intent: " .. state)
 end)
 
 T.test("ended_member_session_is_unidentified_and_alias_reuse_does_not_restore_it", function()
@@ -120,8 +244,9 @@ T.test("message_id_branch_keeps_owner_not_found_and_not_yours_checks", function(
   local not_yours = call("inbox", { "inbox", unread_message }, alice_id)
   T.ok(not_yours:match("^error\0"), "another agent's message ID must be refused")
   T.ok(not_yours:find("was not delivered to you", 1, true), "not-yours reason missing: " .. not_yours)
-  T.eq(T.eval("return tostring(remuda._butler_mail.is_unread(" .. string.format("%q", bob_id)
-    .. ", " .. string.format("%q", unread_message) .. "))"), "true", "not-yours lookup leaves mail unread")
+  T.eq(unread(bob_id, unread_message), "true", "not-yours lookup leaves mail unread")
+  T.eq(intent_state(alice_id, unread_message), "none", "a refused lookup must create no intent")
+  T.eq(intent_state(bob_id, unread_message), "none", "a refused lookup must not create the owner's intent")
 
   local missing = call("inbox", { "inbox", "00000000000000000000000000" }, alice_id)
   T.ok(missing:match("^error\0"), "unknown message ID must remain an error")
@@ -153,4 +278,116 @@ T.test("sibling_name_verbs_do_not_read_another_members_private_inbox", function(
   T.ok(reply:match("^error\0") and reply:find("was not delivered to you", 1, true), "reply keeps message ownership: " .. reply)
   local forward = call("forward", { "forward", bob_message, "carol" }, alice_id)
   T.ok(forward:match("^error\0") and forward:find("was not delivered to you", 1, true), "forward keeps message ownership: " .. forward)
+end)
+
+-- The legacy one-argument API (used by the retained Rust CLI shim) has no
+-- daemon caller-session identity. It must save read state but never claim an
+-- agent read, so it creates no receipt intent.
+T.test("legacy_one_argument_inbox_reads_without_claiming_an_agent_read", function()
+  local id = T.eval([[return remuda._butler_send("butler", "carol", "legacy shim probe"):match("^queued (%S+)")]])
+  local text = T.eval([[return remuda._butler_inbox("carol")]])
+  T.ok(text:find("legacy shim probe", 1, true), "legacy one-argument read did not show mail")
+  T.eq(T.eval("return tostring(remuda._butler_mail.is_unread(" .. string.format("%q", carol_id)
+    .. ", " .. string.format("%q", id) .. "))"), "false", "legacy one-argument read did not save read state")
+  local intents = T.eval(string.format([=[
+    local simple = assert(remuda._butler_simple_inbox, "SQLite inbox is not active")
+    local function hex(value)
+      return (value:gsub(".", function(byte) return string.format("%%02x", string.byte(byte)) end))
+    end
+    local rows = assert(simple.db:query(
+      "SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { hex(%q) }))
+    return tostring(#rows)
+  ]=], carol_id))
+  T.eq(intents, "0", "legacy one-argument read claimed an agent receipt")
+end)
+
+-- A forwarded mail's stored envelope still names the original `to` alias. The
+-- receipt must name the member that actually read the copy, resolved by the
+-- durable reader ULID.
+T.test("read_receipt_for_forwarded_mail_names_the_actual_reader", function()
+  local ids = T.eval([[
+    local bus = remuda._butler_bus
+    local sent = assert(remuda._butler_send("butler", "bob", "forwarded receipt source"))
+    local original = assert(sent:match("^queued (%S+)"))
+    local forwarded = assert(remuda._butler_forward("operator", original, "carol", "forward note"))
+    assert(forwarded, "forward failed")
+    local text = assert(remuda._butler_inbox("carol", bus.agents.carol.id))
+    assert(text:find("forwarded receipt source", 1, true), "carol did not read the forwarded mail")
+    return original .. "\n" .. bus.agents.butler.id .. "\n" .. bus.agents.carol.id
+  ]])
+  local original, butler_id, carol_id = ids:match("([^\n]+)\n([^\n]+)\n([^\n]+)")
+  assert(original and butler_id and carol_id, "forwarded receipt setup failed: " .. tostring(ids))
+  local found = T.eval(string.format([=[
+    local simple = assert(remuda._butler_simple_inbox)
+    local function hex(value)
+      return (value:gsub(".", function(byte) return string.format("%%02x", string.byte(byte)) end))
+    end
+    local rows = assert(simple.db:query(
+      "SELECT message_id, envelope FROM simple_inbox WHERE recipient = ? ORDER BY seq", { hex(%q) }))
+    for _, row in ipairs(rows) do
+      if row.envelope:find('"receipt_of":"' .. %q .. '"', 1, true) then
+        local from = row.envelope:match('"from":(%%b{})') or ""
+        return from
+      end
+    end
+    return "missing"
+  ]=], butler_id, original))
+  T.ok(found ~= "missing", "forwarded-mail receipt was not delivered to the original sender")
+  T.ok(found:find('"id":"' .. carol_id .. '"', 1, true), "receipt does not use the reader ULID: " .. found)
+  T.ok(found:find('"alias":"carol"', 1, true), "receipt names the envelope to alias, not the reader: " .. found)
+  T.ok(not found:find('"alias":"bob"', 1, true), "receipt named the original to alias: " .. found)
+end)
+
+-- A renamed/reused display alias must not redirect a receipt notice. The
+-- adapter validates by the durable recipient ULID; a stale alias is ignored.
+T.test("read_receipt_notice_is_keyed_by_durable_id_not_reused_alias", function()
+  local out = T.eval([=[
+    local bus = remuda._butler_bus
+    local mail = remuda._butler_mail
+    local adapter = assert(remuda._butler_read_receipts_config.notify)
+    local alice = assert(bus.agents.alice)
+    local alice_id = alice.id
+    local bob_id = assert(bus.agents.bob).id
+    local function address(id, alias)
+      return { host = "local", id = id, alias = alias, session = alias, kind = "codex", leader = "" }
+    end
+    local sender = address(alice_id, "alice")
+    local reader = address(bob_id, "bob")
+    local function receipt(text)
+      return assert(mail.queue(reader, sender, text, "Read receipt"))
+    end
+    remuda._butler_done = remuda._butler_done or {}
+    remuda._butler_done.alice = { id = alice_id }
+    local first = receipt("Read receipt: bob fetched one")
+    adapter(first, sender)
+    local seen_first = bus.notice_seen[alice_id] and bus.notice_seen[alice_id][first.id] == true
+    local done_first = remuda._butler_done.alice == nil
+
+    bus.agents.alice = nil
+    alice.alias, alice.session_name = "alice-new", "alice-new"
+    bus.agents["alice-new"] = alice
+    bus.identity_ids[alice_id].alias = "alice-new"
+    local other_id = "01ZZZZZZZZZZZZZZZZZZZZZZZZ"
+    bus.agents.alice = { id = other_id, alias = "alice", session_name = "alice", kind = "codex" }
+    remuda._butler_done["alice-new"] = { id = alice_id }
+    remuda._butler_done.alice = { id = other_id }
+    local stale = address(alice_id, "alice")
+    local second = receipt("Read receipt: bob fetched two")
+    adapter(second, stale)
+    local seen_renamed = bus.notice_seen[alice_id] and bus.notice_seen[alice_id][second.id] == true
+    local other_seen = bus.notice_seen[other_id]
+    local done_renamed = remuda._butler_done["alice-new"] == nil
+    local done_other = remuda._butler_done.alice ~= nil
+
+    bus.agents["alice-new"] = nil
+    local third = receipt("Read receipt: bob fetched three")
+    adapter(third, stale)
+    local ended_seen = bus.notice_seen[alice_id] and bus.notice_seen[alice_id][third.id] == true
+    local done_other_after = remuda._butler_done.alice ~= nil
+    return table.concat({ tostring(seen_first), tostring(done_first), tostring(seen_renamed),
+      tostring(other_seen == nil), tostring(done_renamed), tostring(done_other),
+      tostring(not ended_seen), tostring(done_other_after) }, "|")
+  ]=])
+  T.eq(out, "true|true|true|true|true|true|true|true",
+    "receipt notice must resolve the current target by durable id: " .. tostring(out))
 end)

@@ -19,11 +19,11 @@ classify_shell_test() {
   local sh=$1
   case $(basename "$sh") in
     rust_tests.sh | golden_guidance.sh | shell_tests.sh | fast_tests.sh | butler_simple_inbox_acceptance.sh | butler_simple_sqlite_fixture.sh) return 1 ;;
-    awk-timeout.sh | core_ref.sh | hand_parsed_verbs.sh | installer_no_restart.sh | installer_readiness_budget.sh | lua_harness_guards.sh | butler_file_args.sh | butler_permissions.sh | caller_identity.sh | butler_single_instance.sh | agent_identity.sh | butler_adopt.sh | delegate_leader_id.sh | mail_by_ulid.sh | reply_forward.sh | butler_unknown_verb.sh | opencode_nudge_events.sh | inbox_db_upgrade.sh | mod_package_assets.sh | isolated_env_cleanup_test.sh | isolated_env_admission_test.sh)
+    awk-timeout.sh | core_ref.sh | hand_parsed_verbs.sh | installer_no_restart.sh | installer_readiness_budget.sh | lua_harness_guards.sh | butler_file_args.sh | butler_permissions.sh | caller_identity.sh | butler_single_instance.sh | agent_identity.sh | butler_adopt.sh | delegate_leader_id.sh | mail_by_ulid.sh | reply_forward.sh | butler_unknown_verb.sh | opencode_nudge_events.sh | inbox_db_upgrade.sh | read_receipt_upgrade.sh | mod_package_assets.sh | isolated_env_cleanup_test.sh | isolated_env_admission_test.sh)
       # Policy tests and identity, file-boundary, isolation and harness
       # security controls stay on PRs, even when they need a private daemon.
       ;;
-    butler_coordination_config_mode.sh | butler_matrix_relay_core_ref.sh | normalize_guidance.sh | lua_tests.sh | butler_coordination_config.sh | butler_diagnostics_matrix.sh | butler_launch_fallback.sh | butler_matrix_follow_cli.sh | butler_matrix_relay.sh | butler_reload_real.sh | butler_seams.sh | close_emits_exit.sh | codex_mcp_mail.sh | live_reload.sh | member_env.sh | old_core_boot.sh | session_tree.sh)
+    butler_coordination_config_mode.sh | butler_matrix_relay_core_ref.sh | normalize_guidance.sh | lua_tests.sh | butler_coordination_config.sh | butler_diagnostics_matrix.sh | butler_launch_fallback.sh | butler_matrix_follow_cli.sh | butler_matrix_read_receipts.sh | butler_matrix_relay.sh | butler_reload_real.sh | butler_seams.sh | close_emits_exit.sh | codex_mcp_mail.sh | live_reload.sh | member_env.sh | old_core_boot.sh | session_tree.sh)
       [[ $mode == policy ]] && return 1 ;;
     *) echo "unclassified shell test: $(basename "$sh")" >&2; exit 2 ;;
   esac
@@ -82,7 +82,7 @@ for lua in "$REPO"/tests/*.lua; do
   # session_tree.lua needs a live daemon's _butler_bus; session_tree.sh runs it.
   # The Matrix relay state tests need core's remuda.json; its shell wrapper
   # runs them inside the pinned daemon instead of standalone LuaJIT.
-  [[ $(basename "$lua") == session_tree.lua || $(basename "$lua") == butler_matrix_relay.lua || $(basename "$lua") == butler_diagnostics_matrix.lua || $(basename "$lua") == butler_coordination_config.lua || $(basename "$lua") == butler_simple_inbox_acceptance.lua ]] && continue
+  [[ $(basename "$lua") == session_tree.lua || $(basename "$lua") == butler_matrix_relay.lua || $(basename "$lua") == butler_matrix_read_receipts.lua || $(basename "$lua") == butler_diagnostics_matrix.lua || $(basename "$lua") == butler_coordination_config.lua || $(basename "$lua") == butler_simple_inbox_acceptance.lua ]] && continue
   case $(basename "$lua") in butler_approve_text.lua|butler_status_hook.lua|butler_guard.lua|butler_adopt.lua|butler_approval_retry.lua|butler_schedule_cli.lua|butler_typed_lines_cli.lua) continue ;; esac # real-parser coverage: lua/butler_cli_unit_test.lua
   run "$(basename "$lua")" luajit "tests/$(basename "$lua")"
 done

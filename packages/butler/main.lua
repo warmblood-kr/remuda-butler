@@ -557,6 +557,19 @@ local json_field = identity.json_field
 local register_identity = identity.register_identity
 local resolve = identity.resolve
 local mail_address = identity.mail_address
+-- Resolve a local sender/reader by durable ULID, not by a possibly reused
+-- display alias. A live session under a new alias wins; an ended session
+-- keeps its last recorded alias. Unknown ids fail closed.
+local function mail_address_by_id(id)
+  if type(id) ~= "string" or id == "" then return nil end
+  local record = bus.identity_ids and bus.identity_ids[id]
+  if not record then return nil end
+  local live = bus.agents[record.alias]
+  if live and live.id == id then return mail_address(record.alias) end
+  return { host = "local", id = id, alias = record.alias or id,
+    session = record.alias or id, kind = record.kind or "",
+    leader = record.leader_id or "" }
+end
 local mail_id = identity.mail_id
 local next_token = identity.next_token
 local caller_name = identity.caller_name
@@ -657,6 +670,61 @@ local function deliver_message(message)
   if not delivered then error(why or "no Butler channel installed (try remuda-butler-inbox)", 0) end
   return notify_mail_delivery(message, delivered)
 end
+-- Durable read-receipt delivery is a separate module: the A1 read path records
+-- intents, and this drains them through the local mailbox. The file-only
+-- fallback stays explicit: without SQLite intents there is nothing to drain.
+-- The notice goes through the same safe mail-notice policy as ordinary mail;
+-- the module asks on every durable acceptance, and the policy's journal/ID
+-- dedupe prevents a second typed notice. Matrix intents are drained by the
+-- relay path below, never by the local mailbox.
+local function butler_matrix()
+  return remuda.butler and remuda.butler.matrix
+end
+remuda._butler_read_receipts_config = {
+  simple = simple,
+  mail = mail,
+  reader_address = mail_address_by_id,
+  matrix = {
+    available = function()
+      local candidate = butler_matrix()
+      return candidate and candidate.relay and candidate.relay.instance ~= nil
+    end,
+    status = function(reply_id)
+      local candidate = butler_matrix()
+      if candidate and type(candidate.read_receipt_status) == "function" then
+        return candidate.read_receipt_status(reply_id)
+      end
+      return nil
+    end,
+    route = function(mail_id)
+      local candidate = butler_matrix()
+      if candidate and type(candidate.read_receipt_route) == "function" then
+        return candidate.read_receipt_route(mail_id)
+      end
+      return nil
+    end,
+    mail_reply = function(opts)
+      local candidate = butler_matrix()
+      if not (candidate and type(candidate.mail_reply) == "function") then
+        return nil, "Matrix is not configured"
+      end
+      return candidate.mail_reply(opts)
+    end,
+  },
+  notify = function(message, recipient)
+    local notice = { id = message.id, from = message.from, to = { recipient },
+      kind = "read_receipt", receipt_of = message.receipt_of }
+    -- Resolve by the durable ULID. Passing the stored display alias here would
+    -- let a renamed/reused alias redirect the notice and clear the wrong
+    -- member's --done mark; notify_mail_delivery fails closed when the id is
+    -- no longer live under that alias.
+    notify_mail_delivery(notice, message, recipient.id,
+      "read receipt for " .. tostring(message.receipt_of))
+  end,
+}
+remuda.exec("butler/read_receipts")
+local read_receipts = assert(remuda._butler_read_receipts)
+remuda._butler_read_receipts_tick = function() return read_receipts.tick() end
 -- The opted-in Claude channel is a second, separate MCP server entry in the
 -- same private file. The ordinary coordination entry stays unchanged, and
 -- neither entry carries a capability token: the channel reads only its private
@@ -871,9 +939,37 @@ function remuda._butler_forward(from, message_id, member, note)
   return "forwarded " .. message_id .. " to " .. target.alias .. "; "
     .. notify_queued(message, target.alias, "forwarded by " .. sender.alias)
 end
-function remuda._butler_inbox(name)
+function remuda._butler_inbox(name, reader)
   local id = mail_id(name, true)
-  local result = mail.inbox(id)
+  -- Preserve caller provenance: resolve the caller's id (an id or a session
+  -- name) and pass it down. Only a caller reading its own mailbox creates a
+  -- receipt intent; operator and cross-member reads still save read state.
+  local reader_id
+  if type(reader) == "string" and reader ~= "" then
+    local ok, resolved = pcall(mail_id, reader, true)
+    if ok then reader_id = resolved end
+  end
+  local result = mail.inbox(id, { reader_id = reader_id })
+  -- A committed agent read leaves a pending intent. Drain immediately so the
+  -- receipt is observable without waiting for the periodic retry; the retry
+  -- schedule covers a crash between that commit and this call.
+  if simple and reader_id == id then
+    local ok, drain_err = pcall(read_receipts.drain)
+    if not ok then
+      local diagnostics = remuda._butler_diagnostics
+      if diagnostics and type(diagnostics.record) == "function" then
+        pcall(diagnostics.record, "read_receipts", "error", "post_read_drain", tostring(drain_err))
+      end
+    end
+    local matrix_ok, matrix_err = pcall(read_receipts.drain_matrix)
+    if not matrix_ok then
+      local diagnostics = remuda._butler_diagnostics
+      if diagnostics and type(diagnostics.record) == "function" then
+        pcall(diagnostics.record, "read_receipts", "error", "post_read_matrix_drain",
+          tostring(matrix_err))
+      end
+    end
+  end
   if mail.unread(id) == 0 then
     for alias, agent in pairs(bus.agents) do
       if agent.id == id then
@@ -1048,7 +1144,7 @@ remuda.tool{
   about = "Drain this agent's Butler inbox and return its queued messages in arrival order.",
   run = function(_, caller)
     local principal = caller_agent(caller, true) -- reading compares the instance; liveness is for mutating routes
-    return remuda._butler_inbox(principal)
+    return remuda._butler_inbox(principal, principal)
   end,
 }
 local send_to_leader = {
