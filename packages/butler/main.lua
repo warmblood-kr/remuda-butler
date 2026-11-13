@@ -657,6 +657,25 @@ local function deliver_message(message)
   if not delivered then error(why or "no Butler channel installed (try remuda-butler-inbox)", 0) end
   return notify_mail_delivery(message, delivered)
 end
+-- Durable read-receipt delivery is a separate module: the A1 read path records
+-- intents, and this drains them through the local mailbox. The file-only
+-- fallback stays explicit: without SQLite intents there is nothing to drain.
+-- The notice goes through the same safe mail-notice policy as ordinary mail;
+-- the module calls it only for a newly accepted receipt, so a retry after
+-- acceptance cannot type it twice. Matrix intents are not drained here.
+remuda._butler_read_receipts_config = {
+  simple = simple,
+  mail = mail,
+  notify = function(message, recipient)
+    local notice = { id = message.id, from = message.from, to = { recipient },
+      kind = "read_receipt", receipt_of = message.receipt_of }
+    notify_mail_delivery(notice, message, recipient.alias,
+      "read receipt for " .. tostring(message.receipt_of))
+  end,
+}
+remuda.exec("butler/read_receipts")
+local read_receipts = assert(remuda._butler_read_receipts)
+remuda._butler_read_receipts_tick = function() return read_receipts.tick() end
 -- The opted-in Claude channel is a second, separate MCP server entry in the
 -- same private file. The ordinary coordination entry stays unchanged, and
 -- neither entry carries a capability token: the channel reads only its private
@@ -882,6 +901,18 @@ function remuda._butler_inbox(name, reader)
     if ok then reader_id = resolved end
   end
   local result = mail.inbox(id, { reader_id = reader_id })
+  -- A committed agent read leaves a pending intent. Drain immediately so the
+  -- receipt is observable without waiting for the periodic retry; the retry
+  -- schedule covers a crash between that commit and this call.
+  if simple and reader_id == id then
+    local ok, drain_err = pcall(read_receipts.drain)
+    if not ok then
+      local diagnostics = remuda._butler_diagnostics
+      if diagnostics and type(diagnostics.record) == "function" then
+        pcall(diagnostics.record, "read_receipts", "error", "post_read_drain", tostring(drain_err))
+      end
+    end
+  end
   if mail.unread(id) == 0 then
     for alias, agent in pairs(bus.agents) do
       if agent.id == id then

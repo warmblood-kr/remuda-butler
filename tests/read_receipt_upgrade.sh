@@ -89,7 +89,7 @@ boot_butler
   local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active after upgrade")
   local db = simple.db
   local version = assert(db:query("PRAGMA user_version"))
-  assert(tonumber(version[1].user_version) == 2, "0002 did not apply to the existing database")
+  assert(tonumber(version[1].user_version) == 3, "0003 did not apply to the existing database")
   local rows = assert(db:query("SELECT message_id,is_read FROM simple_inbox ORDER BY seq"))
   local seen = {}
   for _, row in ipairs(rows) do seen[row.message_id] = tonumber(row.is_read) end
@@ -105,6 +105,39 @@ boot_butler
   local aa = assert(db:query("SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { "6161" }))
   assert(#aa == 2, "agent read did not create exactly one intent per new message")
   assert(aa[1].message_id ~= "B" and aa[2].message_id ~= "B", "already-read mail was backfilled")
+
+  -- Real local delivery: the same two intents must produce one receipt each in
+  -- the original sender inbox, correlated by the structured receipt_of field.
+  local counts = assert(assert(remuda._butler_read_receipts).drain())
+  assert(counts.delivered == 2, "real drain did not deliver two receipts")
+  local statuses = assert(db:query(
+    "SELECT message_id,receipt_id,status FROM read_receipt_intents WHERE recipient = ?", { "6161" }))
+  local receipt_ids = {}
+  for _, row in ipairs(statuses) do
+    assert(row.status == "delivered", "real drain left an intent pending")
+    assert(#row.receipt_id == 26 and row.receipt_id:match("^[0-9A-HJKMNP-TV-Z]+$"),
+      "stored receipt identity is not a Butler ULID")
+    receipt_ids[row.receipt_id] = true
+  end
+  local sender_rows = assert(db:query(
+    "SELECT message_id,envelope FROM simple_inbox WHERE recipient = ? ORDER BY seq", { "73656e646572" }))
+  assert(#sender_rows == 2, "original sender did not receive exactly two receipts")
+  local correlated = {}
+  for _, row in ipairs(sender_rows) do
+    assert(receipt_ids[row.message_id], "receipt mail ID does not match the stored intent ULID")
+    local receipt_of = row.envelope:match("\"receipt_of\":\"([^\"]+)\"")
+    assert(receipt_of == "A" or receipt_of == "C", "receipt is not correlated to the original")
+    correlated[receipt_of] = true
+  end
+  assert(correlated.A and correlated.C, "a batch receipt is missing")
+  -- Reading a receipt must not create another receipt (structured loop guard).
+  local sender_text = assert(mail.inbox("sender", { reader_id = "sender" }))
+  assert(sender_text:find("Read receipt", 1, true), "sender could not read its receipts")
+  local loop = assert(assert(remuda._butler_read_receipts).drain())
+  assert(loop.skipped == 2, "receipt messages were not skipped")
+  local sender_again = assert(db:query(
+    "SELECT message_id FROM simple_inbox WHERE recipient = ?", { "73656e646572" }))
+  assert(#sender_again == 2, "receipt loop produced mail")
 
   local operator = assert(mail.inbox("bb", { reader_id = nil }))
   assert(operator:find("body D", 1, true), "operator read missed the member inbox")
@@ -125,7 +158,7 @@ boot_butler
 "$REMUDA_BIN" -s "$S" -e '
   local db = assert(remuda._butler_simple_inbox).db
   local version = assert(db:query("PRAGMA user_version"))
-  assert(tonumber(version[1].user_version) == 2, "schema version changed after restart")
+  assert(tonumber(version[1].user_version) == 3, "schema version changed after restart")
   local aa = assert(db:query("SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { "6161" }))
   assert(#aa == 2, "agent intents were lost or duplicated across restart")
   local bb = assert(db:query("SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { "6262" }))

@@ -256,9 +256,17 @@ T.test("butler_initializes_mail_and_persists_a_sent_message", function()
     local objects = assert(remuda.list_dir(mail .. "/objects"))
     local envelopes = assert(remuda.list_dir(mail .. "/messages"))
     local inboxes = assert(remuda.list_dir(mail .. "/inboxes"))
+    -- The inbox row lives in the authoritative store: the file log before the
+    -- SQLite cutover, the simple_inbox table after it. Count whichever is
+    -- active rather than treating the file as always authoritative.
+    local inbox_count = #inboxes
+    if remuda._butler_simple_inbox then
+      local rows = assert(remuda._butler_simple_inbox.db:query("SELECT count(*) AS n FROM simple_inbox"))
+      inbox_count = tonumber(rows[1].n)
+    end
     local object = assert(io.open(mail .. "/objects/" .. objects[1], "rb")):read("*a")
     local envelope = assert(io.open(mail .. "/messages/" .. envelopes[1], "rb")):read("*a")
-    return sent .. "\n--COUNTS--\n" .. #objects .. "|" .. #envelopes .. "|" .. #inboxes .. "\n--ID--\n" .. id
+    return sent .. "\n--COUNTS--\n" .. #objects .. "|" .. #envelopes .. "|" .. inbox_count .. "\n--ID--\n" .. id
       .. "\n--OBJECT--\n" .. object .. "\n--ENVELOPE--\n" .. envelope
   ]=])
   local sent = out:match("^(.-)\n%-%-COUNTS%-%-")

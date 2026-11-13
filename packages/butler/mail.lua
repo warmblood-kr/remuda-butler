@@ -156,6 +156,9 @@ local function thread_json(message, address_json)
     out = out .. ',"references":[' .. table.concat(quoted, ",") .. "]"
   end
   if message.reply_to then out = out .. ',"reply_to":' .. address_json(message.reply_to) end
+  -- Structured receipt identity. Readers suppress receipts for a message that
+  -- carries this field; content text is never the recursion guard.
+  if message.receipt_of then out = out .. ',"receipt_of":' .. config.json_quote(message.receipt_of) end
   return out
 end
 
@@ -240,6 +243,7 @@ local function load_message(disk, id)
       session = sender, kind = sender_kind, leader = sender_leader }, subject = subject, created_at = created_at,
     body = { object_id = object_id }, content_type = "text/plain; charset=utf-8" }
   message.in_reply_to = envelope:match('"in_reply_to":"([^"]+)"')
+  message.receipt_of = envelope:match('"receipt_of":"([^"]+)"')
   local references = envelope:match('"references":(%b[])')
   if references then
     message.references = {}
@@ -464,10 +468,34 @@ local function cap_matrix_body(text)
   end
 end
 
-local function queue(from, to, text, subject, in_reply_to, references, matrix)
+local function read_text(path)
+  local file = io.open(path, "rb")
+  if not file then return nil end
+  local text = file:read("*a")
+  file:close()
+  return text
+end
+
+-- A fixed receipt ID is accepted only when the stored message is this same
+-- receipt. Colliding with an unrelated message is a failure, never success.
+local function stable_receipt_matches(existing, receipt_of, from, to)
+  return type(existing) == "table" and existing.receipt_of == receipt_of
+    and type(existing.from) == "table" and existing.from.id == from.id
+    and type(existing.to) == "table" and type(existing.to[1]) == "table"
+    and existing.to[1].id == to.id
+end
+
+local function queue(from, to, text, subject, in_reply_to, references, matrix, receipt_of, stable)
+  local stable_id = stable and stable.id
   from, to = address(from), address(to)
   if to.id == "" then return nil, "recipient has no Butler ULID" end
   if from.alias == "" then from.alias, from.session = from.session, from.session end
+  if stable and stable_id ~= nil then
+    if type(stable_id) ~= "string" or stable_id == "" or #stable_id > 200
+        or stable_id:find("[/\\]") or stable_id:find("..", 1, true) then
+      return nil, "invalid stable receipt message id"
+    end
+  end
   local recipient_id = to.id
   load_inbox(recipient_id)
   if matrix and matrix.event_id then
@@ -480,15 +508,18 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
       end
     end
   end
-  local id = message_id()
+  local id = stable_id or message_id()
   local object_id = "object-" .. id
   local sender, body = from.alias or "outside", tostring(text)
   if matrix then body = cap_matrix_body(body) end
   local object = { id = object_id, content = body, bytes = #body,
     content_type = "text/plain; charset=utf-8", content_hash = nil }
   local message = { id = id, from = from, to = { to },
-    subject = subject or ("Message from " .. sender), created_at = matrix and matrix.created_at or os.date("!%Y-%m-%dT%H:%M:%SZ"),
-    in_reply_to = in_reply_to, references = references, content_type = "text/plain; charset=utf-8",
+    subject = subject or ("Message from " .. sender),
+    created_at = stable and stable.created_at
+      or (matrix and matrix.created_at or os.date("!%Y-%m-%dT%H:%M:%SZ")),
+    in_reply_to = in_reply_to, references = references, receipt_of = receipt_of,
+    content_type = "text/plain; charset=utf-8",
     body = { object_id = object_id }, matrix = matrix and {
       sender = matrix.sender, room_id = matrix.room_id, event_id = matrix.event_id,
       room = matrix.room or matrix.room_kind, thread_id = matrix.thread_id,
@@ -496,14 +527,75 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
       room_kind = matrix.room_kind,
       mxc = matrix.mxc, media = matrix.media or {}, mentions = matrix.mentions or {},
     } or nil }
+  -- A stable ID makes delivery idempotent across a retry or restart. An
+  -- existing message at that ID is reused only after identity verification.
+  local existing = stable_id and (bus.messages[id]
+    or (config.root and load_message(paths(""), id))) or nil
+  if existing then
+    if not stable_receipt_matches(existing, receipt_of, from, to) then
+      diagnostic("error", "receipt_id_collision", id)
+      return nil, "message " .. id .. " already exists and is not this receipt"
+    end
+    message = existing
+    object = bus.objects[existing.body.object_id]
+    object_id = existing.body.object_id
+    if not object then
+      diagnostic("error", "receipt_body_missing", id)
+      return nil, "message " .. id .. " exists but its body is unreadable"
+    end
+    if object.content ~= body then
+      diagnostic("error", "receipt_body_conflict", id)
+      return nil, "message " .. id .. " exists with different content"
+    end
+  end
   local disk = paths(recipient_id)
-  if disk then
+  if stable_id and not disk then
+    return nil, "Butler mail storage is unavailable for a stable receipt"
+  end
+  local already = false
+  if stable_id then
+    local checked, value = pcall(delivered, recipient_id, id)
+    if not checked then
+      diagnostic("error", "receipt_delivery_state", id)
+      return nil, "cannot read Butler mail delivery state: " .. tostring(value)
+    end
+    already = value == true
+  end
+  if already and not existing then
+    diagnostic("error", "receipt_envelope_missing", id)
+    return nil, "message " .. id .. " is already delivered but its envelope is unreadable"
+  end
+  if disk and not already then
     local ready, ready_err = prepare_storage()
     if not ready then diagnostic("error", "storage_prepare", id); return nil, "cannot prepare Butler mail storage: " .. tostring(ready_err) end
-    local wrote, err = write_atomic(disk.objects .. object_id, body, true)
-    if not wrote then diagnostic("error", "body_write", id); return nil, "cannot write Butler mail body: " .. tostring(err) end
-    wrote, err = write_atomic(disk.messages .. id .. ".json", envelope_json(message, object), true)
-    if not wrote then diagnostic("error", "envelope_write", id); return nil, "cannot write Butler mail envelope: " .. tostring(err) end
+    if not existing then
+      if stable_id then
+        -- A crash can leave one of the two files behind. Identical content is
+        -- a safe retry; different content at the fixed ID is a collision.
+        local prior_body = read_text(disk.objects .. object_id)
+        if prior_body ~= nil then
+          if prior_body ~= body then
+            diagnostic("error", "receipt_body_collision", id)
+            return nil, "message " .. id .. " has a different stored body"
+          end
+        else
+          local wrote, err = write_atomic(disk.objects .. object_id, body, true)
+          if not wrote then diagnostic("error", "body_write", id); return nil, "cannot write Butler mail body: " .. tostring(err) end
+        end
+        if read_text(disk.messages .. id .. ".json") ~= nil then
+          diagnostic("error", "receipt_envelope_unreadable", id)
+          return nil, "message " .. id .. " has an unreadable stored envelope"
+        end
+        local wrote, err = write_atomic(disk.messages .. id .. ".json", envelope_json(message, object), true)
+        if not wrote then diagnostic("error", "envelope_write", id); return nil, "cannot write Butler mail envelope: " .. tostring(err) end
+      else
+        local wrote, err = write_atomic(disk.objects .. object_id, body, true)
+        if not wrote then diagnostic("error", "body_write", id); return nil, "cannot write Butler mail body: " .. tostring(err) end
+        wrote, err = write_atomic(disk.messages .. id .. ".json", envelope_json(message, object), true)
+        if not wrote then diagnostic("error", "envelope_write", id); return nil, "cannot write Butler mail envelope: " .. tostring(err) end
+      end
+    end
+    local wrote, err
     if config.simple then
       local row = '{"message_id":' .. config.json_quote(id) .. '}'
       wrote, err = config.simple.store.deliver(config.simple.db, file_component(recipient_id),
@@ -514,11 +606,13 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix)
     if not wrote then diagnostic("error", "inbox_append", id); return nil, "cannot deliver Butler mail: " .. tostring(err) end
     if not config.simple then index_delivery(recipient_id, id) end
   end
-  bus.objects[object_id], bus.messages[id] = object, message
-  mailbox(recipient_id)[#mailbox(recipient_id) + 1] = id
-  mark_delivered(recipient_id, id)
-  diagnostic("delivered", "delivery_ok", id)
-  return message
+  if not already then
+    bus.objects[object_id], bus.messages[id] = object, message
+    mailbox(recipient_id)[#mailbox(recipient_id) + 1] = id
+    mark_delivered(recipient_id, id)
+    diagnostic("delivered", "delivery_ok", id)
+  end
+  return message, nil, to, already
 end
 
 -- Only the explicit operator (the CLI with no Butler identity) skips the
@@ -778,7 +872,11 @@ local function inbox(name, opts)
       wrote, err = config.simple.db:exec("BEGIN IMMEDIATE", {})
       if wrote then
         for _, id in ipairs(shown) do
-          wrote, err = config.simple.store.mark_read(config.simple.db, file_component(name), id, receipt)
+          -- The receipt's stable identity is a normal Butler ULID, generated
+          -- here and committed with the intent. A rolled-back read discards it
+          -- with the intent; a committed read reuses it forever.
+          local receipt_id = receipt and message_id() or nil
+          wrote, err = config.simple.store.mark_read(config.simple.db, file_component(name), id, receipt, receipt_id)
           if not wrote then break end
         end
         if wrote then wrote, err = config.simple.db:exec("COMMIT", {}) end
@@ -817,6 +915,12 @@ local function is_unread(name, id)
 end
 
 remuda._butler_mail = { mailbox = mailbox, queue = queue, reply = reply, forward = forward, forward_delivery = deliver_forward, inbox = inbox, unread = unread, append = append,
+  -- Local, idempotent receipt delivery. The caller supplies a deterministic
+  -- message ID and the original message ID stored as structured `receipt_of`.
+  queue_receipt = function(from, to, text, subject, receipt_of, stable_id, created_at)
+    return queue(from, to, text, subject, nil, nil, nil, receipt_of,
+      { id = stable_id, created_at = created_at })
+  end,
   matrix_header = matrix_header, matrix_target = matrix_target,
   matrix_thread_target = matrix_thread_target,
   matrix_body_mark = MATRIX_BODY_MARK,

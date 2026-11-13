@@ -39,6 +39,7 @@ local RUNTIME_HELPERS = {
   "_butler_notice_open_stuck", "_butler_inbox_delivery", "_butler_dialog_tick",
   "_butler_reconcile", "_butler_reconcile_retry", "_butler_done_tick",
   "_butler_compaction_tick", "_butler_session_exited", "_butler_compaction_submit",
+  "_butler_read_receipts_tick",
   "_butler_cancel_active_choosers",
   -- Dynamic deps read by restored notice closures. Durable bus/mail/journal
   -- modules stay live and are deliberately absent.
@@ -859,6 +860,9 @@ return {
     end },
     { name = "butler-done-autoclose", every = 30, run = function()
       if booted and host._butler_done_tick then host._butler_done_tick() end
+    end },
+    { name = "butler-read-receipts", every = 30, run = function()
+      if booted and host._butler_read_receipts_tick then host._butler_read_receipts_tick() end
     end },
     { name = "butler-schedule", every = 30, run = function()
       if booted and host._butler_schedule_tick then host._butler_schedule_tick() end

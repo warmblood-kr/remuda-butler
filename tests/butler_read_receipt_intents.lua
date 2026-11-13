@@ -77,12 +77,13 @@ local function fake_db()
       return 1
     end
     if sql:find("INSERT OR IGNORE INTO read_receipt_intents", 1, true) then
-      local recipient, id = params[1], params[2]
+      local receipt_id, recipient, id = params[1], params[2], params[3]
       for _, row in ipairs(db.rows) do
         if row.recipient == recipient and row.message_id == id and row.is_read == 0
             and not db.intents[key(recipient, id)] then
           db.intents[key(recipient, id)] = { recipient = recipient, message_id = id,
-            read_at = "2026-11-13T04:00:00Z", status = "pending" }
+            read_at = "2026-11-13T04:00:00Z", status = "pending",
+            receipt_id = receipt_id or "" }
         end
       end
       return 1
