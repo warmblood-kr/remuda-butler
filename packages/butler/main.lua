@@ -490,6 +490,43 @@ remuda.exec("butler/inbox_db")
 remuda.exec("butler/inbox_sqlite_simple")
 local simple_module = remuda._butler_simple_inbox_module
 local simple = remuda._butler_simple_inbox
+-- A reload re-executes this file but the host keeps the table from the previous
+-- activation: `simple.store` still points at the module table that was current
+-- then, while the exec above has already loaded the new one. The open handle
+-- also predates the new migrations, and migrations run only inside
+-- remuda.db.open. Bring the schema forward through one short-lived connection,
+-- prove that the handle we keep sees it, and only then swap in the new module
+-- table. The new mail and receipt modules call queries the previous table does
+-- not have, so a store that cannot be readied must refuse this activation:
+-- continuing would publish a mixed graph that throws on every read. Refusing
+-- lets the lifecycle restore the previous graph (its code and its store), and a
+-- cold restart is the operator recovery.
+local function schema_ready(db)
+  if type(simple_module.ready) ~= "function" then return false, "module has no schema check" end
+  local ok, ready, why = pcall(simple_module.ready, db)
+  if not ok then return false, tostring(ready) end
+  return ready, why
+end
+if simple and simple.db then
+  local current, why = schema_ready(simple.db)
+  if not current then
+    local open = remuda.db and remuda.db.open
+    if type(open) ~= "function" then
+      error("cannot ready the SQLite inbox after reload: remuda.db.open missing", 0)
+    end
+    local probe, open_why = open("inbox", { migrations = true, timeout_ms = 200 })
+    if not probe then
+      error("cannot ready the SQLite inbox after reload: " .. tostring(open_why), 0)
+    end
+    local ready, ready_why = schema_ready(probe)
+    if ready then ready, ready_why = schema_ready(simple.db) end
+    if type(probe.close) == "function" then pcall(probe.close, probe) end
+    if not ready then
+      error("cannot ready the SQLite inbox after reload: " .. tostring(ready_why), 0)
+    end
+  end
+  if simple.store ~= simple_module then simple.store = simple_module end
+end
 if not simple and mail_root then
   local marker = mail_root .. "/sqlite-active"
   local marker_file = io.open(marker, "r")

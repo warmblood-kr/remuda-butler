@@ -175,6 +175,25 @@ local recipient = "aa"
 local mailbox = component(recipient)
 local store = dofile("packages/butler/inbox_sqlite_simple.lua")
 
+-- A reload can hand this module a database that an older build opened. The
+-- schema check gates the store swap, so it must refuse an older version and an
+-- unreadable one instead of letting new queries run on an old shape.
+assert(store.SCHEMA_VERSION == 5, "schema constant drifted from the newest migration")
+local function version_db(value)
+  return { query = function(_, sql)
+    assert(sql == "PRAGMA user_version", "unexpected schema query: " .. tostring(sql))
+    if value == nil then return nil, "no such connection" end
+    return { { user_version = value } }
+  end }
+end
+assert(store.ready(version_db(5)) == true, "current schema was refused")
+assert(store.ready(version_db(6)) == true, "newer schema was refused")
+local older, older_why = store.ready(version_db(4))
+assert(older == false and tostring(older_why):find("v4", 1, true) ~= nil,
+  "older schema was accepted")
+local broken, broken_why = store.ready(version_db(nil))
+assert(broken == false and broken_why ~= nil, "unreadable schema version was accepted")
+
 local bus = { agents = {}, inboxes = {}, messages = {}, objects = {} }
 remuda._butler_mail_config = {
   bus = bus,

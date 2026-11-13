@@ -2,6 +2,24 @@
 -- The caller owns the database connection and decides when to switch readers.
 local M = {}
 
+-- Newest inbox migration this module's queries require. Keep it in step with
+-- packages/butler/migrations/inbox: a reload can hand this module a database
+-- that an older build opened, and every query below assumes the newest shape.
+M.SCHEMA_VERSION = 5
+
+-- True only when the connection carries at least the schema this module reads.
+-- A caller that is about to swap in this module after a reload checks first, so
+-- new queries never run against an old database.
+function M.ready(db)
+  local rows, err = db:query('PRAGMA user_version')
+  if not rows then return false, tostring(err or 'schema version unavailable') end
+  local version = tonumber(rows[1] and rows[1].user_version) or 0
+  if version < M.SCHEMA_VERSION then
+    return false, 'schema v' .. tostring(version) .. ' is older than v' .. tostring(M.SCHEMA_VERSION)
+  end
+  return true
+end
+
 local function checked(db, method, sql, args)
   local result, err = db[method](db, sql, args or {})
   if result == nil then error(tostring(err or 'sqlite operation failed'), 0) end

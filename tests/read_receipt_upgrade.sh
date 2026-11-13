@@ -63,6 +63,179 @@ stop_daemon() {
 start_daemon
 boot_butler
 
+# Live reload, the path a mod update takes: the host keeps the previous
+# activation's table, so `simple.store` still points at the module table that
+# was current then while main.lua has already loaded the new one. The old table
+# has none of the receipt queries; a reload that does not swap it leaves the
+# receipt drain calling a missing function (pending_recipients nil in a live
+# daemon). The new module must replace the store, keep the live database handle
+# and see the current schema through that handle.
+echo "== live reload replaces the previous store"
+"$REMUDA_BIN" -s "$S" -e '
+  local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active")
+  assert(type(simple.store.pending_recipients) == "function",
+    "a fresh boot did not use the current store module")
+  -- The module table a previous build would have left in the host table.
+  local previous = {}
+  for name, value in pairs(simple.store) do previous[name] = value end
+  previous.pending_recipients = nil
+  previous.pending_local_intent_details = nil
+  previous.pending_intent_details = nil
+  previous.defer_intent = nil
+  previous.mark_intent_status = nil
+  previous.claim_receipt = nil
+  previous.note_intent_attempt = nil
+  previous.record_intent_failure = nil
+  previous.record_matrix_state = nil
+  simple.store = previous
+  remuda._butler_reload_handle = simple.db
+  assert(type(simple.store.pending_recipients) == "nil",
+    "the stale-store fixture still exposes the new receipt query")
+' >/dev/null
+"$REMUDA_BIN" -s "$S" -e 'return remuda.reload("butler")' >/dev/null
+"$REMUDA_BIN" -s "$S" -e '
+  local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active after reload")
+  assert(simple.store == remuda._butler_simple_inbox_module,
+    "reload kept the previous store table instead of the current module")
+  assert(type(simple.store.pending_recipients) == "function",
+    "reload left the receipt scan unavailable")
+  assert(simple.db == remuda._butler_reload_handle,
+    "reload replaced the live database handle")
+  local version = assert(simple.db:query("PRAGMA user_version"))
+  assert(tonumber(version[1].user_version) == simple.store.SCHEMA_VERSION,
+    "the preserved handle does not see the current schema")
+  -- The preserved handle answers a current-schema query and the new scan runs.
+  assert(#assert(simple.db:query("SELECT matrix_state FROM read_receipt_intents")) == 0,
+    "the preserved handle cannot read the current intent projection")
+  local counts = assert(assert(remuda._butler_read_receipts).drain())
+  assert(counts.available == true, "reload left the receipt drain unavailable")
+' >/dev/null
+
+# A store that cannot be readied must refuse this activation. Continuing would
+# publish the new mail/receipt modules on the previous store table, which has
+# none of their queries, so every read would throw. The refusal keeps the
+# previous graph and the previous store, and the operator recovers by restart.
+echo "== a reload that cannot ready the store is refused"
+"$REMUDA_BIN" -s "$S" db downgrade butler inbox 4 --yes >/dev/null
+"$REMUDA_BIN" -s "$S" -e '
+  local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active")
+  local version = assert(simple.db:query("PRAGMA user_version"))
+  assert(tonumber(version[1].user_version) == 4, "downgrade did not reach v4")
+  local previous = {}
+  for name, value in pairs(simple.store) do previous[name] = value end
+  previous.pending_recipients = nil
+  previous.record_matrix_state = nil
+  simple.store = previous
+  remuda._butler_real_open = assert(remuda.db and remuda.db.open)
+  remuda.db.open = function(name, options)
+    if name == "inbox" then return nil, "synthetic open failure" end
+    return remuda._butler_real_open(name, options)
+  end
+' >/dev/null
+if "$REMUDA_BIN" -s "$S" -e 'return remuda.reload("butler")' >"$T/refused.log" 2>&1; then
+  echo "FAIL: reload accepted a store it could not ready" >&2
+  exit 1
+fi
+grep -F "cannot ready the SQLite inbox after reload" "$T/refused.log" >/dev/null || {
+  cat "$T/refused.log" >&2
+  echo "FAIL: the refusal did not name the unreadied store" >&2
+  exit 1
+}
+"$REMUDA_BIN" -s "$S" -e '
+  local simple = assert(remuda._butler_simple_inbox, "the refused reload lost the inbox")
+  assert(simple.store ~= remuda._butler_simple_inbox_module,
+    "a refused reload still swapped in the new store")
+  assert(type(simple.store.pending_recipients) == "nil",
+    "a refused reload published the new store table")
+  assert(simple.db == remuda._butler_reload_handle,
+    "a refused reload replaced the live database handle")
+  local version = assert(simple.db:query("PRAGMA user_version"))
+  assert(tonumber(version[1].user_version) == 4,
+    "a refused reload migrated the database anyway")
+  remuda.db.open = remuda._butler_real_open
+  remuda._butler_real_open = nil
+' >/dev/null
+
+# The same older schema, this time with a working migration, must be brought
+# forward through the handle we keep before the store is swapped.
+echo "== reload migrates an older schema"
+"$REMUDA_BIN" -s "$S" -e 'return remuda.reload("butler")' >/dev/null
+"$REMUDA_BIN" -s "$S" -e '
+  local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active after migration")
+  assert(simple.store == remuda._butler_simple_inbox_module,
+    "reload did not swap the store after migrating")
+  assert(simple.db == remuda._butler_reload_handle,
+    "migration replaced the live database handle")
+  local version = assert(simple.db:query("PRAGMA user_version"))
+  assert(tonumber(version[1].user_version) == 5, "reload did not migrate the older schema")
+  local columns = assert(simple.db:query("PRAGMA table_info(read_receipt_intents)"))
+  local names = {}
+  for _, column in ipairs(columns) do names[column.name] = true end
+  assert(names.matrix_state, "migration did not add the Matrix projection")
+  assert(#assert(simple.db:query("SELECT matrix_state FROM read_receipt_intents")) == 0)
+' >/dev/null
+
+# A later activation failure rolls back to the previous graph. The store is
+# already swapped by then, so the restored closures must still work against it:
+# the new table is a superset and the schema is current.
+echo "== activation rollback keeps the receipt path usable"
+# The message the restored graph will read: the files are what the inbox
+# renderer reads, and the store row is what the read marks and the drain joins.
+printf '%s\n' '{"id":"RB1","from":{"host":"local","id":"rbsender","alias":"rbsender","session":"rbsender"},"to":[{"host":"local","id":"rb","alias":"rb","session":"rb"}],"subject":"Task","created_at":"2026-11-13","content_type":"text/plain","body":{"object_id":"object-RB1"}}' >"$MAIL/messages/RB1.json"
+printf 'rollback body' >"$MAIL/objects/object-RB1"
+"$REMUDA_BIN" -s "$S" -e '
+  local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active")
+  local db = simple.db
+  -- Real mail for the restored graph to read and acknowledge.
+  local envelope = [[{"id":"RB1","from":{"host":"local","id":"rbsender","alias":"rbsender","session":"rbsender"},"to":[{"host":"local","id":"rb","alias":"rb","session":"rb"}],"subject":"Task","created_at":"2026-11-13","content_type":"text/plain","body":{"object_id":"object-RB1"}}]]
+  assert(simple.store.deliver(db, "7262", "RB1", envelope, "rollback body", "{}", ""))
+  -- The candidate swaps this stale table, then fails later in the activation.
+  local previous = {}
+  for name, value in pairs(simple.store) do previous[name] = value end
+  previous.pending_recipients = nil
+  previous.record_matrix_state = nil
+  simple.store = previous
+  remuda._butler_real_exec = assert(remuda.exec)
+  remuda.exec = function(name)
+    if name == "butler/mail" then error("synthetic post-swap activation failure") end
+    return remuda._butler_real_exec(name)
+  end
+' >/dev/null
+if "$REMUDA_BIN" -s "$S" -e 'return remuda.reload("butler")' >"$T/rollback.log" 2>&1; then
+  echo "FAIL: reload accepted a failing activation" >&2
+  exit 1
+fi
+"$REMUDA_BIN" -s "$S" -e '
+  remuda.exec = remuda._butler_real_exec
+  remuda._butler_real_exec = nil
+  local simple = assert(remuda._butler_simple_inbox, "rollback lost the inbox")
+  assert(simple.store == remuda._butler_simple_inbox_module,
+    "the swapped store was lost by the rollback")
+  local db = simple.db
+  local mail = assert(remuda._butler_mail, "rollback lost the mail module")
+  -- The restored closure reads real mail, then delivers its receipt.
+  local text = assert(mail.inbox("rb", { reader_id = "rb" }),
+    "the restored mail module cannot read")
+  assert(text:find("rollback body", 1, true), "the restored read missed the message")
+  local counts = assert(assert(remuda._butler_read_receipts).drain())
+  assert(counts.available == true, "the restored graph cannot drain receipts")
+  assert(counts.delivered == 1, "the restored graph did not deliver the receipt")
+  assert(counts.errors == 0, "the restored drain reported errors")
+  local intent = assert(db:query(
+    "SELECT receipt_id,receipt_body,status FROM read_receipt_intents WHERE recipient = ? AND message_id = ?",
+    { "7262", "RB1" }))
+  assert(#intent == 1 and intent[1].status == "delivered",
+    "the restored graph left the receipt intent undelivered")
+  assert(intent[1].receipt_body:find("RB1", 1, true),
+    "the delivered receipt body lost the message id")
+  local receipt = assert(db:query(
+    "SELECT envelope FROM simple_inbox WHERE recipient = ? AND message_id = ?",
+    { "726273656e646572", intent[1].receipt_id }))
+  assert(#receipt == 1, "the sender did not receive the receipt")
+  assert(receipt[1].envelope:find("\"receipt_of\":\"RB1\"", 1, true),
+    "the receipt is not correlated to the message")
+' >/dev/null
+
 # Populated 5 -> 4: seed a pending intent, then prove the 0004 shape still
 # drains it, and 4 -> 5 keeps the delivered row and its rotation value.
 "$REMUDA_BIN" -s "$S" -e '
@@ -74,6 +247,9 @@ boot_butler
   assert(simple.store.mark_read(db, "7a7a", "Z", true, nil))
   assert(db:exec("COMMIT"))
 ' >/dev/null
+# The reload migration step already took a v5 backup; the name is deterministic,
+# so drop it before this downgrade takes its own.
+rm -f "$HOME/.local/state/remuda/db/butler/"inbox.db.v5-*.bak
 "$REMUDA_BIN" -s "$S" db downgrade butler inbox 4 --yes >/dev/null
 "$REMUDA_BIN" -s "$S" -e '
   local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active")
@@ -133,9 +309,9 @@ rm -f "$HOME/.local/state/remuda/db/butler/"inbox.db.v5-*.bak
   local rows = assert(db:query("SELECT message_id,is_read FROM simple_inbox ORDER BY seq"))
   local seen = {}
   for _, row in ipairs(rows) do seen[row.message_id] = tonumber(row.is_read) end
-  assert(#rows == 5, "existing mail was lost on downgrade")
-  assert(seen.A == 0 and seen.B == 1 and seen.C == 0 and seen.D == 0 and seen.E == 0,
-    "existing read state changed on downgrade")
+  assert(#rows == 7, "existing mail was lost on downgrade")
+  assert(seen.A == 0 and seen.B == 1 and seen.C == 0 and seen.D == 0 and seen.E == 0
+    and seen.RB1 == 1, "existing read state changed on downgrade")
 ' >/dev/null
 
 # Restart so the next open applies the migrations to the real existing database.
@@ -158,9 +334,9 @@ boot_butler
   local rows = assert(db:query("SELECT message_id,is_read FROM simple_inbox ORDER BY seq"))
   local seen = {}
   for _, row in ipairs(rows) do seen[row.message_id] = tonumber(row.is_read) end
-  assert(#rows == 5, "existing mail was lost on upgrade")
-  assert(seen.A == 0 and seen.B == 1 and seen.C == 0 and seen.D == 0 and seen.E == 0,
-    "existing read state changed on upgrade")
+  assert(#rows == 7, "existing mail was lost on upgrade")
+  assert(seen.A == 0 and seen.B == 1 and seen.C == 0 and seen.D == 0 and seen.E == 0
+    and seen.RB1 == 1, "existing read state changed on upgrade")
   local intents = assert(db:query("SELECT message_id FROM read_receipt_intents"))
   assert(#intents == 0, "upgrade backfilled receipt intents")
 
