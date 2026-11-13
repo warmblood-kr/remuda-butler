@@ -1862,6 +1862,10 @@ return function(matrix, pinned_hostname)
     -- Every Butler Lua file: no line that touches the store may name a get or a read.
     local function reads_store(line)
       if not (line:find("credential[%._%[]") or line:find("%f[%w_]store[%.%[]")) then return false end
+      -- The SQLite inbox store is not the OS secure store. Marking a delivered
+      -- message read is an ordinary write; its `mark_read` name is not a
+      -- credential read.
+      if line:find("simple%.store%.mark_read", 1) then return false end
       return line:find("[%._]get%f[^%w_]") ~= nil or line:find("[%._]read%f[^%w_]") ~= nil
         or line:find("[\"']get[\"']") ~= nil or line:find("[\"']read[\"']") ~= nil
     end
@@ -1870,6 +1874,8 @@ return function(matrix, pinned_hostname)
       assert(reads_store(line), "the scan should catch: " .. line)
     end
     assert(not reads_store("system.credential_put(name, secret)") and not reads_store("file:read('*a')"))
+    assert(not reads_store('config.simple.store.mark_read(db, "aa", "A", true, "01X")'),
+      "the inbox read-marking write must not look like a credential read")
     -- The file list comes from tests/butler_matrix_relay.sh: Lua here runs no shell,
     -- and this core's remuda.fs has no directory listing.
     local listing = os.getenv("BUTLER_LUA_FILES") or ""

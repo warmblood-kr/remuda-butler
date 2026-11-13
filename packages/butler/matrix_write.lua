@@ -119,10 +119,26 @@ local function pillify(html, resolve)
   return table.concat(out), ids
 end
 
-local function send_chunks(room, text, relation, on_done, txn_prefix, plain)
+local function send_chunks(room, text, relation, on_done, txn_prefix, plain, extra)
   local done = once(on_done)
   if type(text) ~= "string" or text == "" then
     return error_result(done, "message text must not be empty")
+  end
+  -- Structured opt-in fields for machine messages (the read-receipt loop
+  -- guard). Only the io.butler namespace is accepted, and only scalars, so a
+  -- caller cannot overwrite the message shape or the thread relation.
+  local structured
+  if type(extra) == "table" then
+    structured = {}
+    for key, value in pairs(extra) do
+      if type(key) == "string" and key:match("^io%.butler%.[%w%._%-]+$")
+          and (type(value) == "string" or type(value) == "boolean" or type(value) == "number")
+          and (type(value) ~= "string" or #value <= 512) then
+        structured[key] = value
+      else
+        return error_result(done, "invalid content_extra field: " .. tostring(key))
+      end
+    end
   end
   -- CLI parsing may reserve '-' for stdin; this async word sends it literally.
   local chunks, event_ids, index, current, cancelled = split_utf8(text), {}, 1, nil, false
@@ -153,6 +169,9 @@ local function send_chunks(room, text, relation, on_done, txn_prefix, plain)
       end
     end
     if relation then content["m.relates_to"] = relation end
+    if structured then
+      for key, value in pairs(structured) do content[key] = value end
+    end
     local body, encode_error = matrix.encode_json(content)
     if not body then return done({ error = encode_error }) end
     local txn = txn_prefix and (txn_prefix .. "_" .. tostring(index)) or next_txn()
@@ -187,7 +206,7 @@ function matrix.send(opts, on_done)
   end
   local slot, slot_error = matrix.take_post_slot()
   if not slot then return error_result(done, slot_error) end
-  return send_chunks(room, opts.text, nil, done, nil, opts.plain == true)
+  return send_chunks(room, opts.text, nil, done, nil, opts.plain == true, opts.content_extra)
 end
 
 local function same_room_then(room, event_id, on_done, action)
@@ -280,7 +299,8 @@ function matrix.reply(opts, on_done)
       end
       relay:note_own_turn(room, root, boundary_exempt)
     end
-    return send_chunks(room, opts.text, thread_relation(opts), reply_done, opts.txn_id)
+    return send_chunks(room, opts.text, thread_relation(opts), reply_done, opts.txn_id, nil,
+      opts.content_extra)
   end)
 end
 

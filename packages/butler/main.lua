@@ -675,11 +675,42 @@ end
 -- fallback stays explicit: without SQLite intents there is nothing to drain.
 -- The notice goes through the same safe mail-notice policy as ordinary mail;
 -- the module asks on every durable acceptance, and the policy's journal/ID
--- dedupe prevents a second typed notice. Matrix intents are not drained here.
+-- dedupe prevents a second typed notice. Matrix intents are drained by the
+-- relay path below, never by the local mailbox.
+local function butler_matrix()
+  return remuda.butler and remuda.butler.matrix
+end
 remuda._butler_read_receipts_config = {
   simple = simple,
   mail = mail,
   reader_address = mail_address_by_id,
+  matrix = {
+    available = function()
+      local candidate = butler_matrix()
+      return candidate and candidate.relay and candidate.relay.instance ~= nil
+    end,
+    status = function(reply_id)
+      local candidate = butler_matrix()
+      if candidate and type(candidate.read_receipt_status) == "function" then
+        return candidate.read_receipt_status(reply_id)
+      end
+      return nil
+    end,
+    route = function(mail_id)
+      local candidate = butler_matrix()
+      if candidate and type(candidate.read_receipt_route) == "function" then
+        return candidate.read_receipt_route(mail_id)
+      end
+      return nil
+    end,
+    mail_reply = function(opts)
+      local candidate = butler_matrix()
+      if not (candidate and type(candidate.mail_reply) == "function") then
+        return nil, "Matrix is not configured"
+      end
+      return candidate.mail_reply(opts)
+    end,
+  },
   notify = function(message, recipient)
     local notice = { id = message.id, from = message.from, to = { recipient },
       kind = "read_receipt", receipt_of = message.receipt_of }
@@ -928,6 +959,14 @@ function remuda._butler_inbox(name, reader)
       local diagnostics = remuda._butler_diagnostics
       if diagnostics and type(diagnostics.record) == "function" then
         pcall(diagnostics.record, "read_receipts", "error", "post_read_drain", tostring(drain_err))
+      end
+    end
+    local matrix_ok, matrix_err = pcall(read_receipts.drain_matrix)
+    if not matrix_ok then
+      local diagnostics = remuda._butler_diagnostics
+      if diagnostics and type(diagnostics.record) == "function" then
+        pcall(diagnostics.record, "read_receipts", "error", "post_read_matrix_drain",
+          tostring(matrix_err))
       end
     end
   end

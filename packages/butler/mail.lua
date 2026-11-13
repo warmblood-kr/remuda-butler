@@ -183,6 +183,11 @@ local function envelope_json(message, object)
       .. (message.matrix.thread_id and ',"thread_id":' .. config.json_quote(message.matrix.thread_id) or "")
       .. (message.matrix.in_reply_to and ',"in_reply_to":' .. config.json_quote(message.matrix.in_reply_to) or "")
       .. (message.matrix.room_kind and ',"room_kind":' .. config.json_quote(message.matrix.room_kind) or "")
+      .. (message.matrix.context_mail_id and ',"context_mail_id":' .. config.json_quote(message.matrix.context_mail_id) or "")
+      .. (message.matrix.from_agent ~= nil and ',"from_agent":' .. tostring(message.matrix.from_agent == true) or "")
+      .. (message.matrix.allowlisted_human ~= nil
+        and ',"allowlisted_human":' .. tostring(message.matrix.allowlisted_human == true) or "")
+      .. (message.matrix.trusted ~= nil and ',"trusted":' .. tostring(message.matrix.trusted == true) or "")
       .. (message.matrix.mxc and ',"mxc":' .. config.json_quote(message.matrix.mxc) or "")
       .. (message.matrix.mentions and ',"mentions":[' .. table.concat(mentions, ",") .. ']' or "")
       .. ',"media":[' .. table.concat(media, ",") .. ']}'
@@ -265,9 +270,18 @@ local function load_message(disk, id)
       thread_id = matrix:match('"thread_id":"(.-)"'),
       in_reply_to = matrix:match('"in_reply_to":"(.-)"'),
       room_kind = matrix:match('"room_kind":"(.-)"'),
+      context_mail_id = matrix:match('"context_mail_id":"(.-)"'),
       mxc = matrix:match('"mxc":"(.-)"'),
       media = {}, mentions = {},
     }
+    local function matrix_bool(key)
+      if matrix:find('"' .. key .. '":true', 1, true) then return true end
+      if matrix:find('"' .. key .. '":false', 1, true) then return false end
+      return nil
+    end
+    message.matrix.from_agent = matrix_bool("from_agent")
+    message.matrix.allowlisted_human = matrix_bool("allowlisted_human")
+    message.matrix.trusted = matrix_bool("trusted")
     local media = matrix:match('"media":(%b[])')
     if media then
       for url in media:gmatch('"(.-)"') do message.matrix.media[#message.matrix.media + 1] = url end
@@ -537,7 +551,9 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix, r
       sender = matrix.sender, room_id = matrix.room_id, event_id = matrix.event_id,
       room = matrix.room or matrix.room_kind, thread_id = matrix.thread_id,
       thread_root = matrix.thread_root, in_reply_to = matrix.in_reply_to,
-      room_kind = matrix.room_kind,
+      room_kind = matrix.room_kind, context_mail_id = matrix.context_mail_id,
+      from_agent = matrix.from_agent, allowlisted_human = matrix.allowlisted_human,
+      trusted = matrix.trusted,
       mxc = matrix.mxc, media = matrix.media or {}, mentions = matrix.mentions or {},
     } or nil }
   -- A stable ID makes delivery idempotent across a retry or restart. An

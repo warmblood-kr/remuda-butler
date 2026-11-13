@@ -33,6 +33,7 @@ deep tests/butler_input_recovery.lua
 deep tests/butler_instance_binding_modes.lua
 fast tests/butler_lifecycle_reload.lua
 deep tests/butler_matrix_mention_send.lua
+deep tests/butler_matrix_read_receipts.lua
 deep tests/butler_matrix_relay.lua
 deep tests/butler_matrix_setup.lua
 deep tests/butler_matrix_write.lua

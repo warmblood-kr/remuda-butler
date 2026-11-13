@@ -224,7 +224,8 @@ function M.drain()
   end
   for _, row in ipairs(recipients) do
     if budget_done() then break end
-    local intents, detail_err = store.pending_intent_details(db, row.recipient)
+    local details = store.pending_local_intent_details or store.pending_intent_details
+    local intents, detail_err = details(db, row.recipient)
     if intents == nil then
       report("error", "pending_intent_details", detail_err)
       counts.errors = counts.errors + 1
@@ -267,8 +268,203 @@ end
 
 function M.tick()
   local counts = M.drain()
+  local matrix_counts = M.drain_matrix()
+  if config.matrix then counts.matrix = matrix_counts end
   if counts.errors and counts.errors > 0 then
     report("degraded", "tick_errors", tostring(counts.errors))
+  end
+  if matrix_counts.errors and matrix_counts.errors > 0 then
+    report("degraded", "matrix_tick_errors", tostring(matrix_counts.errors))
+  end
+  return counts
+end
+
+-- A Matrix-origin intent is deferred by the local drain. This second drain
+-- delivers it as a threaded reply from the Butler bot to the original event.
+-- It is not allowed to run in the local path's place: the A2 notice and file
+-- mailbox are never used here.
+local MATRIX_MAX_PER_TICK = 20
+local MATRIX_SCAN_MAX = 200
+
+local function matrix_envelope(envelope)
+  local matrix = type(envelope) == "table" and envelope.matrix or nil
+  if type(matrix) ~= "table" then return nil end
+  if type(matrix.event_id) ~= "string" or matrix.event_id == "" then return nil end
+  if type(matrix.room_id) ~= "string" or matrix.room_id == "" then return nil end
+  return matrix
+end
+
+-- Only a route the relay proved came from an allowlisted human is eligible.
+-- The durable envelope copy is the fallback for a trimmed route; anything
+-- else fails closed instead of auto-acknowledging a stranger.
+local function matrix_allowed(route, envelope_matrix)
+  if type(route) == "table" and route.allowlisted_human == true then return true end
+  return envelope_matrix.from_agent == false and envelope_matrix.allowlisted_human == true
+end
+
+function M.drain_matrix()
+  local simple, matrix = config.simple, config.matrix
+  local counts = { available = false, queued = 0, delivered = 0, skipped = 0,
+    uncertain = 0, failed = 0, errors = 0 }
+  if not (simple and simple.db and simple.store and matrix) then return counts end
+  if type(matrix.available) == "function" then
+    local ok, live = pcall(matrix.available)
+    if not ok or not live then return counts end
+  end
+  local function call(name, ...)
+    local fn = matrix[name]
+    if type(fn) ~= "function" then return nil, "matrix_" .. name .. "_unavailable" end
+    local ok, first, second = pcall(fn, ...)
+    if not ok then return nil, tostring(first), true end
+    return first, second
+  end
+  counts.available = true
+  local store, db = simple.store, simple.db
+  local recipients, err = store.pending_recipients(db)
+  if recipients == nil then
+    report("error", "matrix_pending_recipients", err)
+    counts.errors = 1
+    return counts
+  end
+  local processed, scanned = 0, 0
+  for _, row in ipairs(recipients) do
+    if processed >= MATRIX_MAX_PER_TICK or scanned >= MATRIX_SCAN_MAX then break end
+    local details = store.pending_local_intent_details or store.pending_intent_details
+    local intents, detail_err = details(db, row.recipient)
+    if intents == nil then
+      report("error", "matrix_pending_intents", detail_err)
+      counts.errors = counts.errors + 1
+    else
+      for _, intent in ipairs(intents) do
+        if processed >= MATRIX_MAX_PER_TICK or scanned >= MATRIX_SCAN_MAX then break end
+        scanned = scanned + 1
+        local reader_id = unhex(intent.recipient)
+        local envelope = reader_id and decode_envelope(intent.envelope) or nil
+        local matrix_meta = matrix_envelope(envelope)
+        if reader_id and matrix_meta then
+          processed = processed + 1
+          -- After the A2 rotation column lands, every examined Matrix intent
+          -- moves behind the untried ones too, so a long queued backlog cannot
+          -- pin the scan to the same first page.
+          if type(store.note_intent_attempt) == "function" then
+            local noted, note_err = store.note_intent_attempt(db, intent.recipient,
+              intent.message_id)
+            if noted == nil then
+              report("error", "matrix_intent_attempt_record", note_err or intent.message_id)
+            end
+          end
+          if type(envelope.receipt_of) == "string" and envelope.receipt_of ~= "" then
+            if mark(store, db, intent, "skipped") then counts.skipped = counts.skipped + 1 end
+          else
+            local verdict = classify(reader_id, envelope)
+            if verdict ~= "defer" then
+              -- Not a Matrix sender (or unreadable): the local drain owns it.
+              counts.skipped = counts.skipped + 1
+            else
+              local route = call("route", intent.message_id)
+              if type(route) ~= "table" then
+                -- A trimmed route falls back to the durable envelope flags,
+                -- but only when they prove an allowlisted human sender.
+                if matrix_meta.from_agent == false and matrix_meta.allowlisted_human == true then
+                  route = { room_id = matrix_meta.room_id, event_id = matrix_meta.event_id,
+                    thread_root = matrix_meta.thread_root, from_agent = false,
+                    allowlisted_human = true, room_kind = matrix_meta.room_kind }
+                else
+                  route = nil
+                end
+              end
+              if not matrix_allowed(route, matrix_meta) then
+                if mark(store, db, intent, "skipped") then counts.skipped = counts.skipped + 1 end
+              else
+                local reader = reader_address(reader_id, envelope)
+                local body = "Read receipt: " .. tostring(reader.alias)
+                  .. " fetched message " .. tostring(intent.message_id)
+                  .. " from the Butler inbox."
+                local rid, text, rid_err = stable_receipt(store, db, intent, body)
+                if not rid then
+                  counts.errors = counts.errors + 1
+                  report("error", "matrix_receipt_id", rid_err)
+                else
+                  local durable = intent.matrix_state
+                  local status, status_detail = call("status", rid)
+                  local query_failed = status == nil and status_detail ~= nil
+                  local function project(state, event, err)
+                    local saved = store.record_matrix_state(db, intent.recipient,
+                      intent.message_id, state,
+                      state == "queued" and ("butler_" .. rid) or nil, event, err)
+                    if saved == nil then
+                      report("error", "matrix_state_write", intent.message_id)
+                      return false
+                    end
+                    return true
+                  end
+                  if durable == "delivered" or status == "delivered" then
+                    -- A durable result wins even after the relay result was
+                    -- trimmed: it is proof this receipt was sent once.
+                    project("delivered", type(status_detail) == "string" and status_detail or nil)
+                    if mark(store, db, intent, "delivered") then counts.delivered = counts.delivered + 1 end
+                  elseif durable == "failed" or status == "failed" then
+                    project("failed", nil, status_detail or "relay reported no delivery")
+                    if mark(store, db, intent, "failed") then counts.failed = counts.failed + 1 end
+                  elseif durable == "uncertain" or status == "uncertain" then
+                    project("uncertain", nil, "previous dispatch outcome unknown")
+                    counts.uncertain = counts.uncertain + 1
+                  elseif status == "queued" then
+                    project("queued")
+                    counts.queued = counts.queued + 1
+                  elseif durable == "queued" then
+                    -- We durably recorded the dispatch but the relay has no
+                    -- outbox/result (state lost, trimmed or restarted). The
+                    -- write may have happened; never send a second time.
+                    project("uncertain", nil, "relay outcome unavailable")
+                    counts.uncertain = counts.uncertain + 1
+                  elseif query_failed then
+                    counts.errors = counts.errors + 1
+                    report("degraded", "matrix_status", status_detail)
+                  else
+                    -- Record the dispatch before the relay call. If this write
+                    -- fails, refuse to send: an unrecorded send could be
+                    -- repeated after a restart.
+                    if not project("queued") then
+                      counts.errors = counts.errors + 1
+                    else
+                      local ok, queue_err, raised = call("mail_reply", {
+                        mail_id = intent.message_id, reply_mail_id = rid, text = text,
+                        route = route, txn_id = "butler_" .. rid,
+                        receipt_of = intent.message_id, machine = true,
+                        content_extra = { ["io.butler.receipt_of"] = intent.message_id,
+                          ["io.butler.receipt"] = true },
+                      })
+                      if ok then
+                        counts.queued = counts.queued + 1
+                      elseif raised then
+                        -- The call threw: the outbox item may already exist or
+                        -- the send may have happened. Never treat this as a
+                        -- clean pre-send refusal.
+                        project("uncertain", nil, "dispatch raised: " .. tostring(queue_err))
+                        counts.uncertain = counts.uncertain + 1
+                        report("error", "matrix_receipt_exception", queue_err)
+                      else
+                        local reason = tostring(queue_err or "matrix_reply_failed")
+                        local permanent = reason:find("route", 1, true) ~= nil
+                          or reason:find("non%-allowlisted") ~= nil
+                        project(permanent and "failed" or "deferred", nil, reason)
+                        store.record_intent_failure(db, intent.recipient, intent.message_id, permanent)
+                        counts.errors = counts.errors + 1
+                        if permanent then
+                          if mark(store, db, intent, "failed") then counts.failed = counts.failed + 1 end
+                        end
+                        report(permanent and "error" or "degraded", "matrix_receipt_queue", reason)
+                      end
+                    end
+                  end
+                end
+              end
+            end
+          end
+        end
+      end
+    end
   end
   return counts
 end

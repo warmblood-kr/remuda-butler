@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Real existing-install receipt intent upgrade.
 #
-# Creates an inbox database with existing simple_inbox data under migration
-# 0002, steps it back to the v1 schema with the stored down SQL (the same state
-# an older install has), then lets Butler reopen it and apply 0002 again.
+# Creates an inbox database with existing simple_inbox data under the current
+# schema, steps it back to the v1 schema with the stored down SQL (the same
+# state an older install has), then lets Butler reopen it and apply every
+# migration again.
 # Verifies existing mail/read state, no backfill, agent-only intents, and both
 # the agent and operator read paths after the upgrade.
 set -euo pipefail
@@ -62,8 +63,65 @@ stop_daemon() {
 start_daemon
 boot_butler
 
-# The first boot created v2. Step the actual DB back to v1: the intent table is
-# gone, but the existing simple_inbox rows and read state remain.
+# Populated 5 -> 4: seed a pending intent, then prove the 0004 shape still
+# drains it, and 4 -> 5 keeps the delivered row and its rotation value.
+"$REMUDA_BIN" -s "$S" -e '
+  local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active")
+  local db = simple.db
+  local envelope = [[{"id":"Z","from":{"host":"local","id":"sender","alias":"sender","session":"sender"},"to":[{"host":"local","id":"zz","alias":"zz","session":"zz"}],"subject":"Task","created_at":"2026-11-13","content_type":"text/plain","body":{"object_id":"object-Z"}}]]
+  assert(simple.store.deliver(db, "7a7a", "Z", envelope, "body Z", "{}", ""))
+  assert(db:exec("BEGIN IMMEDIATE"))
+  assert(simple.store.mark_read(db, "7a7a", "Z", true, nil))
+  assert(db:exec("COMMIT"))
+' >/dev/null
+"$REMUDA_BIN" -s "$S" db downgrade butler inbox 4 --yes >/dev/null
+"$REMUDA_BIN" -s "$S" -e '
+  local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active")
+  local db = simple.db
+  local version = assert(db:query("PRAGMA user_version"))
+  assert(tonumber(version[1].user_version) == 4, "downgrade to 0004 failed")
+  local columns = assert(db:query("PRAGMA table_info(read_receipt_intents)"))
+  local names = {}
+  for _, column in ipairs(columns) do names[column.name] = true end
+  assert(names.attempt_seq and not names.matrix_state, "0005 down changed the 0004 shape")
+  local seq = assert(db:query("SELECT name FROM sqlite_master WHERE type=\"table\" AND name=\"receipt_attempt_seq\""))
+  assert(#seq == 1, "0005 down removed the attempt sequence table")
+  local counts = assert(assert(remuda._butler_read_receipts).drain())
+  assert(counts.delivered == 1, "the 0004 shape did not drain the pending receipt")
+  local row = assert(db:query(
+    "SELECT status,attempt_seq FROM read_receipt_intents WHERE recipient = ? AND message_id = ?",
+    { "7a7a", "Z" }))
+  assert(row[1].status == "delivered" and row[1].attempt_seq ~= nil,
+    "the 0004 drain did not mark the receipt delivered with a rotation value")
+' >/dev/null
+"$REMUDA_BIN" -s "$S" db upgrade butler inbox >/dev/null
+"$REMUDA_BIN" -s "$S" -e '
+  local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active")
+  local db = simple.db
+  local version = assert(db:query("PRAGMA user_version"))
+  assert(tonumber(version[1].user_version) == 5, "4 -> 5 did not apply")
+  local columns = assert(db:query("PRAGMA table_info(read_receipt_intents)"))
+  local names = {}
+  for _, column in ipairs(columns) do names[column.name] = true end
+  assert(names.matrix_state and names.matrix_txn_id, "4 -> 5 lost the Matrix projection")
+  local row = assert(db:query(
+    "SELECT status,attempt_seq FROM read_receipt_intents WHERE recipient = ? AND message_id = ?",
+    { "7a7a", "Z" }))
+  assert(row[1].status == "delivered" and row[1].attempt_seq ~= nil,
+    "4 -> 5 lost the delivered row or its rotation value")
+  -- Remove this cycle so the later assertions still see only A-E.
+  assert(db:exec("DELETE FROM read_receipt_intents WHERE recipient = ?", { "7a7a" }))
+  assert(db:exec("DELETE FROM simple_inbox WHERE recipient = ?", { "7a7a" }))
+  assert(db:exec("DELETE FROM simple_inbox WHERE recipient = ? AND envelope LIKE ?",
+    { "73656e646572", "%\"receipt_of\":\"Z\"%" }))
+' >/dev/null
+
+# The 5 -> 4 backup is deterministic; drop it so the later 5 -> 1 step can
+# take its own backup in this isolated run.
+rm -f "$HOME/.local/state/remuda/db/butler/"inbox.db.v5-*.bak
+
+# Step the actual DB back to v1: the intent table is gone, but the existing
+# simple_inbox rows and read state remain.
 "$REMUDA_BIN" -s "$S" db downgrade butler inbox 1 --yes >/dev/null
 "$REMUDA_BIN" -s "$S" -e '
   local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active")
@@ -80,7 +138,7 @@ boot_butler
     "existing read state changed on downgrade")
 ' >/dev/null
 
-# Restart so the next open applies 0002 to the real existing database.
+# Restart so the next open applies the migrations to the real existing database.
 stop_daemon
 start_daemon
 boot_butler
@@ -89,11 +147,14 @@ boot_butler
   local simple = assert(remuda._butler_simple_inbox, "simple inbox is not active after upgrade")
   local db = simple.db
   local version = assert(db:query("PRAGMA user_version"))
-  assert(tonumber(version[1].user_version) == 4, "0004 did not apply to the existing database")
+  assert(tonumber(version[1].user_version) == 5, "0005 did not apply to the existing database")
   local columns = assert(db:query("PRAGMA table_info(read_receipt_intents)"))
   local names = {}
   for _, column in ipairs(columns) do names[column.name] = true end
   assert(names.attempt_seq, "0004 attempt rotation column is missing")
+  assert(names.matrix_state and names.matrix_txn_id and names.matrix_event_id
+    and names.matrix_updated_at and names.matrix_error,
+    "0005 matrix projection columns are missing")
   local rows = assert(db:query("SELECT message_id,is_read FROM simple_inbox ORDER BY seq"))
   local seen = {}
   for _, row in ipairs(rows) do seen[row.message_id] = tonumber(row.is_read) end
@@ -234,7 +295,7 @@ boot_butler
 "$REMUDA_BIN" -s "$S" -e '
   local db = assert(remuda._butler_simple_inbox).db
   local version = assert(db:query("PRAGMA user_version"))
-  assert(tonumber(version[1].user_version) == 4, "schema version changed after restart")
+  assert(tonumber(version[1].user_version) == 5, "schema version changed after restart")
   local aa = assert(db:query("SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { "6161" }))
   assert(#aa == 2, "agent intents were lost or duplicated across restart")
   local bb = assert(db:query("SELECT message_id FROM read_receipt_intents WHERE recipient = ?", { "6262" }))

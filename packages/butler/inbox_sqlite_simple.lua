@@ -139,10 +139,27 @@ function M.pending_recipients(db)
       MIN(CASE WHEN attempt_seq IS NULL THEN -1 ELSE attempt_seq END), recipient]])
 end
 
-function M.pending_intent_details(db, recipient)
+-- Local delivery never needs the Matrix projection, and the A2 schema (a
+-- rolled-back v4 database) does not have those columns. Keeping this query
+-- matrix-free lets a downgraded database still drain local receipts.
+function M.pending_local_intent_details(db, recipient)
   return db:query([[SELECT i.recipient AS recipient, i.message_id AS message_id,
       i.read_at AS read_at, i.receipt_id AS receipt_id, i.receipt_body AS receipt_body,
       s.envelope AS envelope
+    FROM read_receipt_intents i
+    LEFT JOIN simple_inbox s
+      ON s.recipient = i.recipient AND s.message_id = i.message_id
+    WHERE i.recipient = ? AND i.status = 'pending'
+    ORDER BY (i.deferred_at IS NOT NULL),
+      CASE WHEN i.attempt_seq IS NULL THEN -1 ELSE i.attempt_seq END,
+      i.read_at, i.message_id]], {recipient})
+end
+
+function M.pending_intent_details(db, recipient)
+  return db:query([[SELECT i.recipient AS recipient, i.message_id AS message_id,
+      i.read_at AS read_at, i.receipt_id AS receipt_id, i.receipt_body AS receipt_body,
+      i.matrix_state AS matrix_state, i.matrix_txn_id AS matrix_txn_id,
+      i.matrix_event_id AS matrix_event_id, s.envelope AS envelope
     FROM read_receipt_intents i
     LEFT JOIN simple_inbox s
       ON s.recipient = i.recipient AND s.message_id = i.message_id
@@ -225,6 +242,18 @@ function M.record_intent_failure(db, recipient, message_id, permanent)
     SET deferred_at = COALESCE(deferred_at, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     WHERE recipient = ? AND message_id = ? AND status = 'pending']],
     {recipient, message_id})
+end
+
+-- Durable projection of the relay write for a Matrix intent. The intent stays
+-- `pending` until the receipt is confirmed; `matrix_state` is what makes a
+-- restart or an uncertain send visible instead of re-dispatching it.
+function M.record_matrix_state(db, recipient, message_id, state, txn_id, event_id, err)
+  return db:exec([[UPDATE read_receipt_intents
+    SET matrix_state = ?, matrix_txn_id = COALESCE(?, matrix_txn_id),
+        matrix_event_id = COALESCE(?, matrix_event_id), matrix_error = ?,
+        matrix_updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE recipient = ? AND message_id = ? AND status = 'pending']],
+    {state, txn_id, event_id, err, recipient, message_id})
 end
 
 function M.rows(db, recipient)
