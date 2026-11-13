@@ -234,7 +234,13 @@ function M.drain()
         -- Rotate a deferred row behind untried ones. Best-effort: a failed
         -- timestamp write must not stop the delivery attempt itself.
         if type(store.note_intent_attempt) == "function" then
-          store.note_intent_attempt(db, intent.recipient, intent.message_id)
+          local noted, note_err = store.note_intent_attempt(db, intent.recipient,
+            intent.message_id)
+          if noted == nil then
+            -- Delivery still proceeds: rotation is an ordering aid, but a
+            -- failed write must be visible because it weakens fairness.
+            report("error", "intent_attempt_record", note_err or intent.message_id)
+          end
         end
         local outcome, reason, permanent = M.deliver_intent(intent)
         if outcome == "error" then

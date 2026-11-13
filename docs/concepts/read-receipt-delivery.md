@@ -27,8 +27,8 @@ The scan joins `simple_inbox` on `(recipient, message_id)`; the intent does not
 copy the sender. `recipient` is the hex mailbox component and decodes to the
 reader's canonical id.
 
-- **eligible:** local envelope with a non-empty `from.id`, sender != reader,
-  no structured `receipt_of`.
+- **eligible:** local envelope with a `from.id`, sender != reader, no
+  structured `receipt_of`.
 - **skipped:** `receipt_of` present, reserved `schedule`/system sender,
   self-mail, no sender ULID, non-local non-Matrix sender.
 - **deferred:** Matrix sender or route metadata. `deferred_at` sorts it after
@@ -56,16 +56,14 @@ between acceptance and that mark is a verified retry, not a duplicate.
 
 ## Failure fairness
 
-A permanent collision/conflict becomes `failed` and leaves the pending page. A
-retryable error stays `pending` with durable `deferred_at`, so it sorts behind
-newer work. Permanent failures do not consume the batch, so 50 failed intents
-cannot block a normal receipt. Migration `inbox/0004` adds `attempt_seq` and a
-single-writer sequence; each pending attempt takes the next number (NULL sorts
-first), so a Matrix/transient page rotates even at equal timestamps or after a
-restart, instead of pinning the first 50 forever.
-
-SQLite owns intents and `simple_inbox`; files store bodies. A file-only install
-has no intents and the drain is a no-op.
+A permanent collision/conflict becomes `failed`; a retryable error stays
+`pending` with `deferred_at`, behind newer work. Permanent failures do not
+consume the batch. `0004` adds `attempt_seq` and a single-writer sequence: each
+pending attempt takes the next number (NULL first), so a Matrix/transient page
+rotates at equal timestamps, restart or 100+ rows; a failed sequence write is
+diagnosed but delivery continues. Non-deferred arrivals always sort first, so
+an unbounded stream of them can delay deferred work. SQLite owns intents and
+`simple_inbox`; files store bodies; a file-only install has no intents.
 
 ## Notification
 

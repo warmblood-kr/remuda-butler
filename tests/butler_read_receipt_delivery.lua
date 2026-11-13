@@ -362,6 +362,7 @@ local F = { host = "local", id = "ff", alias = "ff", session = "ff", kind = "age
 local G = { host = "local", id = "gg", alias = "gg", session = "gg", kind = "agent", leader = "aa" }
 local I = { host = "local", id = "ii", alias = "ii", session = "ii", kind = "agent", leader = "aa" }
 local J = { host = "local", id = "jj", alias = "jj", session = "jj", kind = "agent", leader = "aa" }
+local K = { host = "local", id = "kk", alias = "kk", session = "kk", kind = "agent", leader = "aa" }
 local H = { host = "local", id = "hh", alias = "hh", session = "hh", kind = "agent", leader = "aa" }
 local SCHEDULE = { host = "local", id = "", alias = "schedule", session = "schedule" }
 local OUTSIDE = { host = "local", id = "", alias = "outside", session = "outside" }
@@ -723,6 +724,18 @@ for index = 1, 120 do
   assert(intent and intent.attempt_seq ~= nil,
     "deferred item " .. index .. " was starved after three ticks")
 end
+
+-- 14. A failed rotation write is diagnosed but must not stop delivery.
+restart()
+local note_message = assert(mail.queue(A, K, "note failure body", "Note failure"))
+assert(mail.inbox("kk", { reader_id = "kk" }):find("note failure body", 1, true),
+  "K did not read the note-failure message")
+db.fail = function(sql) return sql:find("UPDATE receipt_attempt_seq", 1, true) ~= nil end
+local noted = receipts.drain()
+db.fail = nil
+assert(noted.delivered == 1, "a failed attempt write must not stop delivery")
+assert(db:intent(bhex("kk"), note_message.id).status == "delivered",
+  "the note-failure intent was not delivered")
 
 assert(run("rm -rf '" .. root .. "'"))
 print("ok")
