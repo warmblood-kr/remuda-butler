@@ -166,6 +166,21 @@ boot_butler
     { "6767" }))
   assert(#nulls == 2 and tonumber(nulls[1].is_null) == 1 and tonumber(nulls[2].is_null) == 1,
     "unidentified intents must store NULL receipt_id")
+
+  -- Real SQL ordering: an attempted deferred row moves behind an untried one,
+  -- so more than one page of Matrix/transient items rotates.
+  assert(db:exec([[INSERT INTO read_receipt_intents
+    (recipient, message_id, read_at, status, deferred_at)
+    VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)]],
+    { "726f7431", "ROT-A", "2026-01-01T00:00:00Z", "pending", "2026-01-01T00:00:00Z",
+      "726f7431", "ROT-B", "2026-01-02T00:00:00Z", "pending", "2026-01-02T00:00:00Z" }))
+  local before_rotation = assert(store.pending_intent_details(db, "726f7431"))
+  assert(#before_rotation == 2 and before_rotation[1].message_id == "ROT-A",
+    "deferred rows must start oldest-first")
+  assert(store.note_intent_attempt(db, "726f7431", "ROT-A"))
+  local after_rotation = assert(store.pending_intent_details(db, "726f7431"))
+  assert(after_rotation[1].message_id == "ROT-B" and after_rotation[2].message_id == "ROT-A",
+    "the attempted deferred row must rotate behind the untried one")
 ' >/dev/null
 
 # A second restart must keep exactly the agent intents and skip the already-read

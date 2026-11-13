@@ -1,6 +1,6 @@
 # Local read-receipt delivery
 
-Outcome: a member fetches a message, and the original sender gets one automatic
+Outcome: a member fetches a message and the sender gets one automatic
 acknowledgment in its own mailbox.
 
 This is the local, SQLite slice (A2). Matrix delivery is not implemented: a
@@ -59,8 +59,10 @@ between acceptance and that mark is a verified retry, not a duplicate.
 
 A permanent collision/conflict becomes `failed` and leaves the pending page. A
 retryable error stays `pending` with durable `deferred_at`, so it sorts behind
-newer work. Permanent failures do not consume the delivery batch, so 50 failed
-intents cannot block a normal receipt.
+newer work. Permanent failures do not consume the batch, so 50 failed intents
+cannot block a normal receipt. Each attempt advances a deferred row's
+`deferred_at`, moving it behind untried rows, so a page of Matrix/transient
+items rotates instead of pinning the first 50 forever.
 
 SQLite owns intents and `simple_inbox`; files store bodies. A file-only install
 has no intents and the drain is a no-op.
@@ -74,7 +76,7 @@ for <original id>". The sender is resolved by durable ULID, not the stored
 display alias: a rename follows the id, while a reused alias fails closed and
 cannot clear another member's `--done` mark. The notice policy's journal
 reserves `(recipient, message_id)`, so a retry recovers a notice that never
-started or refuses a duplicate. Unread mail is reseeded after restart; a receipt
+started or refuses a duplicate. Unread mail reseeds after restart; a receipt
 the sender already read is skipped.
 
 ## Evidence
@@ -89,8 +91,7 @@ the sender already read is skipped.
   renamed then reused alias (correct target, no wrong `--done`), and a real
   forwarded mail whose receipt names the actual reader.
 - `tests/read_receipt_upgrade.sh`: real SQLite v3 upgrade/downgrade, real drain,
-  ULID/body correlation, unidentified intents storing NULL, loop skip, second
-  restart stable.
+  ULID/body correlation, NULL ids, second restart stable.
 - `tests/butler_simple_inbox_acceptance.sh`: real SQLite inbox across restarts.
 
 ## Not in this slice

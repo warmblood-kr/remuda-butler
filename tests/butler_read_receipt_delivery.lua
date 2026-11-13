@@ -158,6 +158,17 @@ local function fake_db()
       end
       return 0
     end
+    if sql:find("deferred_at IS NOT NULL", 1, true) then
+      local recipient, id = params[1], params[2]
+      local intent = db.intents[key(recipient, id)]
+      if intent and intent.status == "pending" and intent.deferred_at ~= nil then
+        db.attempt_clock = (db.attempt_clock or 0) + 1
+        intent.deferred_at = string.format("2026-11-13T06:%02d:%02dZ",
+          math.floor(db.attempt_clock / 60), db.attempt_clock % 60)
+        return 1
+      end
+      return 0
+    end
     if sql:find("UPDATE read_receipt_intents", 1, true) and sql:find("deferred_at", 1, true) then
       local recipient, id = params[1], params[2]
       local intent = db.intents[key(recipient, id)]
@@ -178,8 +189,12 @@ local function fake_db()
       for _, intent in pairs(db.intents) do
         if intent.status == "pending" then
           local item = state[intent.recipient]
-            or { recipient = intent.recipient, live = false }
-          if intent.deferred_at == nil then item.live = true end
+            or { recipient = intent.recipient, live = false, oldest = nil }
+          if intent.deferred_at == nil then
+            item.live = true
+          elseif item.oldest == nil or intent.deferred_at < item.oldest then
+            item.oldest = intent.deferred_at
+          end
           state[intent.recipient] = item
         end
       end
@@ -187,6 +202,9 @@ local function fake_db()
       for _, item in pairs(state) do out[#out + 1] = item end
       table.sort(out, function(a, b)
         if a.live ~= b.live then return a.live end
+        if not a.live and a.oldest ~= b.oldest then
+          return (a.oldest or "") < (b.oldest or "")
+        end
         return a.recipient < b.recipient
       end)
       for index, item in ipairs(out) do out[index] = { recipient = item.recipient } end
@@ -206,11 +224,14 @@ local function fake_db()
           out[#out + 1] = { recipient = intent.recipient, message_id = intent.message_id,
             read_at = intent.read_at, receipt_id = intent.receipt_id,
             receipt_body = intent.receipt_body, envelope = envelope,
-            deferred = intent.deferred_at and 1 or 0 }
+            deferred = intent.deferred_at and 1 or 0, deferred_at = intent.deferred_at }
         end
       end
       table.sort(out, function(a, b)
         if a.deferred ~= b.deferred then return a.deferred < b.deferred end
+        if (a.deferred_at or "") ~= (b.deferred_at or "") then
+          return (a.deferred_at or "") < (b.deferred_at or "")
+        end
         if a.read_at ~= b.read_at then return a.read_at < b.read_at end
         return a.message_id < b.message_id
       end)
@@ -338,6 +359,7 @@ local D = { host = "local", id = "dd", alias = "dd", session = "dd", kind = "age
 local E = { host = "local", id = "ee", alias = "ee", session = "ee", kind = "agent", leader = "aa" }
 local F = { host = "local", id = "ff", alias = "ff", session = "ff", kind = "agent", leader = "aa" }
 local G = { host = "local", id = "gg", alias = "gg", session = "gg", kind = "agent", leader = "aa" }
+local I = { host = "local", id = "ii", alias = "ii", session = "ii", kind = "agent", leader = "aa" }
 local H = { host = "local", id = "hh", alias = "hh", session = "hh", kind = "agent", leader = "aa" }
 local SCHEDULE = { host = "local", id = "", alias = "schedule", session = "schedule" }
 local OUTSIDE = { host = "local", id = "", alias = "outside", session = "outside" }
@@ -645,6 +667,40 @@ assert(forward_receipt.from.id == "cc" and forward_receipt.from.alias == "cc",
 assert(bus.objects["object-" .. forward_intent.receipt_id].content:find("cc fetched", 1, true),
   "forwarded-mail receipt body named the wrong reader")
 remuda._butler_read_receipts_config.reader_address = nil
+
+-- 12. Deferred rotation: more than one page of Matrix-deferred intents sits
+--     ahead of a recovered deferred local intent. The first bounded drain
+--     retries only the first page; the second must rotate to the recovered
+--     item instead of selecting the same page forever.
+restart()
+for _, intent in pairs(db.intents) do
+  if intent.status == "pending" then intent.status = "skipped" end
+end
+for index = 1, 50 do
+  assert(mail.queue(MATRIX, I, "matrix rotation " .. index, "Matrix rotation " .. index,
+    nil, nil, { sender = "@human:example.org", room_id = "!room",
+      event_id = "$rotation-" .. index }), "rotation message was not queued")
+end
+assert(mail.inbox("ii", { reader_id = "ii" }):find("matrix rotation 50", 1, true),
+  "I did not read the rotation batch")
+local recovered_message = assert(mail.queue(A, G, "recovered local", "Recovered local"))
+assert(mail.inbox("gg", { reader_id = "gg" }):find("recovered local", 1, true),
+  "G did not read the recovered message")
+local recovered_intent = assert(db:intent(bhex("gg"), recovered_message.id),
+  "recovered intent was not recorded")
+-- Simulate a row that an earlier transient failure had deferred.
+recovered_intent.deferred_at = "2026-11-13T04:00:00Z"
+local rows_before_rotation = #db:rows_for(bhex("aa"))
+local first_page = receipts.drain()
+assert(first_page.deferred == 50, "the first drain must retry one bounded page")
+assert(recovered_intent.status == "pending",
+  "a recovered item behind the first deferred page must not be skipped")
+local second_page = receipts.drain()
+assert(second_page.delivered == 1, "the second drain did not rotate to the recovered item")
+assert(recovered_intent.status == "delivered",
+  "the second drain must rotate to the recovered deferred item")
+assert(#db:rows_for(bhex("aa")) == rows_before_rotation + 1,
+  "the recovered item produced the wrong number of receipts")
 
 assert(run("rm -rf '" .. root .. "'"))
 print("ok")

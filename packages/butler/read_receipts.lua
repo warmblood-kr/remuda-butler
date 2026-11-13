@@ -58,11 +58,12 @@ local function reader_address(reader_id, envelope)
     local ok, resolved = pcall(config.reader_address, reader_id)
     if ok and type(resolved) == "table" and resolved.id == reader_id then return resolved end
   end
+  -- Unresolved identity: the canonical reader id is the only trustworthy
+  -- fallback. The original `to` alias may name a different member after a
+  -- forward or reuse.
   local to = type(envelope.to) == "table" and envelope.to[1] or nil
-  local alias = type(to) == "table" and (to.alias or to.session) or nil
-  local session = type(to) == "table" and (to.session or to.alias) or nil
-  return { host = "local", id = reader_id, alias = alias or reader_id,
-    session = session or alias or reader_id,
+  return { host = "local", id = reader_id, alias = reader_id,
+    session = reader_id,
     kind = type(to) == "table" and (to.kind or "") or "",
     leader = type(to) == "table" and (to.leader or "") or "" }
 end
@@ -230,6 +231,11 @@ function M.drain()
     else
       for _, intent in ipairs(intents) do
         if budget_done() then break end
+        -- Rotate a deferred row behind untried ones. Best-effort: a failed
+        -- timestamp write must not stop the delivery attempt itself.
+        if type(store.note_intent_attempt) == "function" then
+          store.note_intent_attempt(db, intent.recipient, intent.message_id)
+        end
         local outcome, reason, permanent = M.deliver_intent(intent)
         if outcome == "error" then
           counts.errors = counts.errors + 1

@@ -135,7 +135,8 @@ function M.pending_recipients(db)
   return db:query([[SELECT recipient FROM read_receipt_intents
     WHERE status = 'pending'
     GROUP BY recipient
-    ORDER BY MIN(CASE WHEN deferred_at IS NULL THEN 0 ELSE 1 END), recipient]])
+    ORDER BY MIN(CASE WHEN deferred_at IS NULL THEN 0 ELSE 1 END),
+      MIN(COALESCE(deferred_at, '')), recipient]])
 end
 
 function M.pending_intent_details(db, recipient)
@@ -146,7 +147,8 @@ function M.pending_intent_details(db, recipient)
     LEFT JOIN simple_inbox s
       ON s.recipient = i.recipient AND s.message_id = i.message_id
     WHERE i.recipient = ? AND i.status = 'pending'
-    ORDER BY (i.deferred_at IS NOT NULL), i.read_at, i.message_id]], {recipient})
+    ORDER BY (i.deferred_at IS NOT NULL), COALESCE(i.deferred_at, ''), i.read_at,
+      i.message_id]], {recipient})
 end
 
 -- Claim the receipt identity and body exactly once. Each UPDATE only fills an
@@ -174,11 +176,22 @@ function M.claim_receipt(db, recipient, message_id, candidate_id, candidate_body
 end
 
 -- Mark a Matrix (or otherwise temporarily undeliverable) intent as deferred.
--- It remains pending for A3 but sorts after local work on the next scan.
+-- It remains pending but sorts after local work on the next scan.
 function M.defer_intent(db, recipient, message_id)
   return db:exec([[UPDATE read_receipt_intents
     SET deferred_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
     WHERE recipient = ? AND message_id = ? AND status = 'pending' AND deferred_at IS NULL]],
+    {recipient, message_id})
+end
+
+-- Deferred rows rotate. Recording the attempt time moves a tried row behind
+-- every deferred row that has not been tried yet, so more than one page of
+-- Matrix/transient items cannot pin the scan to the same first 50 forever. A
+-- local intent is untouched (its `deferred_at` stays NULL).
+function M.note_intent_attempt(db, recipient, message_id)
+  return db:exec([[UPDATE read_receipt_intents
+    SET deferred_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+    WHERE recipient = ? AND message_id = ? AND status = 'pending' AND deferred_at IS NOT NULL]],
     {recipient, message_id})
 end
 
