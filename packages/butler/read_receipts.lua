@@ -106,22 +106,26 @@ local function receipt_ulid()
   return nil
 end
 
--- Assign the receipt ULID once. Intents created by the current read path
--- already carry one; a pre-0003 row (or a direct store caller) gets one on the
--- first drain. The claim is a durable UPDATE, so a crash after it reuses the
--- same identity.
-local function stable_receipt_id(store, db, intent)
-  if type(intent.receipt_id) == "string" and intent.receipt_id ~= "" then
-    return intent.receipt_id
+-- Claim the receipt ULID and exact body once. Intents created by the current
+-- read path already carry the ULID; a pre-0003 row (or a direct store caller)
+-- gets one on the first drain. The body is fixed in the same durable UPDATE so
+-- a retry cannot compute a different text after an alias change.
+local function stable_receipt(store, db, intent, candidate_body)
+  local candidate_id = intent.receipt_id
+  if type(candidate_id) ~= "string" or candidate_id == "" then
+    candidate_id = receipt_ulid()
+    if not candidate_id then return nil, nil, "ulid_unavailable" end
   end
-  local candidate = receipt_ulid()
-  if not candidate then return nil, "ulid_unavailable" end
-  local claimed, why = store.claim_receipt_id(db, intent.recipient, intent.message_id, candidate)
-  if not claimed then
+  if type(intent.receipt_body) == "string" and intent.receipt_body ~= "" then
+    candidate_body = intent.receipt_body
+  end
+  local claimed_id, claimed_body = store.claim_receipt(db, intent.recipient,
+    intent.message_id, candidate_id, candidate_body)
+  if not claimed_id then
     report("error", "receipt_id_claim", intent.message_id)
-    return nil, why
+    return nil, nil, claimed_body
   end
-  return claimed
+  return claimed_id, claimed_body
 end
 
 -- Deliver one intent. Returns an outcome string and an optional reason.
@@ -150,11 +154,11 @@ function M.deliver_intent(intent)
     return "skipped", detail
   end
   local sender = detail
-  local rid, rid_err = stable_receipt_id(simple.store, simple.db, intent)
-  if not rid then return "error", rid_err end
   local reader = reader_address(reader_id, envelope)
-  local text = "Read receipt: " .. tostring(reader.alias)
+  local candidate_body = "Read receipt: " .. tostring(reader.alias)
     .. " fetched message " .. tostring(intent.message_id) .. " from the Butler inbox."
+  local rid, text, rid_err = stable_receipt(simple.store, simple.db, intent, candidate_body)
+  if not rid then return "error", rid_err end
   -- `read_at` is committed with the intent, so a retry produces the same
   -- envelope bytes even if the retry happens on a later date.
   local called, message, why, _to, already = pcall(mail.queue_receipt, reader, sender, text,
@@ -167,10 +171,12 @@ function M.deliver_intent(intent)
     report("error", "receipt_delivery", intent.message_id)
     return "error", why
   end
-  -- The existing notice policy types the acknowledgment. Only a newly accepted
-  -- receipt notifies; an accepted-but-unmarked retry or a duplicate scan does
-  -- not type it again.
-  if not already and type(config.notify) == "function" then
+  -- Ask the existing notice policy on every durable acceptance, including an
+  -- accepted-but-unmarked retry. That policy dedupes by message ID and skips
+  -- mail the sender already read, so this closes the crash window between the
+  -- inbox commit and the notice without typing it twice in the same runtime.
+  -- After a daemon restart, unread mail is reseeded by the same policy.
+  if type(config.notify) == "function" then
     local notified, notice_err = pcall(config.notify, message, sender)
     if not notified then report("error", "receipt_notice", tostring(notice_err)) end
   end

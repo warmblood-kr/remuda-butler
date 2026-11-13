@@ -139,12 +139,12 @@ local function fake_db()
       end
       return 0
     end
-    if sql:find("UPDATE read_receipt_intents SET receipt_id", 1, true) then
-      local receipt_id, recipient, id = params[1], params[2], params[3]
+    if sql:find("receipt_id = CASE", 1, true) then
+      local receipt_id, receipt_body, recipient, id = params[1], params[2], params[3], params[4]
       local intent = db.intents[key(recipient, id)]
-      if intent and intent.status == "pending"
-          and (intent.receipt_id == nil or intent.receipt_id == "") then
-        intent.receipt_id = receipt_id
+      if intent and intent.status == "pending" then
+        if intent.receipt_id == nil or intent.receipt_id == "" then intent.receipt_id = receipt_id end
+        if intent.receipt_body == nil or intent.receipt_body == "" then intent.receipt_body = receipt_body end
         return 1
       end
       return 0
@@ -195,7 +195,8 @@ local function fake_db()
             end
           end
           out[#out + 1] = { recipient = intent.recipient, message_id = intent.message_id,
-            read_at = intent.read_at, receipt_id = intent.receipt_id, envelope = envelope,
+            read_at = intent.read_at, receipt_id = intent.receipt_id,
+            receipt_body = intent.receipt_body, envelope = envelope,
             deferred = intent.deferred_at and 1 or 0 }
         end
       end
@@ -206,10 +207,10 @@ local function fake_db()
       end)
       return out
     end
-    if sql:find("SELECT receipt_id FROM read_receipt_intents", 1, true) then
+    if sql:find("SELECT receipt_id, receipt_body FROM read_receipt_intents", 1, true) then
       local recipient, id = params[1], params[2]
       local intent = db.intents[key(recipient, id)]
-      if intent then return { { receipt_id = intent.receipt_id } } end
+      if intent then return { { receipt_id = intent.receipt_id, receipt_body = intent.receipt_body } } end
       return {}
     end
     if sql:find("FROM read_receipt_intents", 1, true) then
@@ -306,9 +307,15 @@ remuda._butler_mail_config = { bus = bus, root = root, json_quote = json_quote,
 dofile("packages/butler/mail.lua")
 local mail = assert(remuda._butler_mail)
 local notices = {}
+local notice_seen = {}
+local notice_attempts = 0
 remuda._butler_read_receipts_config = { simple = { db = db, store = store }, mail = mail,
   json = remuda.json,
   notify = function(message, recipient)
+    -- Model the real notice policy's per-message-ID dedupe.
+    notice_attempts = notice_attempts + 1
+    if notice_seen[message.id] then return end
+    notice_seen[message.id] = true
     notices[#notices + 1] = { id = message.id, to = recipient.id,
       receipt_of = message.receipt_of }
   end }
@@ -321,6 +328,8 @@ local C = { host = "local", id = "cc", alias = "cc", session = "cc", kind = "age
 local D = { host = "local", id = "dd", alias = "dd", session = "dd", kind = "agent", leader = "aa" }
 local E = { host = "local", id = "ee", alias = "ee", session = "ee", kind = "agent", leader = "aa" }
 local F = { host = "local", id = "ff", alias = "ff", session = "ff", kind = "agent", leader = "aa" }
+local G = { host = "local", id = "gg", alias = "gg", session = "gg", kind = "agent", leader = "aa" }
+local H = { host = "local", id = "hh", alias = "hh", session = "hh", kind = "agent", leader = "aa" }
 local SCHEDULE = { host = "local", id = "", alias = "schedule", session = "schedule" }
 local OUTSIDE = { host = "local", id = "", alias = "outside", session = "outside" }
 local MATRIX = { host = "matrix", id = "", alias = "@human:example.org", session = "@human:example.org" }
@@ -422,11 +431,14 @@ assert(#crash_rid == 26 and crash_rid:match("^[0-9A-HJKMNP-TV-Z]+$"),
   "stored receipt identity is not a Butler ULID")
 assert(#db:rows_for(bhex("aa")) == 4, "accepted receipt was lost")
 assert(#notices == 4, "accepted receipt did not notify once")
+local attempts_before_retry = notice_attempts
 local retried = receipts.drain()
 assert(retried.delivered == 1, "retry did not complete the pending intent")
 assert(db:intent(bhex("cc"), crash_message.id).status == "delivered", "retry did not mark it delivered")
 assert(#db:rows_for(bhex("aa")) == 4, "retry duplicated the accepted receipt")
 assert(#notices == 4, "retry typed the receipt notice twice")
+assert(notice_attempts == attempts_before_retry + 1,
+  "accepted retry did not re-attempt the notice")
 assert(#db:rows_for(bhex("cc")) == 1, "retry produced mail for the reader")
 
 -- 6b. Crash after the body file was written, before the envelope and inbox
@@ -444,6 +456,61 @@ assert(#db:rows_for(bhex("aa")) == 5, "partial-file recovery added or lost mail"
 assert(bus.messages[staged_rid].receipt_of == staged_message.id, "staged receipt is not correlated")
 assert(bus.objects["object-" .. staged_rid].content == staged_body, "staged body was not reused")
 assert(#notices == 5, "partial-file recovery did not notify once")
+
+-- 6c. Crash after the inbox row was accepted but before the notice: the retry
+--     re-attempts the notice. The per-ID dedupe prevents a second notice when
+--     the first one did land.
+local recover_message = mail.queue(A, G, "recover body", "Recover")
+assert(recover_message, "notice-recovery message was not queued")
+restart()
+assert(mail.inbox("gg", { reader_id = "gg" }):find("recover body", 1, true), "G did not read")
+local normal_notify = remuda._butler_read_receipts_config.notify
+remuda._butler_read_receipts_config.notify = function() error("simulated crash before notice") end
+db.fail = function(sql)
+  return sql:find("UPDATE read_receipt_intents SET status", 1, true) ~= nil
+end
+local before_notice = receipts.drain()
+db.fail = nil
+remuda._butler_read_receipts_config.notify = normal_notify
+assert(before_notice.errors >= 1, "notice-crash scenario did not fail")
+assert(db:intent(bhex("gg"), recover_message.id).status == "pending",
+  "notice-crash scenario did not stay pending")
+assert(#notices == 5, "notice-crash scenario notified before acceptance")
+local recovered = receipts.drain()
+assert(recovered.delivered == 1, "notice-crash retry did not complete")
+assert(db:intent(bhex("gg"), recover_message.id).status == "delivered",
+  "notice-crash retry did not mark delivered")
+assert(#notices == 6, "notice-crash retry did not notify")
+assert(#db:rows_for(bhex("aa")) == 6, "notice-crash retry duplicated mail")
+
+-- 6d. The receipt body is fixed in the intent. A later envelope/alias change
+--     between a body-only acceptance and the retry must reuse the stored body
+--     instead of computing a different one and calling it a collision.
+local fixed_message = mail.queue(A, H, "fixed body", "Fixed")
+assert(fixed_message, "body-fix message was not queued")
+restart()
+assert(mail.inbox("hh", { reader_id = "hh" }):find("fixed body", 1, true), "H did not read")
+db.fail = function(sql)
+  return sql:find("UPDATE read_receipt_intents SET status", 1, true) ~= nil
+end
+local fixed_first = receipts.drain()
+db.fail = nil
+assert(fixed_first.errors >= 1, "body-fix first drain did not fail the mark")
+local fixed_intent = db:intent(bhex("hh"), fixed_message.id)
+assert(fixed_intent.receipt_body and fixed_intent.receipt_body:find("hh fetched", 1, true),
+  "receipt body was not fixed in the intent")
+for _, row in ipairs(db.rows) do
+  if row.recipient == bhex("hh") and row.message_id == fixed_message.id then
+    row.envelope = row.envelope:gsub('"alias":"hh"', '"alias":"renamed"')
+  end
+end
+local fixed_retry = receipts.drain()
+assert(fixed_retry.delivered == 1 and fixed_retry.errors == 0,
+  "body-fix retry did not reuse the stored body")
+assert(db:intent(bhex("hh"), fixed_message.id).status == "delivered",
+  "body-fix retry did not complete")
+assert(#db:rows_for(bhex("aa")) == 7, "body-fix retry duplicated mail")
+assert(#notices == 7, "body-fix retry did not notify once")
 
 -- 7. Collision: an unrelated message already at the deterministic ID is not
 --    success and is not overwritten; the intent stays pending.
@@ -465,7 +532,7 @@ for _, row in ipairs(db:rows_for(bhex("aa"))) do
 end
 assert(squatter_row and squatter_row.envelope:find('"subject":"Unrelated"', 1, true),
   "collision overwrote the existing message")
-assert(#notices == 5, "collision notified a receipt")
+assert(#notices == 7, "collision notified a receipt")
 
 -- 7b. Content conflict: the same stable identity, sender and recipient but a
 --     different body is not the receipt and must not overwrite it.
@@ -483,7 +550,7 @@ assert(conflicted.errors > 0, "content conflict was not reported")
 assert(db:intent(bhex("ff"), conflict_message.id).status == "pending",
   "content conflict marked the intent")
 assert(#db:rows_for(bhex("aa")) == before_conflict, "content conflict added mail")
-assert(#notices == 5, "content conflict notified")
+assert(#notices == 7, "content conflict notified")
 
 -- 8. Exclusions: schedule, self, unaddressable and Matrix.
 restart()
@@ -503,15 +570,15 @@ assert(db:intent(bhex("bb"), outside_message.id).status == "skipped", "unaddress
 assert(db:intent(bhex("bb"), matrix_message.id).status == "pending", "Matrix intent was not preserved")
 assert(db:intent(bhex("bb"), matrix_message.id).deferred_at ~= nil,
   "Matrix intent was not marked deferred for ordering")
-assert(#db:rows_for(bhex("aa")) == 7, "exclusions produced receipts")
-assert(#notices == 5, "exclusions notified")
+assert(#db:rows_for(bhex("aa")) == 9, "exclusions produced receipts")
+assert(#notices == 7, "exclusions notified")
 
 -- 9. File-only fallback: no SQLite, no intents, no delivery.
 restart()
 remuda._butler_read_receipts_config.simple = nil
 local unavailable = receipts.drain()
 assert(unavailable.available == false, "file-only fallback claimed availability")
-assert(#db:rows_for(bhex("aa")) == 7, "file-only fallback delivered a receipt")
+assert(#db:rows_for(bhex("aa")) == 9, "file-only fallback delivered a receipt")
 
 assert(run("rm -rf '" .. root .. "'"))
 print("ok")

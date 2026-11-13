@@ -111,12 +111,15 @@ boot_butler
   local counts = assert(assert(remuda._butler_read_receipts).drain())
   assert(counts.delivered == 2, "real drain did not deliver two receipts")
   local statuses = assert(db:query(
-    "SELECT message_id,receipt_id,status FROM read_receipt_intents WHERE recipient = ?", { "6161" }))
+    "SELECT message_id,receipt_id,receipt_body,status FROM read_receipt_intents WHERE recipient = ?", { "6161" }))
   local receipt_ids = {}
   for _, row in ipairs(statuses) do
     assert(row.status == "delivered", "real drain left an intent pending")
     assert(#row.receipt_id == 26 and row.receipt_id:match("^[0-9A-HJKMNP-TV-Z]+$"),
       "stored receipt identity is not a Butler ULID")
+    assert(type(row.receipt_body) == "string"
+      and row.receipt_body:find("fetched message " .. row.message_id, 1, true),
+      "receipt body was not fixed in the intent")
     receipt_ids[row.receipt_id] = true
   end
   local sender_rows = assert(db:query(

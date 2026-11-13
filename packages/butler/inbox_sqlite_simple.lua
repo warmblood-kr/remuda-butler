@@ -139,12 +139,37 @@ end
 
 function M.pending_intent_details(db, recipient)
   return db:query([[SELECT i.recipient AS recipient, i.message_id AS message_id,
-      i.read_at AS read_at, i.receipt_id AS receipt_id, s.envelope AS envelope
+      i.read_at AS read_at, i.receipt_id AS receipt_id, i.receipt_body AS receipt_body,
+      s.envelope AS envelope
     FROM read_receipt_intents i
     LEFT JOIN simple_inbox s
       ON s.recipient = i.recipient AND s.message_id = i.message_id
     WHERE i.recipient = ? AND i.status = 'pending'
     ORDER BY (i.deferred_at IS NOT NULL), i.read_at, i.message_id]], {recipient})
+end
+
+-- Claim the receipt identity and body exactly once. Each UPDATE only fills an
+-- empty field; a later or concurrent scan reads back the winner's values
+-- instead of overwriting them. This keeps the retry body independent of any
+-- later alias/profile change.
+function M.claim_receipt(db, recipient, message_id, candidate_id, candidate_body)
+  if type(candidate_id) ~= "string" or candidate_id == "" then return nil, "invalid receipt id" end
+  if type(candidate_body) ~= "string" or candidate_body == "" then return nil, "invalid receipt body" end
+  local changed, err = db:exec([[UPDATE read_receipt_intents
+    SET receipt_id = CASE WHEN receipt_id IS NULL OR receipt_id = '' THEN ? ELSE receipt_id END,
+        receipt_body = CASE WHEN receipt_body IS NULL OR receipt_body = '' THEN ? ELSE receipt_body END
+    WHERE recipient = ? AND message_id = ? AND status = 'pending']],
+    {candidate_id, candidate_body, recipient, message_id})
+  if changed == nil then return nil, err end
+  local rows, query_err = db:query([[SELECT receipt_id, receipt_body FROM read_receipt_intents
+    WHERE recipient = ? AND message_id = ?]], {recipient, message_id})
+  if rows == nil then return nil, query_err end
+  local row = rows[1]
+  if row and type(row.receipt_id) == "string" and row.receipt_id ~= ""
+      and type(row.receipt_body) == "string" and row.receipt_body ~= "" then
+    return row.receipt_id, row.receipt_body
+  end
+  return nil, "receipt identity was not stored"
 end
 
 -- Mark a Matrix (or otherwise temporarily undeliverable) intent as deferred.
@@ -156,28 +181,9 @@ function M.defer_intent(db, recipient, message_id)
     {recipient, message_id})
 end
 
--- Claim the receipt ULID exactly once. The UPDATE only fills an empty field;
--- a later or concurrent scan reads back the winner's value instead of
--- overwriting it. Single-writer in this daemon, but the statement is correct
--- even if that assumption changes.
-function M.claim_receipt_id(db, recipient, message_id, candidate)
-  if type(candidate) ~= "string" or candidate == "" then return nil, "invalid receipt id" end
-  local changed, err = db:exec([[UPDATE read_receipt_intents SET receipt_id = ?
-    WHERE recipient = ? AND message_id = ? AND status = 'pending'
-      AND (receipt_id IS NULL OR receipt_id = '')]], {candidate, recipient, message_id})
-  if changed == nil then return nil, err end
-  local rows, query_err = db:query([[SELECT receipt_id FROM read_receipt_intents
-    WHERE recipient = ? AND message_id = ?]], {recipient, message_id})
-  if rows == nil then return nil, query_err end
-  if rows[1] and type(rows[1].receipt_id) == "string" and rows[1].receipt_id ~= "" then
-    return rows[1].receipt_id
-  end
-  return nil, "receipt id was not stored"
-end
-
 -- The completion mark. It is written only after the local receipt is durable;
--- a crash before this update is safe because the same deterministic receipt ID
--- is re-derived on the next scan. 0 changed rows means another scan already
+-- a crash before this update is safe because the persisted receipt ID and body
+-- are reused on the next scan. 0 changed rows means another scan already
 -- completed it, which is also success.
 function M.mark_intent_status(db, recipient, message_id, status)
   return db:exec([[UPDATE read_receipt_intents SET status = ?

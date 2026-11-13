@@ -477,12 +477,18 @@ local function read_text(path)
 end
 
 -- A fixed receipt ID is accepted only when the stored message is this same
--- receipt. Colliding with an unrelated message is a failure, never success.
-local function stable_receipt_matches(existing, receipt_of, from, to)
+-- receipt. Identity is the stable ULIDs plus receipt_of, subject, time and
+-- body; display aliases are deliberately not compared because they may change
+-- while the durable reader/sender identity does not.
+local function stable_receipt_matches(existing, receipt_of, from, to, subject, created_at)
   return type(existing) == "table" and existing.receipt_of == receipt_of
     and type(existing.from) == "table" and existing.from.id == from.id
     and type(existing.to) == "table" and type(existing.to[1]) == "table"
     and existing.to[1].id == to.id
+    and existing.subject == subject and existing.created_at == created_at
+    and existing.in_reply_to == nil
+    and (existing.references == nil or #existing.references == 0)
+    and existing.matrix == nil
 end
 
 local function queue(from, to, text, subject, in_reply_to, references, matrix, receipt_of, stable)
@@ -532,7 +538,7 @@ local function queue(from, to, text, subject, in_reply_to, references, matrix, r
   local existing = stable_id and (bus.messages[id]
     or (config.root and load_message(paths(""), id))) or nil
   if existing then
-    if not stable_receipt_matches(existing, receipt_of, from, to) then
+    if not stable_receipt_matches(existing, receipt_of, from, to, message.subject, message.created_at) then
       diagnostic("error", "receipt_id_collision", id)
       return nil, "message " .. id .. " already exists and is not this receipt"
     end

@@ -3,6 +3,9 @@
 -- The drain reuses it on every retry, so the mailbox and any notification see
 -- one fixed message identity even across a crash.
 ALTER TABLE read_receipt_intents ADD COLUMN receipt_id TEXT;
+-- The exact receipt text is fixed once, so a retry after a body-only crash
+-- cannot compute a different body from a changed alias or profile.
+ALTER TABLE read_receipt_intents ADD COLUMN receipt_body TEXT;
 -- A deferred Matrix intent stays `pending` for the relay slice but sorts after
 -- undelivered local intents, so a Matrix backlog cannot starve local receipts.
 ALTER TABLE read_receipt_intents ADD COLUMN deferred_at TEXT;
