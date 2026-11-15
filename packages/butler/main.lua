@@ -146,6 +146,10 @@ if remuda._butler_relay_receipts then
     end
   end
 end
+-- Shadow relay intake state. No relay code calls admit yet; this only opens
+-- the 0003 tables and reports degradation without changing a JSON outcome.
+remuda._butler_relay_intake_config = { open = remuda.db and remuda.db.open }
+remuda.exec("butler/relay_intake")
 remuda.exec("butler/matrix_request")
 -- Report the exact staged matrix and request pair at creation time. The init
 -- hook is scoped by this load's nonce and is one-shot; a failure before here
