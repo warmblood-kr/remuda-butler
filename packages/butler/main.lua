@@ -482,6 +482,9 @@ bus.objects = bus.objects or {}
 remuda._butler_caller_principal_config = { bus = bus }
 remuda.exec("butler/caller_principal")
 caller_principal = assert(remuda._butler_caller_principal)
+-- Core's database root without opening the file, for the startup guard below.
+remuda.exec("butler/inbox_db_path")
+local inbox_db_path = assert(remuda._butler_inbox_db_path)
 -- Loaded before identity_record so agents.jsonl shares mail.lua's append.
 -- The SQLite index is a shadow: mail files remain authoritative.
 remuda._butler_inbox_db_config = { root = mail_root, open = remuda.db and remuda.db.open }
@@ -490,13 +493,45 @@ remuda.exec("butler/inbox_db")
 remuda.exec("butler/inbox_sqlite_simple")
 local simple_module = remuda._butler_simple_inbox_module
 local simple = remuda._butler_simple_inbox
+-- Metadata checks avoid io.open's descriptor: closing one could drop a lock
+-- this process holds on the same file.
+local function path_present(path)
+  return inbox_db_path.path_state(remuda.fs, path, io.open) == "present"
+end
 if not simple and mail_root then
   local marker = mail_root .. "/sqlite-active"
-  local marker_file = io.open(marker, "r")
-  local was_active = marker_file ~= nil
-  if marker_file then marker_file:close() end
+  local marker_state, marker_why = inbox_db_path.path_state(remuda.fs, marker, io.open)
+  if not marker_state then
+    error("SQLite inbox unavailable: cannot check the inbox marker " .. marker
+      .. ": " .. tostring(marker_why), 0)
+  end
+  local was_active = marker_state == "present"
   local open = remuda.db and remuda.db.open
   if type(open) == "function" then
+    if was_active then
+      -- remuda.db.open creates a missing file, so a lost inbox database would
+      -- come back empty and the import would mark that empty database current.
+      -- The marker says SQLite already holds membership: require the file
+      -- first, and make no attempt to rebuild or guess from the retained
+      -- message files.
+      local db_path, path_why = inbox_db_path.database_file(system.platform(), {
+        XDG_STATE_HOME = os.getenv("XDG_STATE_HOME"),
+        HOME = os.getenv("HOME"),
+        LOCALAPPDATA = os.getenv("LOCALAPPDATA"),
+        USERPROFILE = os.getenv("USERPROFILE"),
+      }, "butler", "inbox")
+      if not db_path then
+        error("SQLite inbox unavailable: cannot locate the inbox database: "
+          .. tostring(path_why), 0)
+      end
+      if not path_present(db_path) then
+        error("SQLite inbox unavailable: the sqlite-active marker is set but "
+          .. "the inbox database is missing at " .. db_path .. ". Refusing to "
+          .. "create an empty inbox; restore a verified SQLite-consistent "
+          .. "backup with the journal state it requires. This check did not "
+          .. "open or create the database.", 0)
+      end
+    end
     local db, why = open("inbox", { migrations = true, timeout_ms = 200 })
     if db then
       for _, dir in ipairs({"inboxes", "read", "messages", "objects"}) do remuda.mkdir(mail_root .. "/" .. dir) end
