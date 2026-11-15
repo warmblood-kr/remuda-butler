@@ -764,3 +764,354 @@ assert(backlog_sends[1]:find("128 new Butler messages", 1, true), "the text name
 
 assert_never_destructive("whole suite")
 print("ok - automatic notices use one atomic send, preserve drafts and mail, and report uncertainty")
+reset("codex")
+bus.agents.root = { id = "root-id", kind = "codex" }
+bus.mail_delivered = { ["lead-id"] = { m1 = true }, ["root-id"] = {} }
+messages.m1 = { id = "m1", subject = "task", from = { id = "root-id", alias = "root" } }
+unread.m1 = false
+mail.unread = function() return 0 end
+bus.unread_seeded = { lead = "instance-1", root = "root-instance" }
+bus.context_samples = {}
+local count = 0
+local actual_notify = remuda._butler_notify
+remuda._butler_notify = function(alias, text, ...)
+  if alias == "lead" and text:find("re%-shown after compaction") then count = count + 1 end
+  return actual_notify(alias, text, ...)
+end
+local sends = 0
+remuda.send = function() sends = sends + 1; return true end
+local used = 100
+remuda._butler_telemetry_for = function(agent)
+  return { context_used = agent.id == "lead-id" and used or nil }
+end
+for _, n in ipairs({100, 49, 50, 24, 25, 12}) do
+  used = n
+  now = now + 5
+  remuda._butler_deliver_notices()
+  now = now + 5
+  remuda._butler_deliver_notices()
+end
+assert(count == 1 and sends == 1, "expected one reshow and send; got " .. count .. ", " .. sends)
+print("probe: " .. count .. " reshow requests, " .. sends .. " transport sends for same read/unanswered brief")
+remuda._butler_notice_compacted("lead")
+for _ = 1, 2 do now = now + 5; remuda._butler_deliver_notices() end
+assert(count == 2 and sends == 2, "explicit compaction should reshow")
+messages.m2 = { id = "m2", subject = "new task", from = { id = "root-id", alias = "root" } }
+unread.m2 = false
+bus.mail_delivered["lead-id"].m2 = true
+for _, n in ipairs({100, 49}) do used = n; now = now + 5; remuda._butler_deliver_notices(); now = now + 5; remuda._butler_deliver_notices() end
+assert(count == 3 and sends == 3, "new leader message should reshow")
+rows[1].instance_id = "instance-2"
+bus.agents.lead.instance_id = "instance-2"
+for _ = 1, 2 do now = now + 5; remuda._butler_deliver_notices() end
+assert(sends == 4, "restart should reshow")
+print("probe: explicit compaction, new message and restart each reshowed once")
+messages.z9 = { id = "z9", from = { id = "lead-id" } }
+bus.mail_delivered["root-id"].z9 = true
+remuda._butler_notice_compacted("lead")
+for _ = 1, 2 do now = now + 5; remuda._butler_deliver_notices() end
+assert(sends == 4, "answered leader message must not reshow")
+unread.m3 = true
+bus.notice_seen["lead-id"] = {}
+mail.unread = function(id) return id == "lead-id" and 1 or 0 end
+mail.mailbox = function(id) return id == "lead-id" and { "m3" } or {} end
+remuda._butler_notify("lead", "Butler message m3 arrived", "m3")
+assert(unread.m3, "queuing a notice must not mark unread mail read")
+print("probe: answered brief stayed silent and unread mail remained unread")
+
+-- A guessed drop must not replace a pending explicit compaction.
+reset("codex")
+bus.agents.root = { id = "root-id", kind = "codex" }
+bus.mail_delivered = { ["lead-id"] = { m1 = true }, ["root-id"] = {} }
+messages.m1 = { id = "m1", subject = "task", from = { id = "root-id", alias = "root" } }
+unread.m1 = false
+mail.unread = function() return 0 end
+bus.unread_seeded = { lead = "instance-1", root = "root-instance" }
+bus.context_samples = {}
+bus.heuristic_reshown = { lead = { agent_id = "lead-id", instance = "instance-1", message_id = "m1" } }
+local explicit_sends = 0
+remuda.send = function() explicit_sends = explicit_sends + 1; return true end
+local context = 100
+remuda._butler_telemetry_for = function(agent) return { context_used = agent.id == "lead-id" and context or nil } end
+now = now + 5; remuda._butler_deliver_notices()
+remuda._butler_notice_compacted("lead")
+context = 49
+for _ = 1, 2 do now = now + 5; remuda._butler_deliver_notices() end
+assert(explicit_sends == 1, "explicit compaction must outrank guessed drop")
+
+-- Unread mail: the first guessed compaction can replay it once, not on every
+-- subsequent noisy drop. A confirmed compaction still replays the same ID.
+reset("codex")
+remuda._butler_notify = actual_notify
+bus.agents.lead.id = "lead"
+bus.notice_seen, bus.heuristic_unread = {}, {}
+bus.unread_seeded = { lead = "instance-1" }
+bus.context_samples = {}
+bus.mail_delivered = {}
+mail.unread = function(id) return id == "lead" and 1 or 0 end
+unread.m1 = true
+local used_unread, unread_sends = 100, 0
+remuda._butler_telemetry_for = function(agent) return { context_used = agent.id == "lead" and used_unread or nil } end
+remuda.send = function() unread_sends = unread_sends + 1; return true end
+remuda._butler_notify("lead", "Butler message m1 arrived", "m1")
+for _ = 1, 2 do now = now + 5; remuda._butler_deliver_notices() end
+assert(unread_sends == 1, "initial unread notice")
+for _, n in ipairs({100, 49, 50, 24, 25, 12}) do
+  used_unread = n
+  now = now + 5; remuda._butler_deliver_notices()
+  now = now + 5; remuda._butler_deliver_notices()
+end
+assert(unread_sends == 2 and unread.m1, "one guessed unread replay; mail remains unread")
+remuda._butler_notice_compacted("lead")
+for _ = 1, 2 do now = now + 5; remuda._butler_deliver_notices() end
+assert(unread_sends == 3 and unread.m1, "explicit compaction replays unread")
+
+local function unread_retry_setup()
+  reset("codex")
+  bus.agents.lead.id = "lead"
+  bus.notice_seen, bus.heuristic_unread = {}, {}
+  bus.unread_seeded, bus.context_samples = { lead = "instance-1" }, {}
+  bus.mail_delivered = {}
+  mail.unread = function(id) return id == "lead" and 1 or 0 end
+  unread.m1 = true
+  local sample = 100
+  remuda._butler_telemetry_for = function() return { context_used = sample } end
+  remuda.send = function() return true end
+  remuda._butler_notify("lead", "Butler message m1 arrived", "m1")
+  for _ = 1, 2 do now = now + 5; remuda._butler_deliver_notices() end
+  sample = 49
+  now = now + 5; remuda._butler_deliver_notices()
+  return function(value) sample = value end
+end
+unread_retry_setup()
+remuda.send = function() return false, "session input is busy; nothing was written, retry" end
+now = now + 5; remuda._butler_deliver_notices()
+assert(not bus.heuristic_unread.lead and bus.notices.lead, "pre-write refusal must retain queued work without marking accepted")
+remuda.send = function() return true end
+now = now + 5; remuda._butler_deliver_notices()
+assert(bus.heuristic_unread.lead.ids.m1, "safe retry should mark only after accepted")
+local set_sample = unread_retry_setup()
+remuda.send = function() return false, "submission is unconfirmed" end
+now = now + 5; remuda._butler_deliver_notices()
+assert(not bus.heuristic_unread.lead, "uncertain send is not marked accepted")
+local attempted = 0
+remuda.send = function() attempted = attempted + 1; return true end
+for _, n in ipairs({50, 24}) do set_sample(n); now = now + 5; remuda._butler_deliver_notices(); now = now + 5; remuda._butler_deliver_notices() end
+assert(attempted == 0 and unread.m1, "uncertain reservation blocks duplicate writes without reading mail")
+
+-- An explicit compaction held behind startup work must remain explicit when
+-- that work releases the pane; a lower-priority guessed drop cannot erase it.
+reset("codex")
+bus.agents.root = { id = "root-id", kind = "codex" }
+bus.mail_delivered = { ["lead-id"] = { m1 = true }, ["root-id"] = {} }
+messages.m1 = { id = "m1", subject = "task", from = { id = "root-id", alias = "root" } }
+unread.m1 = false
+mail.unread = function() return 0 end
+bus.unread_seeded = { lead = "instance-1", root = "root-instance" }
+bus.context_samples = {}
+bus.heuristic_reshown = { lead = { agent_id = "lead-id", instance = "instance-1", message_id = "m1" } }
+bus.pending_tasks.lead = true
+local deferred_sample, deferred_sends = 100, 0
+remuda._butler_telemetry_for = function(agent)
+  return { context_used = agent.id == "lead-id" and deferred_sample or nil }
+end
+remuda.send = function() deferred_sends = deferred_sends + 1; return true end
+now = now + 5; remuda._butler_deliver_notices()
+remuda._butler_notice_compacted("lead")
+deferred_sample = 49
+now = now + 5; remuda._butler_deliver_notices()
+assert(bus.unread_seeded.lead == "compacted", "deferred explicit compact marker changed")
+bus.pending_tasks.lead = nil
+for _ = 1, 2 do now = now + 5; remuda._butler_deliver_notices() end
+assert(deferred_sends == 1, "release must preserve explicit compaction")
+
+-- A transport callback may yield while the same recipient gets a new session.
+-- Its late acceptance must never overwrite the replacement's marker.
+reset("codex")
+bus.agents.root = { id = "root-id", kind = "codex" }
+bus.mail_delivered = { ["lead-id"] = { m1 = true }, ["root-id"] = {} }
+messages.m1 = { id = "m1", subject = "task", from = { id = "root-id", alias = "root" } }
+unread.m1 = false
+mail.unread = function() return 0 end
+bus.unread_seeded = { lead = "instance-1", root = "root-instance" }
+bus.context_samples, bus.heuristic_reshown = {}, {}
+local late_context = 100
+remuda._butler_telemetry_for = function(a) return { context_used = a.id == "lead-id" and late_context or nil } end
+remuda.send = function()
+  bus.agents.lead.instance_id, rows[1].instance_id = "instance-2", "instance-2"
+  bus.heuristic_reshown.lead = { agent_id = "lead-id", instance = "instance-2", message_id = "m1" }
+  return true
+end
+now = now + 5; remuda._butler_deliver_notices()
+late_context = 49
+for _ = 1, 2 do now = now + 5; remuda._butler_deliver_notices() end
+assert(bus.heuristic_reshown.lead.instance == "instance-2", "old acceptance replaced new read marker")
+
+unread_retry_setup()
+remuda.send = function()
+  bus.agents.lead.instance_id, rows[1].instance_id = "instance-2", "instance-2"
+  bus.heuristic_unread.lead = { agent_id = "lead", instance = "instance-2", ids = { m2 = true } }
+  return true
+end
+now = now + 5; remuda._butler_deliver_notices()
+assert(bus.heuristic_unread.lead.instance == "instance-2" and bus.heuristic_unread.lead.ids.m2,
+  "old acceptance replaced new unread marker")
+
+-- The liveness observation itself can yield to a replacement before returning
+-- an old snapshot. Do not update either marker from that stale observation.
+reset("codex")
+bus.agents.root = { id = "root-id", kind = "codex" }
+bus.mail_delivered = { ["lead-id"] = { m1 = true }, ["root-id"] = {} }
+messages.m1 = { id = "m1", subject = "task", from = { id = "root-id", alias = "root" } }
+unread.m1 = false
+mail.unread = function() return 0 end
+bus.unread_seeded = { lead = "instance-1", root = "root-instance" }
+bus.context_samples, bus.heuristic_reshown = {}, {}
+local yielded_sample = 100
+remuda._butler_telemetry_for = function(a) return { context_used = a.id == "lead-id" and yielded_sample or nil } end
+remuda.send = function()
+  remuda.ls = function()
+    local old = rows
+    bus.agents.lead = { id = "lead-id", kind = "codex", parent = "root", instance_id = "instance-2" }
+    rows = { { name = "lead", alive = true, instance_id = "instance-2" } }
+    bus.heuristic_reshown.lead = { agent_id = "lead-id", instance = "instance-2", message_id = "m1" }
+    remuda.ls = function() return rows end
+    return old
+  end
+  return true
+end
+now = now + 5; remuda._butler_deliver_notices()
+yielded_sample = 49
+for _ = 1, 2 do now = now + 5; remuda._butler_deliver_notices() end
+remuda.ls() -- Simulate the next observation; completion itself must not observe.
+assert(bus.heuristic_reshown.lead.instance == "instance-2", "ls yield overwrote new read marker")
+
+unread_retry_setup()
+remuda.send = function()
+  remuda.ls = function()
+    local old = rows
+    bus.agents.lead = { id = "lead", kind = "codex", parent = "root", instance_id = "instance-2" }
+    rows = { { name = "lead", alive = true, instance_id = "instance-2" } }
+    bus.heuristic_unread.lead = { agent_id = "lead", instance = "instance-2", ids = { m2 = true } }
+    remuda.ls = function() return rows end
+    return old
+  end
+  return true
+end
+now = now + 5; remuda._butler_deliver_notices()
+remuda.ls() -- Simulate the next observation after the completed attempt.
+assert(bus.heuristic_unread.lead.instance == "instance-2" and bus.heuristic_unread.lead.ids.m2,
+  "ls yield overwrote new unread marker")
+
+-- A successful send is retired before the later marker observation yields.
+-- A replacement and a newer queued notice during that yield cannot replay
+-- the accepted IDs or be erased along with the accepted batch.
+for _, replacement_instance in ipairs({ "instance-1", "instance-2" }) do
+  reset("codex")
+  bus.agents.lead.id = "lead"
+  bus.notice_seen, bus.heuristic_unread = {}, {}
+  unread.m1, unread.m2, unread.m3 = true, true, true
+  remuda.ls = function() return rows end
+  local agent = bus.agents.lead
+  local marker = { agent_id = agent.id, agent = agent, agent_instance = agent.instance_id,
+    session_instance = agent.session_instance_id, instance = "instance-1" }
+  remuda._butler_notify("lead", "one", "m1", nil, nil, nil, marker)
+  remuda._butler_notify("lead", "two", "m2", nil, nil, nil, marker)
+  local batch_sends = 0
+  remuda.send = function()
+    batch_sends = batch_sends + 1
+    remuda.ls = function()
+      bus.agents.lead = { id = "lead", kind = "codex", parent = "root", instance_id = replacement_instance }
+      rows = { { name = "lead", alive = true, instance_id = replacement_instance } }
+      remuda.ls = function() return rows end
+      remuda._butler_notify("lead", "newer", "m3")
+      return rows
+    end
+    return true
+  end
+  assert(deliver("lead") == true, "accepted batch completes despite marker observation yield")
+  remuda.ls() -- The next observation enqueues new work after the accepted batch.
+  local remaining = bus.notices.lead
+  assert(batch_sends == 1 and remaining and remaining.count == 1
+    and remaining.message_order[1] == "m3", "accepted batch replayed or newer work removed")
+end
+
+-- Completion must not introduce an observation yield between acceptance and
+-- recording the marker; a later observation may run a nested heuristic tick.
+reset("codex")
+bus.agents.root = { id = "root-id", kind = "codex" }
+bus.mail_delivered = { ["lead-id"] = { m1 = true }, ["root-id"] = {} }
+messages.m1 = { id = "m1", subject = "task", from = { id = "root-id", alias = "root" } }
+unread.m1 = false; mail.unread = function() return 0 end
+bus.unread_seeded = { lead = "instance-1", root = "root-instance" }
+bus.context_samples, bus.heuristic_reshown, bus.notice_uncertain = {}, {}, {}
+local nested_sample, nested_sends, observations = 100, 0, 0
+remuda._butler_telemetry_for = function(a) return { context_used = a.id == "lead-id" and nested_sample or nil } end
+remuda.ls = function() return rows end
+remuda.send = function()
+  nested_sends = nested_sends + 1
+  if nested_sends == 1 then
+    remuda.ls = function()
+      observations = observations + 1
+      remuda.ls = function() return rows end
+      nested_sample = 100; now = now + 5; remuda._butler_deliver_notices()
+      nested_sample = 49; now = now + 5; remuda._butler_deliver_notices()
+      now = now + 5; remuda._butler_deliver_notices()
+      return rows
+    end
+  end
+  return true
+end
+now = now + 5; remuda._butler_deliver_notices()
+nested_sample = 49
+for _ = 1, 2 do now = now + 5; remuda._butler_deliver_notices() end
+assert(nested_sends == 1 and observations == 0, "completion yielded before recording marker")
+now = now + 5; remuda._butler_deliver_notices()
+assert(nested_sends == 1 and observations == 1, "later nested drop duplicated accepted notice")
+
+-- An older accepted callback must not replace a newer accepted brief marker
+-- installed while the older transport call yielded.
+reset("codex")
+bus.agents.root = { id = "root-id", kind = "codex" }
+bus.mail_delivered = { ["lead-id"] = { z_old = true }, ["root-id"] = {} }
+messages.z_old = { id = "z_old", subject = "task", from = { id = "root-id", alias = "root" } }
+unread.z_old = false; mail.unread = function() return 0 end
+bus.unread_seeded = { lead = "instance-1", root = "root-instance" }
+bus.context_samples, bus.heuristic_reshown, bus.notice_uncertain = {}, {}, {}
+local older_sample = 100
+remuda._butler_telemetry_for = function(a) return { context_used = a.id == "lead-id" and older_sample or nil } end
+remuda.ls = function() return rows end
+remuda.send = function()
+  bus.heuristic_sequence = (bus.heuristic_sequence or 0) + 1
+  bus.heuristic_reshown.lead = { agent_id = "lead-id", instance = "instance-1",
+    message_id = "a_new", sequence = bus.heuristic_sequence }
+  return true
+end
+now = now + 5; remuda._butler_deliver_notices()
+older_sample = 49
+for _ = 1, 2 do now = now + 5; remuda._butler_deliver_notices() end
+assert(bus.heuristic_reshown.lead.message_id == "a_new", "old acceptance replaced newer brief marker")
+reset("codex")
+bus.agents.root={id="root-id",kind="codex"}
+bus.mail_delivered={["lead-id"]={m1=true},["root-id"]={}}
+messages.m1={id="m1",subject="task",from={id="root-id",alias="root"}}
+unread.m1=false;mail.unread=function() return 0 end
+bus.unread_seeded={lead="instance-1",root="root-instance"}
+bus.context_samples={};bus.heuristic_reshown={};bus.notice_uncertain={}
+local sample,sends=100,0
+remuda._butler_telemetry_for=function(a) return {context_used=a.id=="lead-id" and sample or nil} end
+remuda.ls=function() return rows end
+remuda.send=function() sends=sends+1; return true end
+local fired=false
+remuda._butler_diagnostics={record=function(_, outcome)
+ if outcome=="submitted" and not fired then
+  fired=true
+  sample=100;now=now+5;remuda._butler_deliver_notices()
+  sample=49;now=now+5;remuda._butler_deliver_notices()
+  now=now+5;remuda._butler_deliver_notices()
+ end
+end}
+now=now+5;remuda._butler_deliver_notices();sample=49
+for _=1,2 do now=now+5;remuda._butler_deliver_notices() end
+print("diagnostic_yield_accepted_sends="..sends)
+assert(sends==1,"accepted notice replayed during diagnostics yield")

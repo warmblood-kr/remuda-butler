@@ -21,6 +21,7 @@ local notify_mail_delivery = assert(config.notify_mail_delivery)
 local deliver_message = assert(config.deliver_message)
 local known_startup_modal = assert(remuda._butler_chooser).known_startup_modal
 local startup_action_safe
+local notice_session_instance
 -- The originating module identity, captured at load. Never read
 -- remuda._butler_notice when deciding whether an attempt is still current.
 local NOTICE_MODULE = {}
@@ -974,22 +975,43 @@ end
 -- The core accepted the write (submitted or unverified). This is transport
 -- acceptance, never receipt: mail stays unread until its inbox is read, and
 -- the reminder/stuck machinery keeps running for it.
+local function heuristic_marker_current(session, agent, marker)
+  if not notice_image_current() or bus.agents[session] ~= agent
+      or not marker or marker.agent ~= agent or marker.agent_id ~= agent.id
+      or marker.agent_instance ~= agent.instance_id
+      or marker.session_instance ~= agent.session_instance_id then return false end
+  local sample = bus.context_samples and bus.context_samples[session]
+  return sample ~= nil and sample.instance == marker.instance
+end
 complete_notice_recovery = function(session, state)
   if not notice_image_current() then return false, "generation_changed" end
   state = type(state) == "table" and state or {}
-  cancel_native_watcher(session)
-  diagnostic("submitted", "transport_accepted", session)
-  _butler_session_trace("notice_transport_accepted", "message_ids="
-    .. table.concat(state.message_ids or {}, ",") .. " session=" .. session)
-  local pending = bus.notices[session]
-  if pending then pending.diagnostic_reason = nil end
   local agent = bus.agents[session]
-  if agent and agent.id then
-    local sent_at = bus.notice_sent_at[agent.id] or {}
-    bus.notice_sent_at[agent.id] = sent_at
-    for _, id in ipairs(state.message_ids or {}) do sent_at[id] = notice_now() end
-    bus.notice_reminder_at[session] = notice_now() + NOTICE_REMINDER_SECONDS
+  -- Marker checks are synchronous: a new observation here could yield after
+  -- journal retirement and allow another guessed drop to duplicate the send.
+  if agent and (state.heuristic_reshow or next(state.heuristic_unread or {})) then
+    if heuristic_marker_current(session, agent, state.heuristic_reshow) then
+      bus.heuristic_reshown = bus.heuristic_reshown or {}
+      local old = bus.heuristic_reshown[session]
+      local new = state.heuristic_reshow
+      if not old or old.agent_id ~= new.agent_id or old.instance ~= new.instance
+          or (old.sequence or 0) <= (new.sequence or 0) then
+        bus.heuristic_reshown[session] = new
+      end
+    end
+    for id, marker in pairs(state.heuristic_unread or {}) do
+      if heuristic_marker_current(session, agent, marker) then
+        bus.heuristic_unread = bus.heuristic_unread or {}
+        local recorded = bus.heuristic_unread[session]
+        if not recorded or recorded.agent_id ~= marker.agent_id or recorded.instance ~= marker.instance then
+          recorded = { agent_id = marker.agent_id, instance = marker.instance, ids = {} }
+          bus.heuristic_unread[session] = recorded
+        end
+        recorded.ids[id] = true
+      end
+    end
   end
+  local pending = bus.notices[session]
   if pending then
     if state.message_ids and pending.message_order then
       local submitted = {}
@@ -1003,6 +1025,10 @@ complete_notice_recovery = function(session, state)
       pending.text = order[#order] and pending.message_ids[order[#order]] or nil
       for _, id in ipairs(state.message_ids) do
         if pending.message_times then pending.message_times[id] = nil end
+        if pending.heuristic_reshow and pending.heuristic_reshow.message_id == id then
+          pending.heuristic_reshow = nil
+        end
+        if pending.heuristic_unread then pending.heuristic_unread[id] = nil end
       end
     else
       pending.count = pending.count - state.count
@@ -1025,6 +1051,13 @@ complete_notice_recovery = function(session, state)
         pending.first_at + NOTICE_MAX_WAIT_S)
     end
   end
+  if pending and bus.notices[session] == pending then pending.diagnostic_reason = nil end
+  if agent and agent.id then
+    local sent_at = bus.notice_sent_at[agent.id] or {}
+    bus.notice_sent_at[agent.id] = sent_at
+    for _, id in ipairs(state.message_ids or {}) do sent_at[id] = notice_now() end
+    bus.notice_reminder_at[session] = notice_now() + NOTICE_REMINDER_SECONDS
+  end
   bus.notice_recoveries[session] = nil
   bus.notice_retry_reasons[session] = nil
   bus.notice_failure_alerts[session] = nil
@@ -1044,6 +1077,10 @@ complete_notice_recovery = function(session, state)
     if #rest == 0 then bus.notice_stuck[session] = nil end
   end
   clear_notice_fallbacks(session, state.message_ids)
+  cancel_native_watcher(session)
+  diagnostic("submitted", "transport_accepted", session)
+  _butler_session_trace("notice_transport_accepted", "message_ids="
+    .. table.concat(state.message_ids or {}, ",") .. " session=" .. session)
   return true
 end
 -- The durable delivery journal is the authority for automatic attempts. It is
@@ -1337,11 +1374,20 @@ local function pending_without_reserved(session, pending)
     first_at = pending.first_at, last_at = pending.last_at, due_at = pending.due_at,
     delivery_attempts = pending.delivery_attempts, retry_at = pending.retry_at,
     busy_since = pending.busy_since, text = pending.message_ids[keep[#keep]] }
+  if pending.heuristic_reshow then
+    for _, id in ipairs(keep) do
+      if id == pending.heuristic_reshow.message_id then rebuilt.heuristic_reshow = pending.heuristic_reshow end
+    end
+  end
   for _, id in ipairs(keep) do
     rebuilt.message_ids[id] = pending.message_ids[id]
     rebuilt.message_times[id] = pending.message_times and pending.message_times[id]
     if pending.reshow and pending.reshow[id] then rebuilt.reshow[id] = true end
     if pending.reminders and pending.reminders[id] then rebuilt.reminders[id] = true end
+    if pending.heuristic_unread and pending.heuristic_unread[id] then
+      rebuilt.heuristic_unread = rebuilt.heuristic_unread or {}
+      rebuilt.heuristic_unread[id] = pending.heuristic_unread[id]
+    end
   end
   bus.notices[session] = rebuilt
   return rebuilt
@@ -1569,6 +1615,13 @@ local function notice_seam(session, pending)
       local state = { count = pending.count, message_ids = {} }
       for _, id in ipairs(pending.message_order or {}) do
         state.message_ids[#state.message_ids + 1] = id
+      end
+      state.heuristic_reshow = pending.heuristic_reshow
+      state.heuristic_unread = {}
+      for _, id in ipairs(state.message_ids) do
+        if pending.heuristic_unread and pending.heuristic_unread[id] then
+          state.heuristic_unread[id] = pending.heuristic_unread[id]
+        end
       end
       local text = adapter.route == "native" and native_notice_text(pending)
         or pending_notice_text(pending)
@@ -1865,7 +1918,7 @@ local function notice_id_stuck(alias, message_id)
   end
   return false
 end
-function remuda._butler_notify(alias, notice, message_id, reshow, reminder)
+function remuda._butler_notify(alias, notice, message_id, reshow, reminder, heuristic_reshow, heuristic_unread)
   if not notice_image_current() then return false, "generation_changed" end
   local _, recipient = mail_id(alias, false)
   if notice_id_stuck(alias, message_id) then return false end
@@ -1894,12 +1947,17 @@ function remuda._butler_notify(alias, notice, message_id, reshow, reminder)
     bus.notice_sent_at[recipient_id] = sent_at
     sent_at[message_id] = now
     pending.message_ids[message_id] = notice
+    if heuristic_unread then
+      pending.heuristic_unread = pending.heuristic_unread or {}
+      pending.heuristic_unread[message_id] = heuristic_unread
+    end
     if reminder then
       pending.reminders = pending.reminders or {}
       pending.reminders[message_id] = true
     elseif reshow then
       pending.reshow = pending.reshow or {}
       pending.reshow[message_id] = true
+      if heuristic_reshow then pending.heuristic_reshow = heuristic_reshow end
     end
     pending.message_order[#pending.message_order + 1] = message_id
     pending.message_times = pending.message_times or {}
@@ -1943,8 +2001,12 @@ local function seed_unread_notices(alias, previous_instance, instance, unread)
       local pending = bus.notices[alias]
       local already_pending = pending and pending.message_ids and pending.message_ids[message_id]
       local already_seen = seen and seen[message_id]
+      local heuristic = previous_instance == "heuristic_compacted"
+      local recorded = (bus.heuristic_unread or {})[alias]
+      local already_reshown = heuristic and recorded and recorded.agent_id == agent.id
+        and recorded.instance == instance and recorded.ids[message_id]
       if previous_instance ~= nil and previous_instance ~= "launched" and previous_instance ~= instance
-          and already_seen and not already_pending then
+          and already_seen and not already_pending and not already_reshown then
         -- A prior session may have recorded the deposit notice before its
         -- queue was cleared at exit. Replay that unread mail for this session.
         seen[message_id] = nil
@@ -1959,7 +2021,10 @@ local function seed_unread_notices(alias, previous_instance, instance, unread)
           detail = "forwarded by " .. by
         end
         message.id = message.id or message_id
-        remuda._butler_notify(alias, mail_notice_text(message, detail, agent.kind), message_id)
+        local marker = heuristic and { agent_id = agent.id, instance = instance, agent = agent,
+          agent_instance = agent.instance_id, session_instance = agent.session_instance_id } or nil
+        remuda._butler_notify(alias, mail_notice_text(message, detail, agent.kind), message_id,
+          nil, nil, nil, marker)
       end
     end
   end
@@ -1993,6 +2058,12 @@ end
 local function remind_unread_notices(alias, agent, now)
   if not notice_image_current() then return false, "generation_changed" end
   if not agent.id then return end
+  local recorded = (bus.heuristic_unread or {})[alias]
+  if recorded and recorded.agent_id == agent.id then
+    for id in pairs(recorded.ids) do
+      if not mail.is_unread(agent.id, id) then recorded.ids[id] = nil end
+    end
+  end
   if bus.pending_tasks[alias] and not native_immediate(alias) then return end
   prune_accepted_entries(agent)
   local stuck = bus.notice_stuck[alias]
@@ -2021,7 +2092,7 @@ local function remind_unread_notices(alias, agent, now)
     bus.notice_reminder_at[alias] = nil
   end
 end
-local function notice_session_instance(alias, agent, session_instances)
+notice_session_instance = function(alias, agent, session_instances)
   if type(agent.session_instance_id) == "string" and agent.session_instance_id ~= "" then
     return agent.session_instance_id
   end
@@ -2063,10 +2134,10 @@ local function last_unanswered_leader_message(alias, agent)
   end
   return newest
 end
-local function reshow_leader_message(alias, message, why)
+local function reshow_leader_message(alias, message, why, heuristic_reshow)
   local sender = message.from.alias or message.from.session or "your leader"
   remuda._butler_notify(alias, "Butler message " .. message.id .. " from " .. sender .. " re-shown after "
-    .. why .. ". Read it: remuda butler inbox " .. message.id, message.id, true)
+    .. why .. ". Read it: remuda butler inbox " .. message.id, message.id, true, nil, heuristic_reshow)
 end
 -- The one hook for any compaction (Butler's own, or the half-drop heuristic
 -- below for the agent's auto-compact): the next tick re-seeds this member.
@@ -2095,7 +2166,10 @@ local function note_context_drop(alias, agent, instance)
   if used > prior then sample.armed = true; return end
   if sample.armed and used < prior / 2 then
     sample.armed = false
-    remuda._butler_notice_compacted(alias)
+    -- Never replace a stronger explicit compact or pending restart marker.
+    if bus.unread_seeded[alias] == instance then
+      bus.unread_seeded[alias] = "heuristic_compacted"
+    end
   end
 end
 function remuda._butler_deliver_notices()
@@ -2153,7 +2227,9 @@ function remuda._butler_deliver_notices()
         -- A task may have held unread mail out of the first prompt after the
         -- instance was already marked seeded (including an empty inbox).
         bus.notice_deferred_by_task[alias] = nil
-        bus.unread_seeded[alias] = nil
+        if bus.unread_seeded[alias] == instance or bus.unread_seeded[alias] == "launched" then
+          bus.unread_seeded[alias] = nil
+        end
       end
       previous_instance = bus.unread_seeded[alias]
       if previous_instance ~= instance and agent.id then
@@ -2174,8 +2250,20 @@ function remuda._butler_deliver_notices()
             local seeded, result = pcall(seed_unread_notices, alias, previous_instance, instance, unread)
             if seeded and result then
               if leader_message then
-                reshow_leader_message(alias, leader_message,
-                  previous_instance == "compacted" and "compaction" or "restart")
+                local heuristic = previous_instance == "heuristic_compacted"
+                local shown = (bus.heuristic_reshown or {})[alias]
+                if not heuristic or not shown or shown.agent_id ~= agent.id
+                    or shown.instance ~= instance or shown.message_id ~= leader_message.id then
+                  local marker
+                  if heuristic then
+                    bus.heuristic_sequence = (bus.heuristic_sequence or 0) + 1
+                    marker = { agent_id = agent.id, instance = instance, agent = agent,
+                      agent_instance = agent.instance_id, session_instance = agent.session_instance_id,
+                      message_id = leader_message.id, sequence = bus.heuristic_sequence }
+                  end
+                  reshow_leader_message(alias, leader_message,
+                    (heuristic or previous_instance == "compacted") and "compaction" or "restart", marker)
+                end
               end
               bus.unread_seeded[alias] = instance
               bus.unread_seeded_exited_at[alias] = nil

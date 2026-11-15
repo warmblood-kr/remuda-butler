@@ -1,5 +1,5 @@
 -- The half-drop heuristic: nil -> value is not a drop; one re-show notice per
--- drop, re-armed only after the context rises again.
+-- drop, with duplicate read-brief re-shows suppressed in one instance.
 T.install_mod("butler", assert(os.getenv("REMUDA_LUA_REPO")))
 T.eval('remuda._butler_argv = {"sh", "-c", "sleep 60"}; remuda._butler_skip_relay = true')
 T.eval('return remuda.exec("butler")')
@@ -20,9 +20,15 @@ T.eval([[
   local state = { now = 0, busy = {}, typed = {}, ctx = {} }
   remuda._notice_test_state = state
   remuda._butler_notice_clock = function() return state.now end
+  remuda.clock = function() return state.now * 1000 end
+  remuda._session_refresh = function(name, instance)
+    local agent = remuda._butler_bus.agents[name]
+    assert(agent and agent.instance_id == instance, "refresh must target the launched instance")
+    return true
+  end
   remuda.ls = function() return {
-    { name = 'cx1', alive = true, attached = false },
-    { name = 'butler', alive = true, attached = false },
+    { name = 'cx1', alive = true, attached = false, instance_id = remuda._butler_bus.agents.cx1.instance_id },
+    { name = 'butler', alive = true, attached = false, instance_id = remuda._butler_bus.agents.butler.instance_id },
   } end
   remuda.session = function(name) return { is_busy = state.busy[name] == true } end
   remuda.capture_styled = nil
@@ -49,7 +55,7 @@ T.test("half_drop_heuristic_guards_and_rearms_after_a_rise", function()
   local id = T.eval([[
     local state = remuda._notice_test_state
     local id = remuda._butler_send('butler', 'cx1', 'guard task'):match('^queued (%S+)')
-    remuda._rn_tick(0); remuda._rn_tick(2)
+    remuda._rn_tick(0); remuda._rn_tick(2); remuda._rn_tick(3)
     remuda._butler_inbox('cx1')
     state.ctx.cx1 = nil
     remuda._rn_tick(3)
@@ -87,6 +93,5 @@ T.test("half_drop_heuristic_guards_and_rearms_after_a_rise", function()
     state.ctx.cx1 = 50000
     for t = 32, 40 do remuda._rn_tick(t) end
   ]])
-  T.eq(typed(), 3, "a rise re-arms: the next drop notices once more")
-  T.ok(text(3):find("re-shown after compaction", 1, true), "re-armed notice is a re-show: " .. text(3))
+  T.eq(typed(), 2, "a second guessed drop does not re-show the same read brief")
 end)
