@@ -1180,7 +1180,8 @@ function relay.new(options)
           callback({ event_id = result.json and result.json.event_id, room_id = room_id })
         end
       end)
-    end, function() return relay.approval_room_for_config(cfg) end, cfg.home_room)
+    end, function() return relay.approval_room_for_config(cfg) end, cfg.home_room,
+      cfg.dialog_approval == true)
   end
 
   local function quarantine_event(ev, reason, room_id, defer_persist)

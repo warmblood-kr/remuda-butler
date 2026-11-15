@@ -1620,6 +1620,16 @@ local function test_typed_line_config_is_strict_and_off_by_default()
   assert(conf.approval_room == "all", "invalid approval_room values must fall back to all")
   cleanup_fixture(dir, path)
 
+  dir, path = fixture("dialog_approval=on\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.dialog_approval == true, "dialog_approval=on must enable the opt-in")
+  cleanup_fixture(dir, path)
+
+  dir, path = fixture("dialog_approval=maybe\n")
+  conf = assert(matrix.read_config(path))
+  assert(conf.dialog_approval == false, "an unreadable dialog_approval must stay off")
+  cleanup_fixture(dir, path)
+
   dir, path = fixture("typed_lines=true\nshell_lines=false\n")
   conf = assert(matrix.read_config(path))
   assert(conf.typed_lines == true and conf.shell_lines == false,

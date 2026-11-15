@@ -410,6 +410,7 @@ local function read_config(path)
     b2b_max_turns = b2b_max_turns,
     approval_ttl_minutes = approval_ttl_minutes,
     approval_room = approval_room,
+    dialog_approval = opts.dialog_approval == "on" or opts.dialog_approval == "true",
     use_messages = mode == "1" or mode == "true" or mode == "messages" or mode == "fallback",
     timeout_ms = math.max(1, timeout), ca_file = ca_file, pin = pin,
   }

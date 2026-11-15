@@ -810,7 +810,9 @@ approved, denied or expired. A repeat ask for the same room returns the same
 request. Each agent may have 3 open requests, and there may be 5 in total.
 Requests live in the relay state file.
 The config accepts `approval_room=all|home`; an absent or invalid value uses
-`all`.
+`all`. `dialog_approval=on` is a separate, default-off switch for one-time
+dialog answers; leave it off until the owner has confirmed who can read the
+approval room.
 
 `quarantine` lists rejected inbound Matrix message events; add `--id EVENT_ID`
 to inspect one. It is operator-only under the same caller policy. The relay

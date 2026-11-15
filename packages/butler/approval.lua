@@ -113,13 +113,13 @@ approval.RETENTION_S = 24 * 60 * 60
 approval.ttl_minutes = 30
 function approval.default_ttl_s() return approval.ttl_minutes * 60 end
 
-function approval.attach(state, persist_fn, post_fn, room_fn, home_room)
+function approval.attach(state, persist_fn, post_fn, room_fn, home_room, dialog_actions)
   assert(type(state) == "table", "approval state is required")
   if type(state.approvals) ~= "table" or state.approvals == remuda.json.null then
     state.approvals = remuda.json and remuda.json.object({}) or {}
   end
   attached = { state = state, persist = persist_fn, post = post_fn, approval_room = room_fn,
-    home_room = home_room }
+    home_room = home_room, dialog_actions = dialog_actions == true }
   local recovered = false
   local restarted_ms = math.floor(os.time() * 1000)
   for _, rec in pairs(state.approvals) do
@@ -183,6 +183,11 @@ function approval.attach(state, persist_fn, post_fn, room_fn, home_room)
     end
   end
   return true
+end
+
+-- One-time dialog answers are an explicit owner opt-in; absent config stays off.
+function approval.dialog_actions_enabled()
+  return attached ~= nil and attached.dialog_actions == true
 end
 
 function approval.begin_delivery(rec)
