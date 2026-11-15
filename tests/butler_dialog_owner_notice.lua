@@ -8,7 +8,8 @@ local bus = { agents = {
 } }
 local tmpdir = os.tmpname()
 os.remove(tmpdir)
-assert(os.execute('mkdir -p ' .. tmpdir) == 0)
+local made = os.execute('mkdir -p ' .. tmpdir) -- true on LuaJIT 2.1.1761+, else 0
+assert(made == 0 or made == true, 'temporary directory')
 _G.remuda = {
   butler = {}, _butler_bus = bus, _butler_agent_builders = {},
   _butler_agent_startup = {}, _butler_agent_support = {}, _butler_telemetry_adapters = {},
