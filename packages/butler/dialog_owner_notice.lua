@@ -1,8 +1,9 @@
--- Report-only owner notice for a recognised Codex approval dialog. The leader
--- report in dialogs.lua can sit unread behind a blocked pane; the owner should
--- learn from Matrix that an exact session waits for a decision. This module only
--- posts a plain notice to the owner's home room. It never answers, approves,
--- denies, selects an option, types or runs a key.
+-- Report-only owner notice for a recognised Codex approval dialog or the
+-- automatic-review refusal. The leader report in dialogs.lua can sit unread
+-- behind a blocked pane; the owner should learn from Matrix that an exact
+-- session waits for a decision. This module only posts a plain notice to the
+-- owner's home room. It never answers, approves, denies, selects an option,
+-- types or runs a key.
 --
 -- One notice per pending dialog (session, instance, state id, choice block):
 -- only the periodic dialog tick considers it, after `debounce_seconds`; a
@@ -10,8 +11,9 @@
 -- when the dialog resolves; a session gets at most one notice per
 -- `session_seconds`; an offline or failed post retries no sooner than
 -- `retry_seconds`; a receipt older than `remember_seconds` cannot suppress one.
--- If the daemon dies after a post but before its callback, the next start posts
--- once more: for a notice a duplicate is better than silence, and a receipt is
+-- If the daemon dies after a post but before its callback, or after Matrix
+-- accepted the post but before the receipt is durably written, the next start
+-- may post once more: a duplicate is better than silence, and a receipt is
 -- never written without an event id. The text carries only the session alias
 -- and the recognised state id, never screen text, commands, paths or files.
 local butler = assert(remuda.butler)
@@ -156,21 +158,28 @@ function M.resolved(name, instance)
 end
 
 local function text_for(name, id)
-  local what = id == 'codex_auto_review_refused'
-    and 'Codex automatic approval review rejected further approval requests and interrupted the turn'
-    or 'Codex is waiting for an approval decision'
-  return 'Butler notice: ' .. what .. ' in session ' .. name .. ' (' .. id .. '). '
-    .. 'Report only: Butler sent no input and chooses no option. Answer it in that pane.'
+  if id == 'codex_auto_review_refused' then
+    return 'Butler notice: Codex automatic approval review rejected further approval requests and '
+      .. 'interrupted the turn in session ' .. name .. ' (' .. id .. '). This is a classifier refusal, '
+      .. 'not a permission request; no approval is pending and Butler sent no input. Review the turn in that pane.'
+  end
+  return 'Butler notice: Codex is waiting for an approval decision in session ' .. name
+    .. ' (' .. id .. '). Report only: Butler sent no input and chooses no option. Answer it in that pane.'
 end
 
 -- Called from the periodic dialog tick for a stable recognised state. Returns
 -- true only when a post was started; every outcome stays report-only.
 function M.consider(name, agent, state)
   if type(agent) ~= 'table' or agent.kind ~= 'codex' then return false, 'not_codex' end
-  if type(state) ~= 'table' or type(state.entry) ~= 'table'
-      or state.entry.response ~= 'approval' then return false, 'not_approval' end
-  if not bounded(name, 128) or not bounded(state.id, 64)
+  if type(state) ~= 'table' or not bounded(name, 128) or not bounded(state.id, 64)
       or not bounded(state.instance, 256) then return false, 'unfenced' end
+  -- The auto-review refusal is a classifier decision, not a pending permission
+  -- request: notice it even if a future agent row classifies it as `report`.
+  local entry = state.entry
+  if type(entry) ~= 'table'
+      or (entry.response ~= 'approval' and state.id ~= 'codex_auto_review_refused') then
+    return false, 'not_approval'
+  end
   load()
   local now = M.clock()
   expire(now)

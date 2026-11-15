@@ -115,14 +115,27 @@ assert(#reports == 1 and reports[1][1] == 'child', 'Claude still reports to its 
 assert(#notices == 0 and #attempts == 0, 'Claude never posts an owner notice')
 screens.child = READY; ticks(1)
 
--- 3. The auto-review refusal is reported with its own wording.
+-- 3. The auto-review refusal is a classifier refusal, not a pending approval:
+-- the real classifier marks it `approval` (so it still blocks), and the notice
+-- says no approval is pending. It is noticed even if a future row says `report`.
 reset(); screens.codex = AUTO; t = t + 100
 ticks(8)
+local live = bus.dialog_states.codex
+assert(live and live.id == 'codex_auto_review_refused' and live.entry.response == 'approval',
+  'the real classifier marks the refusal approval-classified')
 assert(#notices == 1 and notices[1]:find('codex_auto_review_refused', 1, true), 'classifier refusal noticed')
-assert(notices[1]:find('automatically rejected', 1, true) or notices[1]:find('automatic approval review rejected', 1, true),
-  'explains the refusal')
+assert(notices[1]:find('classifier refusal', 1, true) and notices[1]:find('no approval is pending', 1, true),
+  'distinguishes the refusal from a waiting approval')
 assert(#writes == 0, 'no input after a refusal')
 screens.codex = READY; ticks(1)
+reset()
+local refusal = { id = 'codex_auto_review_refused', instance = 'cx-refusal',
+  entry = { response = 'report' }, signature = 'refusal-x' }
+assert(N.consider('codex', { kind = 'codex' }, refusal) == false, 'refusal waits for its debounce')
+t = t + 4
+assert(N.consider('codex', { kind = 'codex' }, refusal) == true and #notices == 1,
+  'a report-classified refusal is still noticed')
+assert(notices[1]:find('classifier refusal', 1, true), 'and uses the refusal wording')
 
 -- 4. A changed choice block is held behind the session window, then posted once.
 reset(); screens.codex = EDIT; t = t + 100
@@ -191,17 +204,20 @@ ticks(10)
 assert(#notices == 1, 'and only once')
 screens.codex = READY; ticks(1)
 
--- 9. A reused alias with a new instance is a new request, not a duplicate.
-reset(); screens.codex = READY; ticks(1)
+-- 9. A replaced session instance is a new request: the pending receipt for the
+-- old instance does not suppress it.
+reset(); screens.codex = COMMAND; t = t + 100
+ticks(8)
+assert(#notices == 1, 'pending approval noticed')
 bus.agents.codex.instance_id = 'cx2'
 local listed = remuda.ls
 remuda.ls = function() return {
   { name = 'child', alive = true, instance_id = 'one' },
   { name = 'codex', alive = true, instance_id = 'cx2' },
 } end
-screens.codex = COMMAND; t = t + 100
 ticks(8)
-assert(#notices == 1 and notices[1]:find('session codex', 1, true), 'new instance notifies despite the old receipt')
+assert(#notices == 2 and notices[2]:find('session codex', 1, true),
+  'a replaced instance notifies despite the old pending receipt')
 screens.codex = READY; ticks(1)
 remuda.ls = listed
 bus.agents.codex.instance_id = 'cx'
