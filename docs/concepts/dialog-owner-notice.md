@@ -7,9 +7,13 @@ request from Matrix is a later step and is not implemented.
 
 `packages/butler/dialog_owner_notice.lua` posts one plain Matrix notice to the
 owner's home room for a recognised Codex dialog whose `dialog_states`
-response is `approval` (the four permission headings, `codex_proceed_confirm`
-and `codex_auto_review_refused`). It runs only from the once-a-second dialog
-tick, after `dialogs.lua`'s two-capture stability and its own 3-second debounce.
+response is `approval` (the four permission headings, `codex_proceed_confirm`)
+and for `codex_auto_review_refused`. The refusal is a classifier decision, not
+a pending permission request: the real classifier marks it `approval` so it
+still blocks input, and the notice says no approval is pending and that Butler
+sent nothing; it is noticed even if a future agent row classifies it `report`.
+It runs only from the once-a-second dialog tick, after `dialogs.lua`'s
+two-capture stability and its own 3-second debounce.
 
 ## Delivery rules
 
@@ -26,11 +30,13 @@ tick, after `dialogs.lua`'s two-capture stability and its own 3-second debounce.
 - Delivered receipts persist in `<butler data dir>/dialog-owner-notice`. A
   receipt is cleared when `dialogs.lua` audits the dialog's resolution, so a
   restart does not repeat a notice for a still-pending dialog, while a later
-  identical approval is a new request and does notify. Receipts older than an
-  hour cannot suppress a notice.
-- If the daemon dies after a post but before its callback, the next start posts
-  once more. For a notice, a duplicate is better than silence, and a receipt is
-  never guessed from an uncertain result.
+  identical approval is a new request and does notify. A replaced session
+  instance has a different receipt key, so it notifies even while the old
+  receipt is pending. Receipts older than an hour cannot suppress a notice.
+- If the daemon dies after a post but before its callback, or after Matrix
+  accepted the post but before the receipt is durably written, the next start
+  may post once more. For a notice, a duplicate is better than silence, and a
+  receipt is never guessed from an uncertain result.
 
 ## Why not `approval.request`
 

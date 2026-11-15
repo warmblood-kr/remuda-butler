@@ -1081,8 +1081,9 @@ room as a plain report-only notice
 (`packages/butler/dialog_owner_notice.lua`). It names the session and state,
 sends no input and chooses nothing, posts once per pending dialog, retries while
 the relay is down, is not repeated across a restart, and clears its receipt when
-the dialog resolves. Claude dialogs and the leader report are unchanged. See
-`docs/concepts/dialog-owner-notice.md`.
+the dialog resolves. The auto-review refusal is a classifier decision, not a
+pending approval, and its notice says so. Claude dialogs and the leader report
+are unchanged. See `docs/concepts/dialog-owner-notice.md`.
 
 ### Recognised dialog states
 
