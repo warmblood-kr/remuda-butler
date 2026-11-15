@@ -27,10 +27,11 @@ local DEFAULTS = {
 local MAX_ID_BYTES = 1024
 local MAX_CURSOR_BYTES = 4096
 
-local function report(outcome, reason, correlation)
+local function report(reason)
   local diagnostics = remuda._butler_diagnostics
   if diagnostics and type(diagnostics.record) == "function" then
-    pcall(diagnostics.record, "relay_intake", outcome, reason, correlation)
+    -- SQL errors can contain private data. Never pass them as correlation.
+    pcall(diagnostics.record, "relay_intake", "error", reason)
   end
 end
 
@@ -45,7 +46,7 @@ local function dispose(reason)
   if handle then pcall(handle.close, handle) end
   handle = nil
   failure = "degraded: " .. tostring(reason)
-  report("error", "disposed", reason)
+  report("intake_disposed")
 end
 
 local function opened()
@@ -162,7 +163,7 @@ function M.admit(events, since, now, overrides)
   now = tonumber(now) or 0
   local began, begin_why = checked(db, "exec", "BEGIN IMMEDIATE")
   if not began then
-    report("error", "begin_failed", begin_why)
+    report("intake_begin_failed")
     return nil, "begin: " .. tostring(begin_why)
   end
   local ok, stats, reason = pcall(function()
@@ -223,10 +224,10 @@ function M.admit(events, since, now, overrides)
   if not ok or stats == nil then
     local why = ok and reason or stats
     if not rollback(db) then
-      report("error", "rollback_failed", why)
+      report("intake_rollback_failed")
       return nil, "rollback: " .. tostring(why)
     end
-    report("error", "admit_failed", why)
+    report("intake_admit_failed")
     return nil, tostring(why)
   end
   local committed, commit_why = checked(db, "exec", "COMMIT")
