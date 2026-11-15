@@ -1,5 +1,5 @@
--- Report-only owner notice for Codex approval dialogs. Synthetic screens and a
--- fake approval.notify only; no daemon, Matrix, agent process or transcript.
+-- Report-only owner notice for Codex approval dialogs. Synthetic screens, the
+-- real approval.notify wrapper and a fake Matrix post; no daemon or network.
 local screens, reports, audits, writes = {}, {}, {}, {}
 local notices, attempts, notify_mode, pending_done = {}, {}, 'ok'
 local bus = { agents = {
@@ -33,13 +33,17 @@ remuda.butler.guard_policy = { append = function(record)
   return true
 end, dir = function() return tmpdir end }
 remuda.butler.guard_approval = { sha256 = function(text) return 'digest:' .. #text end }
--- The fake notice transport: 'ok' completes with an event id, 'offline'
--- refuses like a stopped relay, 'error' completes with an error, 'pending'
--- starts a post that never reports back (a daemon died mid-post).
-remuda.butler.approval = { notify = function(text, done)
+remuda.butler.matrix = { sanitize_directory_text = function(value) return value end }
+remuda.json = { null = {}, object = function(value) return value end }
+remuda.cli = { parse = function() return { kind = 'help', text = '' } end }
+-- The fake Matrix post behind the real approval.notify: 'ok' completes with an
+-- event id, 'offline' returns nothing like a stopped relay, 'error' completes
+-- with an error, 'pending' starts a post that never reports back.
+local approval = dofile('packages/butler/approval.lua')
+approval.attach({ approvals = {} }, function() return true end, function(text, _, done)
   attempts[#attempts + 1] = text
   local handle = { cancel = function() end }
-  if notify_mode == 'offline' then return nil, 'Matrix relay is not running' end
+  if notify_mode == 'offline' then return nil end
   if notify_mode == 'pending' then pending_done = done; return handle end
   if notify_mode == 'error' then
     if done then done({ error = 'Matrix approval post failed' }) end
@@ -48,7 +52,7 @@ remuda.butler.approval = { notify = function(text, done)
   notices[#notices + 1] = text
   if done then done({ event_id = 'evt' .. tostring(#notices), room_id = '!room' }) end
   return handle
-end }
+end, function() return '!room' end, '!room')
 remuda._butler_compaction_module_config = { registered_agent_kind = function() end, registered_agent_working = function() end }
 remuda._butler_system = {}
 dofile('packages/butler/compaction.lua')
