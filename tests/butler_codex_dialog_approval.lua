@@ -90,7 +90,7 @@ assert(#requests() == 1, 'one actionable request from the tick')
 local text = requests()[1]
 assert(text:find('touch /private/tmp/codex-esc-probe/outside.txt', 1, true)
   and text:find('untrusted screen text', 1, true) and text:find('Yes, proceed', 1, true)
-  and text:find('leaves the prompt untouched', 1, true), 'shows the action and limits')
+  and text:find('Escape cancel', 1, true), 'shows the action and both answers')
 assert(not text:find('Press enter', 1, true) and not text:find('Reason:', 1, true), 'no screen body')
 assert(#text <= 2048 and approval.target_room() == '!owner', 'bounded request in the owner room')
 assert(answer(rec, 'approve') and rec.status == 'applied' and keys[1] == 'RET', 'one Return applied')
@@ -103,7 +103,7 @@ rec = ask()
 assert(#requests() == 1, 'a later identical prompt asks again')
 -- 2. Parser: only the exact captured 0.167.2 geometry is actionable.
 local plan = assert(descriptor.match(COMMAND), 'fixture matches')
-assert(plan.key == 'RET' and plan.label == 'Yes, proceed' and descriptor.deny_key == nil
+assert(plan.key == 'RET' and plan.label == 'Yes, proceed' and descriptor.deny_key == 'ESC'
   and plan.summary == 'run `touch /private/tmp/codex-esc-probe/outside.txt`', 'exact plan')
 assert(not descriptor.verify(COMMAND) and descriptor.verify('done'), 'verify is the prompt gone')
 local refusals = {
@@ -129,10 +129,11 @@ for _, case in ipairs(refusals) do
   assert(#requests() == 0, 'no request for: ' .. case[2])
 end
 assert(descriptor.match(with_command('cargo test --release --quiet')), 'a benign command is actionable')
--- 3. Denial and terminal answers send nothing; the prompt stays.
+-- 3. A live denial sends one Escape; the terminal sends nothing.
 rec = ask()
-assert(answer(rec, 'deny') and rec.status == 'denied' and #keys == 0, 'a denial sends no input')
-assert(not answer(rec, 'deny') and #keys == 0, 'a duplicate denial never writes')
+assert(answer(rec, 'deny') and rec.status == 'denied' and rec.delivery_started
+  and #keys == 1 and keys[1] == 'ESC', 'a live denial sends one Escape')
+assert(not answer(rec, 'deny') and #keys == 1, 'a duplicate denial never writes')
 rec = ask()
 assert(answer(rec, 'deny', 'operator (terminal)') and rec.status == 'denied' and #keys == 0,
   'terminal denial never writes')

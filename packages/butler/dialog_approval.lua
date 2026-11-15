@@ -62,12 +62,21 @@ local function snapshot(name, descriptor_id, observed)
       if ok and type(plan) == 'table' and type(plan.signature) == 'string' and plan.signature ~= ''
           and #plan.signature <= 16384 and bounded(plan.label, 128) and bounded(plan.summary, 256)
           and type(plan.key) == 'string' and (plan.key == 'RET' or plan.key:match('^%d$')) then
+        -- A descriptor may name the prompt's own cancel key so a live owner can
+        -- reject without a standing grant. Only ESC is accepted and the request
+        -- still carries one key per verdict.
+        local deny_key, deny_label
+        if descriptor.deny_key ~= nil then
+          if descriptor.deny_key ~= 'ESC' or not bounded(descriptor.deny_label, 128) then return nil end
+          deny_key, deny_label = descriptor.deny_key, descriptor.deny_label
+        end
         local signature_hash, state_hash = hash(plan.signature), hash(state.signature or '')
         if signature_hash and state_hash then
           return { session = name, agent_id = agent.id, kind = agent.kind, instance_id = agent.instance_id,
             session_marker = agent.session_start_marker, dialog_id = descriptor.id,
             handler_version = descriptor.version, signature_hash = signature_hash, state_hash = state_hash,
-            key = plan.key, label = plan.label, summary = plan.summary }, state, descriptor
+            key = plan.key, label = plan.label, summary = plan.summary,
+            deny_key = deny_key, deny_label = deny_label }, state, descriptor
         end
       end
     end
@@ -87,7 +96,7 @@ local function render_request(rec, name, data)
   return 'Butler dialog approval ' .. rec.id .. '\nAgent: ' .. data.kind .. ' / ' .. name
     .. '\nAction (untrusted screen text): ' .. data.summary
     .. '\nApprove ✅ → choose "' .. data.label .. '" once (' .. data.key .. ').'
-    .. '\nAny other answer leaves the prompt untouched for the pane.'
+    .. (data.deny_label and ('\n❌ / no → ' .. data.deny_label .. '.') or '')
     .. '\nOne input only; changed screens or sessions refuse it. No standing permission is granted.'
     .. '\nReact ✅ / ❌ or reply yes / no to this message within 10 minutes.'
     .. '\n[Butler approval ' .. rec.id .. ']'
@@ -102,19 +111,20 @@ end
 local function same(current, saved)
   if not current or type(saved) ~= 'table' then return false end
   for _, field in ipairs({ 'session', 'agent_id', 'kind', 'instance_id', 'session_marker', 'dialog_id',
-      'handler_version', 'signature_hash', 'state_hash', 'key', 'label', 'summary' }) do
+      'handler_version', 'signature_hash', 'state_hash', 'key', 'label', 'summary',
+      'deny_key', 'deny_label' }) do
     if current[field] ~= saved[field] then return false end
   end
   return true
 end
 
-local function audit(data, event, outcome, rec)
+local function audit(data, event, outcome, rec, key)
   local policy = butler.guard_policy
   if not policy or type(policy.append) ~= 'function' then return false end
   local ok, wrote = pcall(policy.append, { session = data.session, kind = data.kind,
     event = event, tool = 'dialog', class = 'other', summary = outcome,
     instance_id = data.instance_id, dialog_id = data.dialog_id, handler_version = data.handler_version,
-    hash = data.signature_hash, action = 'key/' .. data.key, id = rec and rec.id,
+    hash = data.signature_hash, action = 'key/' .. (key or data.key), id = rec and rec.id,
     owner = rec and rec.answered_by, owner_event_id = rec and rec.answer_event_id })
   return ok and wrote == true
 end
@@ -138,26 +148,28 @@ function M.consider(name, observed)
   end)
 end
 
--- One permitted key, fixed by the trusted descriptor; no owner text or key
--- sequence enters here.
-local function execute(rec, done)
+-- One permitted key per verdict. The caller has already fixed the key from the
+-- trusted descriptor; nothing here accepts owner text or a key sequence.
+local function execute(rec, done, key, verdict)
   local data = rec.data
   if rec.delivery_started or not tonumber(rec.expires_at) or os.time() * 1000 >= rec.expires_at then
     done(false, 'expired or already consumed'); return
   end
   local current, _, descriptor = snapshot(data.session, data.dialog_id)
   if not same(current, data) then done(false, 'dialog or session changed'); return end
-  if not audit(data, 'dialog_action', 'before_write', rec) then done(false, 'audit unavailable'); return end
+  if not audit(data, 'dialog_action', 'before_write', rec, key) then done(false, 'audit unavailable'); return end
   -- Persist consumption BEFORE the one permitted key; failures/restarts never replay it.
-  if not approval.begin_delivery(rec) then done(false, 'consumption could not be persisted'); return end
+  if not approval.begin_delivery(rec, verdict) then done(false, 'consumption could not be persisted'); return end
   current = snapshot(data.session, data.dialog_id)
   if not same(current, data) then
-    audit(data, 'dialog_action_result', 'not_written', rec)
+    audit(data, 'dialog_action_result', 'not_written', rec, key)
     done(false, 'dialog changed during audit'); return
   end
   local originals = remuda._butler_dialog_originals
   if not originals or type(originals.key) ~= 'function' then done(false, 'input unavailable'); return end
-  local ok, result = pcall(originals.key, data.session, data.key)
+  -- This bounded executor is the only path around the ordinary unknown-dialog
+  -- gate. It accepts no arbitrary text, key sequence or standing grant.
+  local ok, result = pcall(originals.key, data.session, key)
   local captured, screen = pcall(remuda.capture, data.session)
   local verified, matches = false, false
   if captured and type(screen) == 'string' then verified, matches = pcall(descriptor.verify, screen) end
@@ -167,7 +179,7 @@ local function execute(rec, done)
     if row.name == data.session and row.alive and row.instance_id == data.instance_id then same_instance = true end
   end
   local success = ok and result ~= false and verified and matches == true and same_instance
-  local logged = audit(data, 'dialog_action_result', success and 'verified' or 'uncertain', rec)
+  local logged = audit(data, 'dialog_action_result', success and 'verified' or 'uncertain', rec, key)
   done(success and logged, success and (not logged and 'outcome audit unavailable' or nil)
     or 'input outcome uncertain; inspect pane, never retry automatically')
 end
@@ -183,8 +195,18 @@ approval.handler('dialog_action', {
     return audit(data, 'dialog_approval_answer', verdict, {
       id = rec.id, answered_by = who, answer_event_id = event_id }), 'audit unavailable'
   end,
-  approve = function(rec, done) execute(rec, done) end,
-  deny = function(rec) audit(rec.data, 'dialog_approval_closed', 'denied', rec) end,
+  approve = function(rec, done) execute(rec, done, rec.data.key, 'approve') end,
+  deny = function(rec)
+    local data = rec.data
+    -- A live owner rejection may cancel the prompt with the descriptor's own
+    -- ESC key. The terminal and an absent live event never write; neither does
+    -- a descriptor without a deny plan.
+    local live = type(data) == 'table' and type(data.deny_key) == 'string'
+      and rec.answered_by ~= 'operator (terminal)' and bounded(rec.answered_by, 256)
+      and bounded(rec.answer_event_id, 256)
+    if live then execute(rec, function() end, data.deny_key, 'deny') end
+    audit(data, 'dialog_approval_closed', 'denied', rec)
+  end,
   expire = function(rec) audit(rec.data, 'dialog_approval_closed', 'expired', rec) end,
 })
 
