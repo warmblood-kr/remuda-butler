@@ -51,9 +51,13 @@ local function fake_db(options)
   return db
 end
 
-local function load(open, root, now)
+local function load(open, root, now, activation, reason)
   remuda._butler_inbox_db_config = { root = root, open = open, now = now }
   remuda._butler_diagnostics = { record = report }
+  remuda._butler_inbox_activation = nil
+  remuda._butler_inbox_open = assert(loadfile("packages/butler/inbox_open.lua"))()
+  if activation == nil and reason == nil then activation = "absent" end
+  remuda._butler_inbox_open.observe(activation, reason)
   dofile("packages/butler/inbox_db.lua")
   return remuda._butler_inbox_db
 end
@@ -240,6 +244,47 @@ assert(slow.import_all() == true, "a partial import still returns success")
 assert(slow.status().partial == true, "the time budget marks the import partial")
 assert(slow.status().imported_bytes > 0, "the committed prefix is counted")
 assert(slow.status().error ~= nil, "the partial state is observable")
+
+-- An active inbox asks the shadow index to open with must_exist; a fresh
+-- install (no marker) keeps the create path.
+local active_root = os.tmpname(); os.remove(active_root)
+assert(remuda.fs.mkdir_new(active_root))
+remuda.db = { capabilities = function() return { must_exist = true } end }
+local captured
+local active_index = load(function(_, options) captured = options; return fake_db() end,
+  active_root, nil, "present")
+assert(active_index.available(), "an active inbox opens the shadow index")
+assert(captured and captured.must_exist == true, "an active inbox passes must_exist")
+
+-- Without the capability the shadow index must not open a create-capable
+-- handle either, even if the main guard were bypassed.
+remuda.db = {}
+local unsafe_open = false
+local unsafe = load(function()
+  unsafe_open = true
+  return fake_db()
+end, active_root, nil, "present")
+assert(unsafe.available() == false, "the shadow index refuses without must_exist")
+assert(unsafe_open == false, "the shadow index did not call open")
+assert(tostring(unsafe.status().error):find("must_exist", 1, true), "the refusal names the capability")
+
+-- An unknown marker state refuses too; it is not treated as "no marker".
+local unknown_open = false
+local unknown = load(function()
+  unknown_open = true
+  return fake_db()
+end, active_root, nil, nil, "denied: test")
+assert(unknown.available() == false, "an unknown marker refuses the shadow index")
+assert(unknown_open == false, "an unknown marker did not call open")
+assert(tostring(unknown.status().error):find("denied: test", 1, true), "the refusal keeps the reason")
+
+remuda.db = { capabilities = function() return { must_exist = true } end }
+remuda.remove_dir_all(active_root)
+
+captured = nil
+local fresh_index = load(function(_, options) captured = options; return fake_db() end, root)
+assert(fresh_index.available(), "a fresh install opens the shadow index")
+assert(captured and captured.must_exist == nil, "a fresh install keeps the create path")
 
 remuda.remove_dir_all(root)
 print("ok")

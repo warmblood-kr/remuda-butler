@@ -7,6 +7,14 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Changed
+- On a core that reports `remuda.db.capabilities().must_exist`, an active
+  SQLite inbox now opens with `must_exist = true`, so a database that
+  disappears between the startup check and the open is refused instead of
+  being recreated empty. On a core without that capability, an active inbox
+  now refuses to open with an upgrade message rather than keeping only the
+  metadata pre-check, because an unknown option is silently ignored there.
+  Fresh and legacy installs (no `sqlite-active` marker) still create the
+  database. No production data, reload or config change.
 - Add a shadow relay intake module that mirrors admitted event identities and the cursor into the 0003 tables in one SQLite transaction. The JSON relay state stays authoritative; no relay code calls the intake module yet, and no send, handoff, retention or read behavior changes.
 - Relay database migration 0003 adds the shadow tables for bounded inbound, outbox, dedupe and cursor state. This is a product schema migration applied automatically the next time the relay database is opened; it does not migrate or rewrite existing data, and no reload or rollout is performed. JSON relay state remains authoritative and the migration does not change sends, retention, caps or read behavior. Downgrade is refused while unresolved relay work exists; completed rows are archived instead of dropped.
 - The generated `guidance-layers` block now separates the automatic cluster loader from the shared guidance index. Butler loads `remuda:///butler/guidance/cluster.md` at session start, relaunch and before compaction (node-local, 8 KiB cap) and embeds that snapshot as the cluster layer; the block also names `remuda:///remuda-guidance/index.md` as the shared index agents read themselves with `remuda vfs get` when a task needs rules beyond the snapshot, and says it is not loaded automatically. Missing, empty, too-large or unavailable loader layers, or a missing or unreadable index, keep the work on the loaded layers, report the gap and forbid inventing rules; reads never bypass a rejected status or apply a newer or rejected file over the block. Publishing uses `remuda vfs put` only on an explicit owner or leader request, without claiming peers synced or sessions refreshed. The root, members and the welcome mail carry the same instructions.

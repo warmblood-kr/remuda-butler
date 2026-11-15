@@ -489,6 +489,9 @@ caller_principal = assert(remuda._butler_caller_principal)
 -- Core's database root without opening the file, for the startup guard below.
 remuda.exec("butler/inbox_db_path")
 local inbox_db_path = assert(remuda._butler_inbox_db_path)
+-- Core capability decides whether the inbox open can refuse a missing file.
+remuda.exec("butler/inbox_open")
+local inbox_open = assert(remuda._butler_inbox_open)
 -- Loaded before identity_record so agents.jsonl shares mail.lua's append.
 -- The SQLite index is a shadow: mail files remain authoritative.
 remuda._butler_inbox_db_config = { root = mail_root, open = remuda.db and remuda.db.open }
@@ -502,16 +505,24 @@ local simple = remuda._butler_simple_inbox
 local function path_present(path)
   return inbox_db_path.path_state(remuda.fs, path, io.open) == "present"
 end
-if not simple and mail_root then
-  local marker = mail_root .. "/sqlite-active"
-  local marker_state, marker_why = inbox_db_path.path_state(remuda.fs, marker, io.open)
+local marker, marker_state, marker_why
+if mail_root then
+  marker = mail_root .. "/sqlite-active"
+  marker_state, marker_why = inbox_db_path.path_state(remuda.fs, marker, io.open)
   if not marker_state then
     error("SQLite inbox unavailable: cannot check the inbox marker " .. marker
       .. ": " .. tostring(marker_why), 0)
   end
+  -- One process-wide activation state for every inbox open site. An unknown
+  -- marker or a vanished one after activation is not a fresh install.
+  inbox_open.observe(marker_state, marker_why)
+end
+if not simple and mail_root then
   local was_active = marker_state == "present"
   local open = remuda.db and remuda.db.open
   if type(open) == "function" then
+    local inbox_options, refusal = inbox_open.prepare(remuda.db)
+    if refusal then error(refusal, 0) end
     if was_active then
       -- remuda.db.open creates a missing file, so a lost inbox database would
       -- come back empty and the import would mark that empty database current.
@@ -536,7 +547,7 @@ if not simple and mail_root then
           .. "open or create the database.", 0)
       end
     end
-    local db, why = open("inbox", { migrations = true, timeout_ms = 200 })
+    local db, why = open("inbox", inbox_options)
     if db then
       for _, dir in ipairs({"inboxes", "read", "messages", "objects"}) do remuda.mkdir(mail_root .. "/" .. dir) end
       local files = remuda.list_dir(mail_root .. "/inboxes")
@@ -554,6 +565,7 @@ if not simple and mail_root then
         local f, marker_error = io.open(marker, "w")
         if not f then error("cannot mark SQLite inbox active: " .. tostring(marker_error), 0) end
         f:write("active\n"); f:close()
+        inbox_open.activate()
         simple = { db = db, store = simple_module }
         remuda._butler_simple_inbox = simple
       end
