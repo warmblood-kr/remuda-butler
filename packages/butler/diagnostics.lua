@@ -2,7 +2,7 @@
 -- This is independent of mail storage, audit policy and agent lifecycle state.
 local M = {}
 local CAPACITY, PAGE_SIZE = 200, 12
-local subsystems = { mail = true, matrix = true, notice = true, control = true }
+local subsystems = { mail = true, matrix = true, notice = true, control = true, relay_intake = true }
 local levels = { error = 'error', delivered = 'info', filtered = 'info', deferred = 'warn',
   retry = 'warn', converted = 'info', routed = 'info', stopped = 'warn', submitted = 'info', observed = 'info' }
 local reasons = {}
@@ -10,7 +10,8 @@ for word in ('storage_prepare body_write envelope_write inbox_append envelope_re
   .. 'conversion_failed conversion_ok routing_failed routing_accepted delivery_failed delivery_ok '
   .. 'delivery_deferred filter_policy retry_scheduled prompt_busy prompt_policy heuristic_unknown_choice '
   .. 'heuristic_dialog heuristic_completion capture_unavailable session_unavailable session_replaced detection_unavailable write_returned capability_rebound '
-  .. 'transport_accepted delivery_uncertain human_attached dialog_blocked'):gmatch('%S+') do
+  .. 'transport_accepted delivery_uncertain human_attached dialog_blocked '
+  .. 'intake_disposed intake_begin_failed intake_rollback_failed intake_admit_failed'):gmatch('%S+') do
   reasons[word] = true
 end
 local state = remuda._butler_diagnostics_state or {
@@ -118,7 +119,7 @@ function M.show(requested_page, selection)
 end
 local options = {
   { long = 'page', value = 'N', help = 'Twelve-event preview page, newest first' },
-  { long = 'subsystem', value = 'SUBSYSTEM', help = 'mail, matrix, notice or control' },
+  { long = 'subsystem', value = 'SUBSYSTEM', help = 'mail, matrix, notice, control or relay_intake' },
   { long = 'severity', value = 'LEVEL', help = 'info, warn or error' },
 }
 local list_options = { options[2], options[3], { long = 'json', help = 'Structured bounded snapshot' } }
@@ -128,8 +129,8 @@ local spec = { name = 'remuda butler', verbs = {
   ['diagnostics-list'] = { about = 'Read local Lua diagnostics', options = list_options,
     next = 'remuda butler diagnostics' },
 } }
-local usage = 'Usage: remuda butler diagnostics [--page N] [--subsystem mail|matrix|notice|control] [--severity info|warn|error]\n'
-  .. '       remuda butler diagnostics-list [--json] [--subsystem mail|matrix|notice|control] [--severity info|warn|error]'
+local usage = 'Usage: remuda butler diagnostics [--page N] [--subsystem mail|matrix|notice|control|relay_intake] [--severity info|warn|error]\n'
+  .. '       remuda butler diagnostics-list [--json] [--subsystem mail|matrix|notice|control|relay_intake] [--severity info|warn|error]'
 function M.command(args)
   local values = {}
   if type(remuda.cli) == 'table' and type(remuda.cli.parse) == 'function' then
