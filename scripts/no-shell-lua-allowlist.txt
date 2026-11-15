@@ -10,3 +10,5 @@ tests/butler_inbox_db.lua|1
 tests/butler_read_receipt_delivery.lua|1
 tests/butler_read_receipt_intents.lua|1
 tests/butler_matrix_read_receipts.lua|2
+# Owner-notice test: one disposable directory tree for the persisted receipt file.
+tests/butler_dialog_owner_notice.lua|2
