@@ -2,7 +2,7 @@
 set -euo pipefail
 REPO=$(cd "$(dirname "$0")/.." && pwd -P)
 REMUDA_BIN=${REMUDA_BIN:-remuda}
-CORE_REF=${REMUDA_SQL_CORE_REF:-b713e3e31a5f04e9812d19742984fe4c4c05fe1f}
+CORE_REF=${REMUDA_SQL_CORE_REF:-8dc35489db53c6aebfdf3f5aa1fbd91614b2c281}
 source "$REPO/tests/core_ref.sh"
 core_ref_check
 source "$REPO/tests/lib/isolated_env.sh"

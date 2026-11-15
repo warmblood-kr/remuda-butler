@@ -57,6 +57,9 @@ local function checked(call, ...)
   return value
 end
 
+-- The shadow index opens the same file as the authoritative inbox, so it uses
+-- the same process-wide activation decision. Once the marker says SQLite holds
+-- membership, a missing file must be refused, not recreated.
 local function opened()
   if failure then return nil, failure end
   if handle then return handle end
@@ -65,7 +68,17 @@ local function opened()
     failure = "unavailable: remuda.db.open is missing"
     return nil, failure
   end
-  local ok, db, why = pcall(opener, "inbox", { migrations = true, timeout_ms = 200 })
+  local decision = remuda._butler_inbox_open
+  if type(decision) ~= "table" or type(decision.prepare) ~= "function" then
+    failure = "unavailable: the inbox activation state is missing"
+    return nil, failure
+  end
+  local options, refusal = decision.prepare(remuda.db)
+  if refusal then
+    failure = "unavailable: " .. refusal
+    return nil, failure
+  end
+  local ok, db, why = pcall(opener, "inbox", options)
   if not ok then
     failure = "open: " .. tostring(db)
   elseif db == nil then
