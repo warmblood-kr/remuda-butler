@@ -32,7 +32,9 @@ for _ in $(seq 100); do [[ -S $REMUDA_RUNTIME_DIR/remuda/$server.sock ]] && brea
 lua() { remuda -s "$server" -e "$1" 2>&1; }
 lua "remuda._butler_argv = {'sleep', '1000'}; remuda.exec('butler')" >/dev/null
 for _ in $(seq 100); do lua 'return remuda._butler_agent_builders ~= nil' | grep -qx true && break; sleep 0.1; done
-lua "remuda._butler_agent_builders.fake = function() return {'$t/member.sh'} end; remuda._butler_launch('fake', 'm1')" >/dev/null
+# The fake builder is this launch's injected argv; the root-only _butler_argv
+# seam would override it and start a placeholder instead of member.sh.
+lua "remuda._butler_agent_builders.fake = function() return {'$t/member.sh'} end; remuda._butler_argv = nil; remuda._butler_launch('fake', 'm1')" >/dev/null
 for _ in $(seq 150); do lua 'return remuda._butler_bus.agents.m1 ~= nil' | grep -qx true && break; sleep 0.1; done
 lua 'return remuda._butler_bus.agents.m1 ~= nil' | grep -qx true || fail 'member m1 was not registered'
 remuda -s "$server" butler send m1 'identity smoke message' >"$t/send.out" 2>&1 || fail "send: $(cat "$t/send.out")"
