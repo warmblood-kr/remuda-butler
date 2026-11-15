@@ -1,46 +1,28 @@
 # Codex approval owner notice
 
-Owner request (2026-11-15): learn from Matrix that a managed Codex session is
-waiting for an approval decision, without depending on the member or its leader
-noticing the leader inbox. Step one is report-only; answering the pending
-request from Matrix is a later step and is not implemented.
+Owner request (2026-11-15): the owner learns from Matrix that a Codex session
+waits; step one is report-only and answering from Matrix is step two.
 
-`packages/butler/dialog_owner_notice.lua` posts one plain Matrix notice to the
-owner's home room for a recognised Codex dialog whose `dialog_states`
-response is `approval` (the four permission headings, `codex_proceed_confirm`)
-and for `codex_auto_review_refused`. The refusal is a classifier decision, not
-a pending permission request: the real classifier marks it `approval` so it
-still blocks input, and the notice says no approval is pending and that Butler
-sent nothing; it is noticed even if a future agent row classifies it `report`.
-It runs only from the once-a-second dialog tick, after `dialogs.lua`'s
-two-capture stability and its own 3-second debounce.
+`packages/butler/dialog_owner_notice.lua` posts one plain notice to the owner's
+home room from the periodic dialog tick, after `dialogs.lua`'s stability
+captures and a 3 s debounce, for a Codex dialog whose response is `approval` and
+for `codex_auto_review_refused`. The refusal is a classifier decision, not a
+pending request (it is marked `approval`, so it still blocks); its notice says
+no approval is pending and it is noticed even if a future row says `report`. It
+never writes input; Claude and the leader report are unchanged.
 
 ## Delivery rules
 
-- It never sends a key, text, approval, denial or option. The pane still needs
-  the owner. The existing leader report is unchanged, and Claude dialogs are
-  never posted to the owner room.
-- The notice names the session alias and the recognised state id only. It
-  carries no screen text, command line, path or file content.
-- One notice per pending dialog (session, instance, state id, choice block). A
-  session gets at most one notice per 30-second window, so a repaint that
-  changes the choice block cannot flood the room.
-- An offline relay or a failed post retries every 30 seconds. Only a Matrix
-  event id is recorded as delivery; an error or silence is not.
-- Delivered receipts persist in `<butler data dir>/dialog-owner-notice`. A
-  receipt is cleared when `dialogs.lua` audits the dialog's resolution, so a
-  restart does not repeat a notice for a still-pending dialog, while a later
-  identical approval is a new request and does notify. A replaced session
-  instance has a different receipt key, so it notifies even while the old
-  receipt is pending. Receipts older than an hour cannot suppress a notice.
-- If the daemon dies after a post but before its callback, or after Matrix
-  accepted the post but before the receipt is durably written, the next start
-  may post once more. For a notice, a duplicate is better than silence, and a
-  receipt is never guessed from an uncertain result.
-
-## Why not `approval.request`
-
-`approval.request` opens an actionable request with reactions and a handler.
-That is the later native-answer step. This slice is deliberately
-`approval.notify`, which posts a plain owner-room message and can never write
-input, so it cannot approve, deny or bypass the existing refusal.
+- The notice names the session alias and state id only: no node, request
+  content, command, path or file. A remote reader cannot judge or approve from
+  it; the pane on that host is still required.
+- Receipt key = session + instance + state id + choice block. One notice per
+  pending dialog and per session per 30 s; receipts last an hour (max 50). A
+  replaced instance is a new key, so it notifies.
+- Only a Matrix event id is delivery; an offline or failed post retries every
+  30 s. A resolution bumps the session generation, so a callback still in flight
+  cannot write a receipt for, or clear the retry of, the next same-screen request.
+- A receipt is cleared when `dialogs.lua` audits the resolution. If the daemon
+  dies after a post but before its callback or the durable receipt, the next
+  start posts once more; a retry whose original later succeeds is one duplicate
+  message and one receipt. An accepted notice cannot be retracted.

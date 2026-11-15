@@ -1,21 +1,11 @@
 -- Report-only owner notice for a recognised Codex approval dialog or the
--- automatic-review refusal. The leader report in dialogs.lua can sit unread
--- behind a blocked pane; the owner should learn from Matrix that an exact
--- session waits for a decision. This module only posts a plain notice to the
--- owner's home room. It never answers, approves, denies, selects an option,
--- types or runs a key.
---
--- One notice per pending dialog (session, instance, state id, choice block):
--- only the periodic dialog tick considers it, after `debounce_seconds`; a
--- delivered receipt is not repeated across a reload or restart and is cleared
--- when the dialog resolves; a session gets at most one notice per
--- `session_seconds`; an offline or failed post retries no sooner than
--- `retry_seconds`; a receipt older than `remember_seconds` cannot suppress one.
--- If the daemon dies after a post but before its callback, or after Matrix
--- accepted the post but before the receipt is durably written, the next start
--- may post once more: a duplicate is better than silence, and a receipt is
--- never written without an event id. The text carries only the session alias
--- and the recognised state id, never screen text, commands, paths or files.
+-- automatic-review refusal: the owner learns from Matrix that an exact session
+-- waits. It only posts a plain notice to the owner's home room; it never
+-- answers, approves, denies, selects an option, types or runs a key. Debounce
+-- first, deliver once per pending dialog, persist the receipt until
+-- `dialogs.lua` audits the resolution, retry a failed post, and fence a late
+-- callback after a resolution by session generation. A crash between post and
+-- durable receipt may repeat once. Text: session alias and state id only.
 local butler = assert(remuda.butler)
 local bus = assert(remuda._butler_bus)
 local M = {}
@@ -59,7 +49,7 @@ local S = bus.dialog_owner_notice_state
 if type(S) ~= 'table' then S = {} end
 S.delivered = type(S.delivered) == 'table' and S.delivered or {}
 S.index = type(S.index) == 'table' and S.index or {}
-S.session_keys = type(S.session_keys) == 'table' and S.session_keys or {}
+S.generation = type(S.generation) == 'table' and S.generation or {}
 S.seen = type(S.seen) == 'table' and S.seen or {}
 S.next_at = type(S.next_at) == 'table' and S.next_at or {}
 S.session_at = type(S.session_at) == 'table' and S.session_at or {}
@@ -70,18 +60,11 @@ local function expire(now)
   local kept = {}
   for _, item in ipairs(S.delivered) do
     if now - item.at < M.remember_seconds then kept[#kept + 1] = item
-    else
-      S.index[item.key] = nil
-      local keys = item.session and S.session_keys[item.session]
-      if keys then keys[item.key] = nil end
-    end
+    else S.index[item.key] = nil end
   end
   S.delivered = kept
   for key, seen in pairs(S.seen) do
-    if now - seen >= M.seen_retain_seconds then S.seen[key] = nil end
-  end
-  for name, at in pairs(S.next_at) do
-    if now - at >= M.remember_seconds then S.next_at[name] = nil end
+    if now - seen >= M.seen_retain_seconds then S.seen[key], S.next_at[key] = nil, nil end
   end
 end
 
@@ -96,8 +79,6 @@ local function load()
     if at and session and key and not S.index[key] then
       S.delivered[#S.delivered + 1] = { key = key, at = tonumber(at), session = session }
       S.index[key] = true
-      S.session_keys[session] = S.session_keys[session] or {}
-      S.session_keys[session][key] = true
     end
   end
   handle:close()
@@ -120,38 +101,30 @@ local function remember(session, key, now)
   if S.index[key] then return true end
   S.index[key] = true
   S.delivered[#S.delivered + 1] = { key = key, at = now, session = session }
-  S.session_keys[session] = S.session_keys[session] or {}
-  S.session_keys[session][key] = true
   while #S.delivered > M.max_remembered do
     local dropped = table.remove(S.delivered, 1)
-    if dropped then
-      S.index[dropped.key] = nil
-      local keys = dropped.session and S.session_keys[dropped.session]
-      if keys then keys[dropped.key] = nil end
-    end
+    if dropped then S.index[dropped.key] = nil end
   end
   return save()
 end
 
--- The session's dialog is gone: the next identical approval is a new request.
--- Called by dialogs.lua only after the resolution audit succeeded.
-function M.resolved(name, instance)
+-- The dialog is gone: the next identical approval is a new request.
+-- Called by dialogs.lua only after the resolution audit succeeded. Bumping the
+-- session generation invalidates any post callback still in flight, so a late
+-- success cannot become a receipt for the next request with the same screen.
+function M.resolved(name, instance, id, signature)
   if not bounded(name, 128) or not bounded(instance, 256) then return false end
   load()
   local session = hash(name .. '\0' .. instance)
-  local keys = S.session_keys[session]
+  S.generation[session] = (S.generation[session] or 0) + 1
   S.session_at[session] = nil
-  if keys then
-    for key in pairs(keys) do
-      S.index[key] = nil
-      S.seen[key] = nil
-      S.next_at[key] = nil
-    end
-    S.session_keys[session] = nil
-  end
+  if not bounded(id, 64) then return save() end
+  local key = hash(session .. '\0' .. id .. '\0'
+    .. hash(type(signature) == 'string' and signature or ''))
+  S.index[key], S.seen[key], S.next_at[key] = nil, nil, nil
   local kept = {}
   for _, item in ipairs(S.delivered) do
-    if not (keys and keys[item.key]) then kept[#kept + 1] = item end
+    if item.key ~= key then kept[#kept + 1] = item end
   end
   S.delivered = kept
   return save()
@@ -161,10 +134,11 @@ local function text_for(name, id)
   if id == 'codex_auto_review_refused' then
     return 'Butler notice: Codex automatic approval review rejected further approval requests and '
       .. 'interrupted the turn in session ' .. name .. ' (' .. id .. '). This is a classifier refusal, '
-      .. 'not a permission request; no approval is pending and Butler sent no input. Review the turn in that pane.'
+      .. 'not a permission request; no approval is pending and Butler sent no input. Review the interrupted turn in that pane.'
   end
   return 'Butler notice: Codex is waiting for an approval decision in session ' .. name
-    .. ' (' .. id .. '). Report only: Butler sent no input and chooses no option. Answer it in that pane.'
+    .. ' (' .. id .. '). Report only: Butler sent no input and chooses no option. This notice carries '
+    .. 'no node or request detail, so approve it in that session pane.'
 end
 
 -- Called from the periodic dialog tick for a stable recognised state. Returns
@@ -203,7 +177,11 @@ function M.consider(name, agent, state)
   -- start a parallel post for the same dialog while one is in flight.
   S.next_at[key] = now + M.retry_seconds
   S.session_at[session] = now
+  local generation = S.generation[session] or 0
   local called, handle, why = pcall(approval.notify, text_for(name, state.id), function(result)
+    -- A late callback from before a resolution must not write a receipt or
+    -- clear the next attempt's retry deadline.
+    if (S.generation[session] or 0) ~= generation then return end
     if type(result) == 'table' and type(result.event_id) == 'string' and result.event_id ~= '' then
       S.next_at[key] = nil
       remember(session, key, M.clock())

@@ -498,7 +498,7 @@ local function observe(name, agent, alias, instance, screen, failure, ticking)
       -- approval is a new request instead of a silent duplicate.
       local notice = butler.dialog_owner_notice
       if notice and type(notice.resolved) == 'function' then
-        pcall(notice.resolved, name, state.instance)
+        pcall(notice.resolved, name, state.instance, state.id, state.signature)
       end
       state.id, state.signature, state.blocked, state.entry = nil, nil, nil, nil
       state.captures, state.reported, state.audited = 0, nil, nil
