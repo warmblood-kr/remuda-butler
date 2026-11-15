@@ -148,6 +148,7 @@ jobs:
         run: |
           bash tests/butler_simple_inbox_acceptance.sh
           bash tests/butler_inbox_db_loss.sh
+          bash tests/relay_0003_upgrade.sh
 
   contract-deep:
     name: butler-contract-deep
