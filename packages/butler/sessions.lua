@@ -104,7 +104,7 @@ end
 -- it cannot prove. A refused setter (a replaced or exited instance) only means
 -- the metadata stays unknown; it never changes launch or reconcile behavior.
 local TEAM_DEPTH_LIMIT = MAX_TREE_INDENT_DEPTH
-local TEAM_SYNC_INTERVAL = 5
+local TEAM_SYNC_INTERVAL = 2
 local team_sync_at = 0
 local team_synced = {} -- name -> { instance = id, team = payload }
 

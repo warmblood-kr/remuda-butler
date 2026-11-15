@@ -120,7 +120,10 @@ check(last_call("worker").team.leader.instance_id, "i-lead", "worker returns und
 
 -- A model change has no roster event; the throttled reconcile sync refreshes it.
 models[bus.agents.worker] = "gpt-6.2"
-now = now + 10
+now = now + 1
+remuda._butler_sync_team()
+check(last_call("worker").team.model, nil, "model sync is throttled before two seconds")
+now = now + 1
 remuda._butler_sync_team()
 check(last_call("worker").team.model, "gpt-6.2", "model change is refreshed")
 
