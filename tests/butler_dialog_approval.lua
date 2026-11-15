@@ -27,12 +27,15 @@ remuda.butler.guard_policy = { append = function(record)
 end }
 remuda.butler.dialogs = { check = function() return not blocked.blocked, blocked end }
 local approval = dofile('packages/butler/approval.lua')
-local function attach()
+local function attach(enabled)
   approval.attach(store, function() return not fail_persist end, function(text, _, cb)
     posts[#posts + 1] = text; cb({event_id = '$post' .. #posts}); return true
-  end, function() return '!owner' end, '!owner')
+  end, function() return '!owner' end, '!owner', enabled)
 end
 attach()
+assert(not approval.dialog_actions_enabled(), 'dialog actions default off')
+attach(true)
+assert(approval.dialog_actions_enabled(), 'an explicit opt-in enables dialog actions')
 local D = dofile('packages/butler/dialog_approval.lua')
 local descriptor = { id = 'synthetic_ack', state_id = 'synthetic_ack', version = '1', category = 'acknowledgement',
   action_scope = 'once',
@@ -75,7 +78,7 @@ answer(rec); after_audit = nil
 assert(rec.status == 'failed' and writes == 1, 'screen changes during yielding audit refused')
 rec = ask(); fail_persist = true; answer(rec); fail_persist = false
 assert(rec.status == 'failed' and writes == 1, 'durable consumed marker required before input')
-rec = ask(); attach()
+rec = ask(); attach(true)
 assert(rec.status == 'expired' and writes == 1, 'restart expires unanswered request')
 rec = ask(); rec.expires_at = 0; approval.sweep()
 assert(rec.status == 'expired' and writes == 1, 'expiry never acts')
@@ -95,7 +98,7 @@ end
 rec = ask(); descriptor.verify = function() return false end; answer(rec)
 assert(rec.status == 'failed' and rec.delivery_started and writes == 2, 'unverified write consumed once')
 assert(not answer(rec) and writes == 2, 'unverified write never retries')
-rec = ask(); rec.status, rec.delivery_started = 'approved', true; attach()
+rec = ask(); rec.status, rec.delivery_started = 'approved', true; attach(true)
 assert(rec.status == 'expired' and writes == 2, 'restart with consumed input never replays')
 rec = ask(); local cancelled = approval.answer(rec.id, 'deny', 'operator (terminal)')
 assert(cancelled and writes == 2,
