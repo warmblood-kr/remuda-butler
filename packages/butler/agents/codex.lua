@@ -113,6 +113,99 @@ local function picker(screen)
   if not kind or not footer or #rows < 2 or selected ~= 1 then return nil end
   return {kind=kind, model=model, rows=rows, signature=table.concat(lines, "\n")}
 end
+-- One-time approval for the captured prompt: heading, one command, three
+-- options in order, cursor on "Yes, proceed"; only Return is offered.
+local COMMAND_APPROVAL_HEADING = 'would you like to run the following command?'
+local COMMAND_APPROVAL_MAX = 200 -- the request summary must show the command in full
+-- Owner-room visible and durable in history: credential-like commands are never
+-- actionable. Heuristic, so a miss stays report-only.
+local COMMAND_APPROVAL_UNSAFE_WORDS = { 'token', 'secret', 'password', 'passwd', 'credential',
+  'apikey', 'api_key', 'access_key', 'private_key', 'auth' }
+local COMMAND_APPROVAL_UNSAFE_PREFIXES = { 'ghp_', 'github_pat_', 'xoxb-', 'xoxp-', 'xoxa-', 'sk-', 'akia' }
+local function unsafe_to_show(command)
+  local lower = command:lower()
+  for _, word in ipairs(COMMAND_APPROVAL_UNSAFE_WORDS) do
+    local name = word:gsub('_', '[_-]?')
+    if lower:find(name .. '%s*=') or lower:find('%-%-[%w%-]*' .. name) then return true end
+  end
+  for _, prefix in ipairs(COMMAND_APPROVAL_UNSAFE_PREFIXES) do
+    if lower:find(prefix, 1, true) then return true end
+  end
+  return lower:find('bearer%s+%S') ~= nil
+    or lower:find('://[^/%s@]+:[^/%s@]+@') ~= nil
+    or lower:find('authorization%s*:') ~= nil
+    or lower:find('begin [a-z ]*private key') ~= nil
+    or lower:find('%-%-user%s+[^%s:]+:[^%s]+') ~= nil
+    or lower:find('%-u%s+[^%s:]+:[^%s]+') ~= nil
+end
+local function command_approval_plan(screen)
+  if type(screen) ~= 'string' then return nil end
+  local compaction = remuda._butler_compaction
+  if type(compaction) ~= 'table' or type(compaction.unknown_dialog_signature) ~= 'function' then return nil end
+  local block = compaction.unknown_dialog_signature(screen)
+  if type(block) ~= 'string' or block == '' then return nil end
+  local labels, selected = {}, nil
+  for line in (block .. '\n'):gmatch('(.-)\n') do
+    local number, label, marked = compaction.numbered_option(line)
+    if number then
+      labels[#labels + 1] = label:gsub('%s+$', ''):lower()
+      if marked then selected = #labels end
+    elseif line:match('^%s*(.-)%s*$') ~= '' then
+      -- A long option label may wrap; only its indented continuation is allowed.
+      -- A marker line here is a composer or a second prompt, never this dialog.
+      if not line:match('^%s+') or line:match('^%s*[❯›>]') or #labels == 0 or #labels > 3 then return nil end
+    end
+  end
+  -- The middle choice is a standing permission and is never selected.
+  if #labels ~= 3 or selected ~= 1
+      or not labels[1]:match('^yes, proceed %(y%)$')
+      or not labels[2]:match('^yes, and don')
+      or not labels[3]:match('^no, and tell codex what to do differently %(esc%)$') then return nil end
+  -- Bind the heading and one command above the current choices.
+  local start, from = nil, 1
+  while true do
+    local found = screen:find(block, from, true)
+    if not found then break end
+    start, from = found, found + 1
+  end
+  if not start then return nil end
+  local prefix = screen:sub(1, start - 1)
+  -- The footer must follow the choices and no composer may sit below them.
+  local footer, suffix = false, screen:sub(start + #block)
+  for line in (suffix .. '\n'):gmatch('(.-)\n') do
+    local trimmed = line:match('^%s*(.-)%s*$')
+    if trimmed == '❯' or trimmed == '›' or trimmed == '>' or trimmed:match('^> ')
+        or trimmed:find('Ask Codex to do anything', 1, true) == 1 then return nil end
+    if not footer and trimmed ~= '' then
+      footer = trimmed:lower() == 'press enter to confirm or esc to cancel'
+    end
+  end
+  if not footer then return nil end
+  local lines = {}
+  for line in (prefix .. '\n'):gmatch('(.-)\n') do lines[#lines + 1] = line end
+  local command, heading
+  for i = #lines, 1, -1 do
+    local trimmed = lines[i]:match('^%s*(.-)%s*$')
+    local lower = trimmed:lower()
+    if trimmed == '' or trimmed:match('^Reason:') or trimmed:match('^Thread:')
+        or trimmed:match('^Environment:') or trimmed:match('^Permission rule:')
+        or trimmed:match('^Description:') or trimmed:match('^Destination:') then
+      -- known prompt metadata, not execution content
+    elseif lower == COMMAND_APPROVAL_HEADING then
+      heading = lower
+      break
+    elseif trimmed:match('^%$%s+%S') then
+      if command then return nil end -- more than one command line: ambiguous
+      command = trimmed:match('^%$%s+(.+)$'):gsub('%s+$', '')
+    else
+      return nil -- wrapped command or unknown section: never guess
+    end
+  end
+  if not heading or not command or #command > COMMAND_APPROVAL_MAX or command:find('%c')
+      or unsafe_to_show(command) then return nil end
+  return { signature = heading .. '\n' .. command .. '\n' .. block,
+    key = 'RET', label = 'Yes, proceed', summary = 'run `' .. command .. '`' }
+end
 remuda._butler_agent_startup.codex = {
   picker = picker,
   -- Only the recorded workflow target and phase authorize selector keys.
@@ -133,13 +226,22 @@ remuda._butler_agent_startup.codex = {
     else return false end
     return target or phase == "escape"
   end,
-  -- Empty until a real, fixture-backed recognizer is approved for one-time input.
-  dialog_approvals = {},
+  -- One fixture-backed one-time action: the current command-approval prompt.
+  -- Approve confirms the already-selected "Yes, proceed" with Return; reject
+  -- sends the prompt's own Escape cancel. No other prompt is actionable.
+  dialog_approvals = {
+    { id = 'codex_command_approval_once', state_id = 'codex_command_approval',
+      version = '1', fixture = 'tests/fixtures/codex-approval-command.txt',
+      action_scope = 'once', category = 'permission',
+      match = command_approval_plan,
+      verify = function(screen) return command_approval_plan(screen) == nil end },
+  },
   -- Recognised dialog states (see claudecode.lua and docs/butler.md).
   -- `scan` headings may sit above approval metadata and command/diff rows.
   -- No invented Codex denial/cache signatures beyond these.
   dialog_states = {
-    { id = "codex_command_approval", response = "approval", scan = true,
+    -- action_scope enables the one fixture-backed one-time action below.
+    { id = "codex_command_approval", response = "approval", scan = true, action_scope = "once",
       heading = "would you like to run the following command?" },
     { id = "codex_edit_approval", response = "approval", scan = true,
       heading = "would you like to make the following edits?" },

@@ -28,6 +28,8 @@ local function snapshot(name, descriptor_id, observed)
       or not bounded(agent.session_start_marker, 256) then return nil end
   local startup = (remuda._butler_agent_startup or {})[agent.kind] or {}
   if #(startup.dialog_approvals or {}) == 0 then return nil end
+  if type(approval.dialog_actions_enabled) ~= 'function'
+      or approval.dialog_actions_enabled() ~= true then return nil end
   local state = observed
   if not state then
     local checked, ready
@@ -72,6 +74,31 @@ local function snapshot(name, descriptor_id, observed)
   end
 end
 
+-- The renderer is bounded and shown in a configured room only; a missing room
+-- or an over-long request fails closed (the report-only notice then remains).
+local MAX_RENDER = 2048
+local function target_room()
+  if type(approval.target_room) ~= 'function' then return nil end
+  local ok, room = pcall(approval.target_room)
+  if not ok or not bounded(room, 512) then return nil end
+  return room
+end
+local function render_request(rec, name, data)
+  return 'Butler dialog approval ' .. rec.id .. '\nAgent: ' .. data.kind .. ' / ' .. name
+    .. '\nAction (untrusted screen text): ' .. data.summary
+    .. '\nApprove ✅ → choose "' .. data.label .. '" once (' .. data.key .. ').'
+    .. '\nAny other answer leaves the prompt untouched for the pane.'
+    .. '\nOne input only; changed screens or sessions refuse it. No standing permission is granted.'
+    .. '\nReact ✅ / ❌ or reply yes / no to this message within 10 minutes.'
+    .. '\n[Butler approval ' .. rec.id .. ']'
+end
+
+-- True when a trusted descriptor currently matches this exact dialog and its
+-- request could be posted, so the report-only owner notice would duplicate it.
+function M.actionable(name, observed)
+  return target_room() ~= nil and snapshot(name, nil, observed) ~= nil
+end
+
 local function same(current, saved)
   if not current or type(saved) ~= 'table' then return false end
   for _, field in ipairs({ 'session', 'agent_id', 'kind', 'instance_id', 'session_marker', 'dialog_id',
@@ -95,6 +122,9 @@ end
 function M.consider(name, observed)
   local data, state = snapshot(name, nil, observed)
   if not data or state.approval_attempted == data.signature_hash then return end
+  -- Fail closed before posting: no configured room or an over-long request
+  -- leaves the dialog to the report-only path instead of guessing.
+  if not target_room() or #render_request({ id = 'XXXXXXXX' }, name, data) > MAX_RENDER then return end
   -- A denial/expiry/posting failure does not silently create another request.
   state.approval_attempted = data.signature_hash
   if not audit(data, 'dialog_approval_requested', 'before_request') then return end
@@ -102,16 +132,44 @@ function M.consider(name, observed)
     key = data.instance_id .. ':' .. data.dialog_id .. ':' .. data.signature_hash,
     summary = data.summary .. ' in ' .. name .. '; choose ' .. data.label .. ' once', data = data,
     ttl_s = math.min(approval.default_ttl_s(), 600), max_open_for_asker = 1,
-    render = function(rec)
-      return 'Butler dialog approval ' .. rec.id .. '\nAgent: ' .. data.kind .. ' / ' .. name
-        .. '\nAction: ' .. data.summary .. '\nOption: ' .. data.label
-        .. '\nOne input only; changed screens or sessions refuse it. No standing permission is granted.'
-        .. '\nReact ✅ / ❌ or reply yes / no to this message within 10 minutes.'
-        .. '\n[Butler approval ' .. rec.id .. ']'
-    end,
+    render = function(rec) return render_request(rec, name, data) end,
   }, function(id)
     audit(data, 'dialog_approval_requested', id and 'posted' or 'unavailable', id and {id = id})
   end)
+end
+
+-- One permitted key, fixed by the trusted descriptor; no owner text or key
+-- sequence enters here.
+local function execute(rec, done)
+  local data = rec.data
+  if rec.delivery_started or not tonumber(rec.expires_at) or os.time() * 1000 >= rec.expires_at then
+    done(false, 'expired or already consumed'); return
+  end
+  local current, _, descriptor = snapshot(data.session, data.dialog_id)
+  if not same(current, data) then done(false, 'dialog or session changed'); return end
+  if not audit(data, 'dialog_action', 'before_write', rec) then done(false, 'audit unavailable'); return end
+  -- Persist consumption BEFORE the one permitted key; failures/restarts never replay it.
+  if not approval.begin_delivery(rec) then done(false, 'consumption could not be persisted'); return end
+  current = snapshot(data.session, data.dialog_id)
+  if not same(current, data) then
+    audit(data, 'dialog_action_result', 'not_written', rec)
+    done(false, 'dialog changed during audit'); return
+  end
+  local originals = remuda._butler_dialog_originals
+  if not originals or type(originals.key) ~= 'function' then done(false, 'input unavailable'); return end
+  local ok, result = pcall(originals.key, data.session, data.key)
+  local captured, screen = pcall(remuda.capture, data.session)
+  local verified, matches = false, false
+  if captured and type(screen) == 'string' then verified, matches = pcall(descriptor.verify, screen) end
+  local listed, rows = pcall(remuda.ls)
+  local same_instance = false
+  for _, row in ipairs(listed and type(rows) == 'table' and rows or {}) do
+    if row.name == data.session and row.alive and row.instance_id == data.instance_id then same_instance = true end
+  end
+  local success = ok and result ~= false and verified and matches == true and same_instance
+  local logged = audit(data, 'dialog_action_result', success and 'verified' or 'uncertain', rec)
+  done(success and logged, success and (not logged and 'outcome audit unavailable' or nil)
+    or 'input outcome uncertain; inspect pane, never retry automatically')
 end
 
 approval.handler('dialog_action', {
@@ -125,39 +183,7 @@ approval.handler('dialog_action', {
     return audit(data, 'dialog_approval_answer', verdict, {
       id = rec.id, answered_by = who, answer_event_id = event_id }), 'audit unavailable'
   end,
-  approve = function(rec, done)
-    local data = rec.data
-    if rec.delivery_started or not tonumber(rec.expires_at) or os.time() * 1000 >= rec.expires_at then
-      done(false, 'expired or already consumed'); return
-    end
-    local current, _, descriptor = snapshot(data.session, data.dialog_id)
-    if not same(current, data) then done(false, 'dialog or session changed'); return end
-    if not audit(data, 'dialog_action', 'before_write', rec) then done(false, 'audit unavailable'); return end
-    -- Persist consumption BEFORE the one permitted key; failures/restarts never replay it.
-    if not approval.begin_delivery(rec) then done(false, 'consumption could not be persisted'); return end
-    current = snapshot(data.session, data.dialog_id)
-    if not same(current, data) then
-      audit(data, 'dialog_action_result', 'not_written', rec)
-      done(false, 'dialog changed during audit'); return
-    end
-    local originals = remuda._butler_dialog_originals
-    if not originals or type(originals.key) ~= 'function' then done(false, 'input unavailable'); return end
-    -- This bounded executor is the only path around the ordinary unknown-dialog
-    -- gate. It accepts no arbitrary text, key sequence or standing grant.
-    local ok, result = pcall(originals.key, data.session, data.key)
-    local captured, screen = pcall(remuda.capture, data.session)
-    local verified, matches = false, false
-    if captured and type(screen) == 'string' then verified, matches = pcall(descriptor.verify, screen) end
-    local listed, rows = pcall(remuda.ls)
-    local same_instance = false
-    for _, row in ipairs(listed and type(rows) == 'table' and rows or {}) do
-      if row.name == data.session and row.alive and row.instance_id == data.instance_id then same_instance = true end
-    end
-    local success = ok and result ~= false and verified and matches == true and same_instance
-    local logged = audit(data, 'dialog_action_result', success and 'verified' or 'uncertain', rec)
-    done(success and logged, success and (not logged and 'outcome audit unavailable' or nil)
-      or 'input outcome uncertain; inspect pane, never retry automatically')
-  end,
+  approve = function(rec, done) execute(rec, done) end,
   deny = function(rec) audit(rec.data, 'dialog_approval_closed', 'denied', rec) end,
   expire = function(rec) audit(rec.data, 'dialog_approval_closed', 'expired', rec) end,
 })

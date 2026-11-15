@@ -154,6 +154,13 @@ function M.consider(name, agent, state)
       or (entry.response ~= 'approval' and state.id ~= 'codex_auto_review_refused') then
     return false, 'not_approval'
   end
+  -- An actionable approval request already tells the owner; two Matrix messages
+  -- for one dialog would be noise. That path still writes no input by itself.
+  local actionable = butler.dialog_approval
+  if actionable and type(actionable.actionable) == 'function' then
+    local ok, yes = pcall(actionable.actionable, name, state)
+    if ok and yes then return false, 'actionable_request' end
+  end
   load()
   local now = M.clock()
   expire(now)

@@ -21,6 +21,7 @@ deep tests/butler_dialog_approval.lua
 deep tests/butler_dialog_audit.lua
 deep tests/butler_dialog_lifecycle.lua
 fast tests/butler_dialog_owner_notice.lua
+fast tests/butler_codex_dialog_approval.lua
 deep tests/butler_dialog_queue.lua
 deep tests/butler_dialog_states.lua
 deep tests/butler_dialogs.lua

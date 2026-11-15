@@ -1112,7 +1112,7 @@ Codex:
 
 | State | Recognised by | Response |
 | --- | --- | --- |
-| `codex_command_approval` | `Would you like to run the following command?` | approval |
+| `codex_command_approval` | `Would you like to run the following command?` | approval; one-time owner action when the exact fixture geometry matches |
 | `codex_edit_approval` | `Would you like to make the following edits?` | approval |
 | `codex_permissions_approval` | `Would you like to grant these permissions?` | approval |
 | `codex_terminal_input_approval` | `Would you like to send input to the existing terminal?` | approval |
@@ -1140,19 +1140,23 @@ reported this way only with a real capture of it.
 ### One-time dialog approval infrastructure
 
 The one-time `dialog_action` path is available only for a fixture-backed
-descriptor tied to an already recognised blocking dialog state whose response
-is `approval` and whose `action_scope` is `once`. **No concrete action
-descriptors are enabled.** Unrecognised choices remain report-only and do not
-stop input. Classifier denials, mode switches, blanket allow choices and
-arbitrary key sequences must never be registered as actions.
+descriptor tied to a recognised blocking dialog state whose response is
+`approval` and whose `action_scope` is `once`. One descriptor is enabled:
+`codex_command_approval_once` for the captured Codex 0.167.2 command prompt
+(approve with Return on the selected `Yes, proceed (y)`; other options stay in
+the pane; the blanket-allow option is never selected). A credential-like
+command, a missing room or an over-long request is not actionable. Conditions
+and limits are in `docs/concepts/codex-command-approval.md`. It also requires
+`dialog_approval=on`; without it the descriptor stays report-only. Unrecognised
+choices do not stop input. Classifier denials, mode switches, blanket allow
+choices and arbitrary key sequences must never be registered as actions.
 
-A future descriptor lives in that agent's `dialog_approvals` list and names its
-`state_id`, version, real sanitized dialog-only fixture, category (`permission`
-or `acknowledgement`), one key (`0`–`9` or `RET`), exact option label, safe
-summary, matcher and postcondition verifier. It must match current dialog
-geometry and the full action target; a historical title is insufficient.
-`RET` also requires proof that the intended option is selected. Increment the
-descriptor version whenever matching or verification semantics change.
+A descriptor names its `state_id`, version, sanitized fixture, category
+(`permission` or `acknowledgement`), one key (`0`–`9` or `RET`), exact option
+label, safe summary, matcher and verifier. A denial sends nothing. It must
+match current geometry and the full target; a historical title is insufficient.
+`RET` requires proof that the option is selected; increment the version when
+matching or verification changes.
 
 Only a live owner Matrix reaction or reply can approve the request. Terminal
 approval is refused. Each approval is bound to the session instance, launch
