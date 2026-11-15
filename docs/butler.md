@@ -1076,6 +1076,16 @@ Butler reports each state once per stable screen and session instance. It
 lifts its stop, with a `dialog_resolved` audit record, once no recognised state
 remains. A missing or replaced session also stops input and is reported.
 
+A recognised Codex `approval` state is also posted to the owner's Matrix home
+room as a plain report-only notice
+(`packages/butler/dialog_owner_notice.lua`). It names the session and state,
+sends no input and chooses nothing, posts once per pending dialog, retries while
+the relay is down, is not repeated across a restart, and clears its receipt when
+the dialog resolves. Its text has no node or request content, so it is not an
+approval request; the auto-review refusal is a classifier decision, not a
+pending approval, and its notice says so. See
+`docs/concepts/dialog-owner-notice.md`.
+
 ### Recognised dialog states
 
 Matching uses the current choice block and the heading directly above it (or

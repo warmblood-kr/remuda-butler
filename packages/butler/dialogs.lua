@@ -482,9 +482,24 @@ local function observe(name, agent, alias, instance, screen, failure, ticking)
       else
         report(name, agent, alias, state)
       end
+      -- The leader report can wait behind its own blocked pane. Only the
+      -- periodic tick tells the owner directly, and that module is report-only:
+      -- it posts a plain notice and never writes input.
+      if ticking then
+        local notice = butler.dialog_owner_notice
+        if notice and type(notice.consider) == 'function' then
+          pcall(notice.consider, name, agent, state)
+        end
+      end
     end
   elseif state.blocked and resolved then
     if audit(name, agent, state, 'dialog_resolved', 'wait', 'no_exception_detected') then
+      -- A resolved dialog ends any owner-notice receipt, so a later identical
+      -- approval is a new request instead of a silent duplicate.
+      local notice = butler.dialog_owner_notice
+      if notice and type(notice.resolved) == 'function' then
+        pcall(notice.resolved, name, state.instance, state.id, state.signature)
+      end
       state.id, state.signature, state.blocked, state.entry = nil, nil, nil, nil
       state.captures, state.reported, state.audited = 0, nil, nil
       state.approval_attempted = nil
