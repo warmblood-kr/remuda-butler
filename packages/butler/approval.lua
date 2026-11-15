@@ -252,6 +252,18 @@ function approval.granted_by(event_id, grant_id, class, scope, holder)
   return false
 end
 
+-- The room an approval request or notice would use: the configured approval
+-- room, else the owner home room. nil when the relay is not attached or neither
+-- is known, so callers can fail closed instead of guessing.
+function approval.target_room()
+  if not attached then return nil end
+  if type(attached.approval_room) == 'function' then
+    local ok, value = pcall(attached.approval_room)
+    if ok and type(value) == 'string' and value ~= '' then return value end
+  end
+  return attached.home_room
+end
+
 -- A plain notice in the owner's room (no request, no mention); nil and why when the relay is not running.
 function approval.notify(text, done, opts)
   if not attached or type(attached.post) ~= "function" then return nil, "Matrix relay is not running" end
