@@ -113,12 +113,18 @@ local function picker(screen)
   if not kind or not footer or #rows < 2 or selected ~= 1 then return nil end
   return {kind=kind, model=model, rows=rows, signature=table.concat(lines, "\n")}
 end
--- One-time approval for the captured prompt: heading, one command, three
--- options in order, cursor on "Yes, proceed"; only Return is offered.
+-- One-time owner approval for a current command-approval prompt. It matches
+-- only this exact geometry: the heading, one displayed command, both options in
+-- this order, and the cursor already on "Yes, proceed". Return confirms that
+-- selected option; Escape is the prompt's own cancel ("esc to cancel"). An
+-- unrecognised line above the choices (a wrapped command, another section)
+-- makes the prompt non-actionable instead of guessing.
 local COMMAND_APPROVAL_HEADING = 'would you like to run the following command?'
 local COMMAND_APPROVAL_MAX = 200 -- the request summary must show the command in full
--- Owner-room visible and durable in history: credential-like commands are never
--- actionable. Heuristic, so a miss stays report-only.
+-- The command is owner-room visible and Matrix history is durable, so a command
+-- that may carry a credential is never made actionable. This screening is
+-- heuristic and deliberately conservative: a miss leaves the prompt report-only
+-- (the owner answers in the pane), and the target room must stay owner-controlled.
 local COMMAND_APPROVAL_UNSAFE_WORDS = { 'token', 'secret', 'password', 'passwd', 'credential',
   'apikey', 'api_key', 'access_key', 'private_key', 'auth' }
 local COMMAND_APPROVAL_UNSAFE_PREFIXES = { 'ghp_', 'github_pat_', 'xoxb-', 'xoxp-', 'xoxa-', 'sk-', 'akia' }
@@ -156,12 +162,14 @@ local function command_approval_plan(screen)
       if not line:match('^%s+') or line:match('^%s*[❯›>]') or #labels == 0 or #labels > 3 then return nil end
     end
   end
-  -- The middle choice is a standing permission and is never selected.
+  -- Codex 0.167.2 offers three choices; the middle one is a standing permission
+  -- and is never selected by this action. Any other shape is not actionable.
   if #labels ~= 3 or selected ~= 1
       or not labels[1]:match('^yes, proceed %(y%)$')
       or not labels[2]:match('^yes, and don')
       or not labels[3]:match('^no, and tell codex what to do differently %(esc%)$') then return nil end
-  -- Bind the heading and one command above the current choices.
+  -- Bind the heading and the one command above the current choice segment. A
+  -- repeated block in scrollback is fine: only the last occurrence is current.
   local start, from = nil, 1
   while true do
     local found = screen:find(block, from, true)
@@ -170,7 +178,8 @@ local function command_approval_plan(screen)
   end
   if not start then return nil end
   local prefix = screen:sub(1, start - 1)
-  -- The footer must follow the choices and no composer may sit below them.
+  -- The prompt's own footer must directly follow the current choices, and no
+  -- composer may sit below them: either means this is history, not a live prompt.
   local footer, suffix = false, screen:sub(start + #block)
   for line in (suffix .. '\n'):gmatch('(.-)\n') do
     local trimmed = line:match('^%s*(.-)%s*$')
@@ -233,6 +242,9 @@ remuda._butler_agent_startup.codex = {
     { id = 'codex_command_approval_once', state_id = 'codex_command_approval',
       version = '1', fixture = 'tests/fixtures/codex-approval-command.txt',
       action_scope = 'once', category = 'permission',
+      deny_key = 'ESC',
+      deny_label = 'send the prompt’s Escape cancel = "No, and tell Codex what to do differently" '
+        .. '(declines; 0.167.2 also interrupts the turn)',
       match = command_approval_plan,
       verify = function(screen) return command_approval_plan(screen) == nil end },
   },

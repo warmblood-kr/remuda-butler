@@ -190,10 +190,14 @@ function approval.dialog_actions_enabled()
   return attached ~= nil and attached.dialog_actions == true
 end
 
-function approval.begin_delivery(rec)
+-- `verdict` selects the one-shot status a dialog action must be in: an
+-- approval sends the affirmative key, a denial sends the descriptor's refusal
+-- key. Both consume the record before writing.
+function approval.begin_delivery(rec, verdict)
   if not attached or type(rec) ~= "table" then return false end
   if rec.kind == "dialog_action" then
-    if rec.status ~= "approved" or rec.delivery_started == true then return false end
+    local expected = verdict == "deny" and "denied" or "approved"
+    if rec.status ~= expected or rec.delivery_started == true then return false end
   elseif rec.kind ~= "approve_text"
       or (rec.status ~= "approved" and rec.status ~= "queued") or rec.delivery_started == true then
     return false
