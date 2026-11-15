@@ -22,6 +22,7 @@ local options, refusal = M.prepare(old_core)
 eq(refusal, nil, "fresh install is not refused")
 eq(options.must_exist, nil, "fresh install must keep the create path")
 eq(options.migrations, true, "migrations stay enabled")
+eq(options.max_bytes, 1024 * 1024 * 1024, "fresh inbox supports existing mail volume")
 eq(read, 0, "a fresh install does not read the capability")
 eq(M.status().protection, "precheck", "fresh protection")
 
@@ -60,6 +61,7 @@ end }
 options, refusal = M.prepare(modern)
 eq(refusal, nil, "supported core must not refuse")
 eq(options.must_exist, true, "supported active inbox must pass must_exist")
+eq(options.max_bytes, 1024 * 1024 * 1024, "active inbox retains the same size limit")
 eq(calls, 1, "capability is read once")
 eq(M.status().protection, "must_exist", "supported protection")
 
