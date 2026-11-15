@@ -67,14 +67,14 @@ function M.prepare(core)
   end
   if not state.active then
     state.protection = "precheck"
-    return { migrations = true, timeout_ms = 200 }
+    return { migrations = true, timeout_ms = 200, max_bytes = 1024 * 1024 * 1024 }
   end
   if not supported(core) then
     state.protection = "refused"
     return nil, UPGRADE
   end
   state.protection = "must_exist"
-  return { migrations = true, timeout_ms = 200, must_exist = true }
+  return { migrations = true, timeout_ms = 200, max_bytes = 1024 * 1024 * 1024, must_exist = true }
 end
 
 function M.status()
