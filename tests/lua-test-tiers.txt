@@ -224,3 +224,5 @@ fast tests/relay_receipts_db.lua
 fast tests/relay_intake_diagnostics.lua
 fast tests/session_team.lua
 deep tests/session_tree.lua
+
+deep tests/butler_inbox_pagination.lua

@@ -257,7 +257,25 @@ function M.record_matrix_state(db, recipient, message_id, state, txn_id, event_i
 end
 
 function M.rows(db, recipient)
-  return db:query('SELECT message_id, delivery, note, is_read FROM simple_inbox WHERE recipient = ? ORDER BY seq', {recipient})
+  -- Native SQLite queries cap their result at 10,000 rows. Walk the stable
+  -- insertion sequence in smaller pages; never return a partial inbox on error.
+  local result, cursor = {}, nil
+  while true do
+    local sql = 'SELECT seq, message_id, delivery, note, is_read FROM simple_inbox WHERE recipient = ?'
+    local params = {recipient}
+    if cursor ~= nil then
+      sql = sql .. ' AND seq > ?'
+      params[2] = cursor
+    end
+    local page, err = db:query(sql .. ' ORDER BY seq LIMIT 2000', params)
+    if not page then return nil, err end
+    for _, row in ipairs(page) do
+      cursor = row.seq
+      row.seq = nil -- Preserve the existing public row shape.
+      result[#result + 1] = row
+    end
+    if #page < 2000 then return result end
+  end
 end
 
 function M.has(db, recipient, id)
