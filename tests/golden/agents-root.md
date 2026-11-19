@@ -171,7 +171,7 @@ your leader explicitly asks, with
 or the loader file above); a put does not guarantee every peer has synced it,
 and running sessions keep the snapshot they loaded until they refresh it.
 
-- framework: built in, version sha256:a55d7a6607c3
+- framework: built in, version sha256:529a436e5e55
 - cluster: not available (this Remuda core has no cluster file store; update Remuda)
 - team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
 - personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)
