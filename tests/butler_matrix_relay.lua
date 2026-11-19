@@ -139,6 +139,22 @@ end
   second:stop()
   relay_module.instance = nil
   assert(relay_module.owner_proven(), "a retried stop proves the owner")
+
+  -- A core without the schedule registry cannot prove cancellation.
+  local third_client = scripted_client()
+  local third = relay_module.new({ config_path = config_path, matrix = third_client,
+    deliver = function() return true end })
+  relay_module.instance = third
+  third:start()
+  third_client:complete(1, { error = "offline" })
+  local saved_schedules = remuda.schedules
+  remuda.schedules = nil
+  third:stop()
+  assert(relay_module.owner_proven() == false, "a core without the registry fails closed")
+  remuda.schedules = saved_schedules
+  third:stop()
+  relay_module.instance = nil
+  assert(relay_module.owner_proven(), "a retried stop with the registry proves the owner")
   cleanup_fixture(dir, config_path)
 end)()
 -- BMR_OWNER_ONLY=1 stops after the owner-proof case, so this contract can be

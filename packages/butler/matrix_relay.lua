@@ -3080,14 +3080,15 @@ function relay.new(options)
     local timers = { retry_timer, backfill_timer, approval_timer }
     for _, timer in pairs(delivery_retry_timers) do timers[#timers + 1] = timer end
     for _, timer in pairs(reply_retry_timers) do timers[#timers + 1] = timer end
+    local cancelled = true
     for _, timer in ipairs(timers) do
-      if timer ~= nil then pcall(remuda.cancel, timer) end
+      if timer ~= nil and not pcall(remuda.cancel, timer) then cancelled = false end
     end
     for _, handle in pairs(context_fetch_handles) do
       if handle and handle.cancel then pcall(function() handle:cancel() end) end
     end
     context_fetching, context_fetch_handles = {}, {}
-    if owner_timers_gone(timers) then
+    if cancelled and owner_timers_gone(timers) then
       delivery_retry_timers, delivery_retry_waiting, reply_retry_timers = {}, {}, {}
       retry_timer, backfill_timer, approval_timer = nil, nil, nil
       owners.live[self] = nil

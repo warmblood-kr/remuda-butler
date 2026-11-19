@@ -27,12 +27,18 @@ closure is possible.
 
 ## What it does not cover
 
-There is **no cross-process guard**. A daemon reload starts a new process with
-a fresh registry, and the old process is gone, so there is no writer to prove.
-Do not read `owner_proven()` as a process-lifetime lock: a future reload that
-keeps a process alive, or any path that can leave a writer outside the image,
-would need a separate OS-level guard (pid/lock fencing). That guard does not
-exist today and this registry does not claim it.
+The proof is **not a process guard**. Cross-daemon exclusion is the guard's
+contract, not this registry: `guard.lua` holds two OS advisory locks for the
+owner's life (the data-home `butler/lock` and the resolved config path plus
+`.lock`), conditional on the core providing `remuda.fs.lock`. `owner_proven()`
+cannot see another OS process or that process's schedules. On a core without
+`remuda.fs.lock`, guard reports "not guarded" and this proof cannot compensate.
+
+A daemon reload starts a new process with a fresh registry, and the old process
+is gone, so there is no writer to prove. Do not read `owner_proven()` as a
+process-lifetime lock: a future reload that keeps a process alive, or any path
+that can leave a writer outside the image, would need a separate OS-level
+guard.
 
 ## Failure behaviour
 

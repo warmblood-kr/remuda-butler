@@ -20,15 +20,9 @@ for n in ${!REMUDA_BUTLER_@}; do unset "$n"; done; unset REMUDA_SERVER
 mkdir -p "$HOME" "$XDG_DATA_HOME/remuda/mods/butler" "$XDG_CONFIG_HOME/remuda" "$XDG_RUNTIME_DIR"
 mkdir -m700 "$REMUDA_RUNTIME_DIR"
 cp -R "$REPO/extension.toml" "$REPO/packages" "$XDG_DATA_HOME/remuda/mods/butler/"
-# install-butler.sh's loader, plus the test seams (fake root, unreachable relay).
-# The relay is configured but the homeserver is closed, so it never reaches the
-# network while still exercising the real start/stop/owner path.
-mkdir -p "$XDG_CONFIG_HOME/remuda/butler"
-echo fake-token >"$XDG_CONFIG_HOME/remuda/butler/token"
-printf 'http://127.0.0.1:9\n!room:x\n@butler:x\n' >"$XDG_CONFIG_HOME/remuda/butler/config"
-echo '{"since":"s0"}' >"$XDG_CONFIG_HOME/remuda/butler/config.since"
+# install-butler.sh's loader, plus the test seams (fake root, no relay).
 cat >"$XDG_CONFIG_HOME/remuda/init.lua" <<'LUA'
-remuda._butler_argv = {"sh","-c","sleep DUR"}; remuda._butler_readiness_timeout = 1
+remuda._butler_argv = {"sh","-c","sleep DUR"}; remuda._butler_skip_relay = true; remuda._butler_readiness_timeout = 1
 remuda.exec("butler")
 LUA
 sed -i.bak "s/sleep DUR/sleep $DUR/" "$XDG_CONFIG_HOME/remuda/init.lua" && rm -f "$XDG_CONFIG_HOME/remuda/init.lua.bak"
@@ -74,41 +68,16 @@ wait_up() {
   done
   return 1
 }
-wait_relay() {
-  local i
-  for i in $(seq 100); do
-    [[ $(r -e 'local m = remuda.butler and remuda.butler.matrix local x = m and m.relay and m.relay.instance return tostring(x ~= nil)' 2>/dev/null) == true ]] && return 0
-    sleep 0.1
-  done
-  return 1
-}
 r -e 1 >/dev/null 2>&1
 wait_up || fail "Butler did not start"
-wait_relay || fail "relay did not start before the reload"
 r -e "remuda.butler.project_home('$T/projects'); remuda._butler_agent_builders.codex = function() return {'sleep','$DUR'} end; remuda._butler_launch('codex','alice'); remuda._butler_launch('codex','bob',nil,'alice'); remuda._butler_send('butler','alice','queued before reload')" >/dev/null
-SNAP='local b=remuda._butler_bus local i={} for _,s in ipairs(remuda.ls()) do if s.alive then i[s.name]=s.instance_id end end local a, c = b.agents.alice or {}, b.agents.bob or {} return table.concat({tostring(i.butler), tostring(i.alice), tostring(i.bob), tostring(a.id), tostring(c.id), tostring(c.parent)}, "|")'
+SNAP='local b=remuda._butler_bus local i={} for _,s in ipairs(remuda.ls()) do if s.alive then i[s.name]=s.instance_id end end local a, c = b.agents.alice or {}, b.agents.bob or {} return table.concat({tostring(i.butler), tostring(i.alice), tostring(i.bob), tostring(a.id), tostring(c.id), tostring(c.parent), tostring(a.id and remuda._butler_mail.unread(a.id))}, "|")'
 BEFORE=$(r -e "$SNAP")
 [[ $BEFORE != *nil* ]] || fail "setup incomplete: $BEFORE"
 r reload >/dev/null 2>&1 || fail "remuda reload failed"
 wait_up || fail "Butler not up after the reload: $(r butler status 2>&1 | head -2)"
 AFTER=$(r -e "$SNAP")
-[[ $AFTER == "$BEFORE" ]] || fail "sessions, identities or leaders changed: $BEFORE -> $AFTER"
-QUEUED=$(grep -rl "queued before reload" "$XDG_DATA_HOME/remuda/butler/mail" 2>/dev/null | wc -l | tr -d ' ')
-[[ $QUEUED == 1 ]] || fail "the queued message must survive exactly once, found $QUEUED copies"
-echo "ok - the queued message survives exactly once"
-# A warm reload stops the old relay and must restart exactly one owner. Without
-# a positive owner proof this stays down and the reply path reports unavailable.
-wait_relay || fail "relay did not restart after the reload"
-r -e 'local m = remuda.butler.matrix local x = m.relay local o = remuda._butler_relay_owners
-  local n = 0
-  if type(o) == "table" and type(o.live) == "table" then
-    for inst in pairs(o.live) do n = n + 1; assert(inst == x.instance, "stale relay owner registered") end
-  end
-  assert(x.instance ~= nil, "relay instance missing after reload")
-  assert(n == 1, "expected exactly one relay owner, got " .. tostring(n))
-  assert(remuda._butler_relay_restart_blocked ~= true, "relay restart was reported blocked")' >/dev/null \
-  || fail "relay owner proof after the reload"
-echo "ok - exactly one relay owner after a warm reload"
+[[ $AFTER == "$BEFORE" ]] || fail "sessions, identities, leaders or unread mail changed: $BEFORE -> $AFTER"
 echo "ok - root, members, leaders and queued mail survive a reload"
 ENDED=$(grep -c '"state":"ended"' "$XDG_DATA_HOME/remuda/butler/agents.jsonl")
 [[ $ENDED == 0 ]] || fail "$ENDED identities marked ended"

@@ -223,6 +223,8 @@ for i in 1 2 3; do
     # A tracked process with the legacy name is still foreign when its exact
     # script path lives outside this Butler module directory.
     lua "remuda._butler_matrix_relay = $FOREIGN_RELAY_ID; remuda._butler_matrix_relay_script_path = '$FOREIGN_SCRIPT'"
+    # Mark the writer that reload 2 must replace; a survivor keeps the marker.
+    lua "remuda.butler.matrix.relay.instance._probe = 'old'"
   fi
   if [[ $i == 1 ]]; then
     # The legacy root was explicitly made with the test's fake argv and has
@@ -240,6 +242,9 @@ for i in 1 2 3; do
     if [[ $RELAY_EXPECT == true ]]; then
       [[ $(lua 'return tostring(remuda._butler_relay_restart_blocked)') != true ]] || \
         fail "reload $i: a verified stop must restart the relay"
+    fi
+    if [[ $i == 2 ]]; then
+      lua "local r = remuda.butler.matrix.relay.instance assert(r ~= nil and r._probe ~= 'old', 'the previous relay writer was not replaced')" >/dev/null
     fi
   fi
   if [[ $i == 1 ]]; then
