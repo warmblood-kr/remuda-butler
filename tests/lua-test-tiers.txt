@@ -227,3 +227,4 @@ deep tests/session_tree.lua
 
 deep tests/butler_inbox_pagination.lua
 fast tests/effective_name.lua
+deep tests/lua/butler_effective_name_test.lua

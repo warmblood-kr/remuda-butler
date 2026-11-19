@@ -7,11 +7,23 @@
 -- must never depend on the directory that happened to start the daemon.
 local system = assert(remuda._butler_system)
 remuda.exec("butler/diagnostics")
-local function initial_butler_name()
-  return "butler"
+-- The effective physical session name (see effective_name.lua). Resolved here
+-- with the explicit sources so `_butler_test_mode` still sees it; the durable
+-- record is folded in after paths.lua resolves the data home below.
+local function resolve_initial_name(recorded)
+  local module = assert(remuda._butler_effective_name, "butler/effective_name is not loaded")
+  local name, source = module.resolve(
+    remuda._butler_initial_name_override, os.getenv("REMUDA_BUTLER_NAME"), recorded)
+  if not name then
+    error("butler: the requested Butler session name is invalid; refusing to start under a "
+      .. "different name (use 1-64 letters, digits, '.', '_' or '-')", 0)
+  end
+  remuda._butler_initial_name = name
+  remuda._butler_initial_name_source = source
+  return name
 end
 
-remuda._butler_initial_name = initial_butler_name()
+resolve_initial_name()
 
 -- CLI identity is resolved from the caller kind/session supplied by the core.
 local OPERATOR = "operator"
@@ -131,6 +143,36 @@ local valid_child_name = paths.valid_child_name
 local create_fresh_directory = paths.create_fresh_directory
 local directory_is_under = paths.directory_is_under
 local json_quote = paths.json_quote
+
+-- The root's logical identity is always "butler"; its physical session name
+-- may be chosen explicitly (REMUDA_BUTLER_NAME or the installer override) and
+-- is recorded durably so a later restart relaunches under the same name
+-- instead of silently falling back to "butler". See effective_name.lua.
+local effective_name = assert(remuda._butler_effective_name, "butler/effective_name is not loaded")
+local effective_record_path = data_home and (data_home .. "/remuda/butler/effective-name") or nil
+local function read_effective_record()
+  if not effective_record_path then return nil end
+  local file = io.open(effective_record_path, "rb")
+  if not file then return nil end
+  local text = file:read("a") or ""
+  file:close()
+  return effective_name.recorded_name(text)
+end
+-- Errors are returned by write_atomic and ignored here, like roster.save: a
+-- failed record write only costs name persistence after a restart.
+local function write_effective_record(name, instance_id)
+  if not effective_record_path or not effective_name.valid(name) then return end
+  local text = effective_name.format_binding(name, instance_id)
+  local dir = effective_record_path:match("^(.*)/[^/]+$")
+  if dir then pcall(remuda.mkdir, dir) end
+  if remuda.fs and type(remuda.fs.write_atomic) == "function" then
+    pcall(remuda.fs.write_atomic, effective_record_path, text, { private = true })
+  end
+end
+remuda._butler_write_effective_name = write_effective_record
+-- Fold in the durable record now that the data home is known: after a daemon
+-- restart with no explicit config this is what keeps the same physical name.
+resolve_initial_name(read_effective_record())
 -- This internal module is the single inbound Matrix entry point. It registers
 -- only the optional relay and remains inert when credentials are absent.
 remuda._butler_relay_receipts_config = { open = remuda.db and remuda.db.open }
@@ -1320,7 +1362,8 @@ end
 remuda._butler_adopted_on_start = adopted_on_start
 if bus.agents.butler and bus.agents.butler.adopted then
   -- launch_butler then adopts the live root instead of replacing it.
-  remuda._butler_selected_agent, remuda._butler_name = bus.agents.butler.kind, "butler"
+  remuda._butler_selected_agent = bus.agents.butler.kind
+  remuda._butler_name = bus.agents.butler.session_name or remuda._butler_initial_name
 end
 function remuda._butler_roster_save()
   local ok, saved, why = pcall(roster.save)
@@ -1347,14 +1390,17 @@ bus.agents.butler = existing_butler or {
   kind = butler_kind,
   id = root_identity.id,
   alias = "butler",
-  session_name = "butler",
+  session_name = remuda._butler_initial_name,
   token = butler_token,
   telemetry = butler_telemetry,
   children = {},
 }
 bus.agents.butler.id = root_identity.id
+-- The logical alias stays "butler"; the physical session name follows the
+-- effective name (adopted live root first, then the resolved initial name).
 bus.agents.butler.alias = "butler"
-bus.agents.butler.session_name = bus.agents.butler.session_name or "butler"
+bus.agents.butler.session_name = remuda._butler_name or remuda._butler_initial_name
+  or bus.agents.butler.session_name or "butler"
 bus.agents.butler.session_start_marker = remuda._butler_new_ulid()
 -- Carry the verified binding of the same root (the sweep above kept it only if row and record were proven).
 local carried = existing_butler and caller_principal.bound(existing_butler) and existing_butler.instance_id or nil
@@ -1597,6 +1643,8 @@ end
 -- name across respawns by feeding the previous result back in as the name.
 local butler_name = remuda._butler_name
 local function session_exists(name)
+  local module = remuda._butler_effective_name
+  if module then return module.session_alive(remuda.ls(), name) end
   for _, session in ipairs(remuda.ls()) do
     if session.name == name and session.alive then return true end
   end
@@ -1827,6 +1875,7 @@ local function launch_butler()
   if adopting then
     butler_name = requested_name
     remuda._butler_name = butler_name
+    bus.agents.butler.session_name = requested_name
     -- Adopted without a chooser run: keep the bound id only if the token record and the live row agree with it.
     local root = bus.agents.butler
     local record = root.token and bus.tokens[root.token]
@@ -1835,6 +1884,7 @@ local function launch_butler()
       root.instance_id, root.instance_binding = nil, nil
       if type(record) == "table" then record.instance_id, record.instance_binding = nil, nil end
     end
+    write_effective_record(requested_name, caller_principal.bound(root) and root.instance_id or nil)
     if not root_permissions_ensured then
       pcall(ensure_root_permissions, remuda._butler_selected_agent)
       arm_compaction_schedule(remuda._butler_selected_agent)
@@ -1891,6 +1941,7 @@ local function launch_butler()
     return nil
   end
   butler_name, butler_kind = selected, kind
+  bus.agents.butler.session_name = selected
   remuda._butler_name, remuda._butler_selected_agent = selected, kind
   bus.agents.butler.kind, bus.agents.butler.telemetry = kind, telemetry_by_kind[kind]
   local root = bus.agents.butler
@@ -1898,6 +1949,7 @@ local function launch_butler()
   if root.token and bus.tokens[root.token] then
     bus.tokens[root.token].instance_id, bus.tokens[root.token].instance_binding = root.instance_id, root.instance_binding
   end
+  write_effective_record(selected, root.instance_id)
   local root_record = bus.identities.butler or root_identity
   root_record.kind = kind
   bus.identities.butler, bus.identity_ids[root_record.id] = root_record, root_record
