@@ -70,9 +70,12 @@ T.test("open, decided and uncertain rows are distinguishable and metadata only",
       tostring(decoded.records[1].expires_in_s > 0),
       tostring(decoded.records[1].target_session),
       tostring(decoded.records[1].instance_bound),
-      tostring(decoded.records[3].decision_path) }, "|")
+      tostring(decoded.records[3].decision_path),
+      tostring(decoded.records[2].target_session),
+      tostring(decoded.records[2].instance_bound),
+      tostring(decoded.records[2].decision_path) }, "|")
   ]])
-  T.eq(fields, "butler-local|1|3|open|uncertain|true|true|target-a|true|owner_matrix",
+  T.eq(fields, "butler-local|1|3|open|uncertain|true|true|target-a|true|owner_matrix|nil|nil|nil",
     "JSON projection fields: " .. fields .. " raw=" .. raw)
 
   T.eval('remuda._t_state.approvals = remuda.json.object({})')

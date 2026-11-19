@@ -91,18 +91,23 @@ record("LLLL", "approve_text", "open", 12,
   { data = { session = "target-llll", core_instance = "core-llll" } })
 record("MMMM", "approve_text", "open", 13,
   { data = { session = "target-mmmm", session_binding_version = 2, session_marker = "marker-mmmm" } })
+-- Provenance must be omitted when no evidence supports it, and a contradictory
+-- record (terminal answer plus an event id) must stay the operator path.
+record("NNNN", "approve_text", "approved", 14, { answered_by = "system" })
+record("OOOO", "approve_text", "approved", 15,
+  { answered_by = "operator (terminal)", answer_event_id = "$answer-oooo" })
 
 local snapshot = assert(approval.snapshot(base + 30000))
 assert(snapshot.schema == 1 and snapshot.authority == "butler-local", "snapshot identity")
 assert(snapshot.generated_at == base + 30000, "snapshot time is explicit")
-assert(#snapshot.records == 12, "open and in-flight records are listed, terminal rows are not")
+assert(#snapshot.records == 14, "open and in-flight records are listed, terminal rows are not")
 
 local rows, order = {}, {}
 for _, row in ipairs(snapshot.records) do
   rows[row.id], order[#order + 1] = row, row.id
 end
 assert(table.concat(order, ",")
-  == "AAAA,BBBB,CCCC,DDDD,EEEE,FFFF,GGGG,IIII,JJJJ,KKKK,LLLL,MMMM",
+  == "AAAA,BBBB,CCCC,DDDD,EEEE,FFFF,GGGG,IIII,JJJJ,KKKK,LLLL,MMMM,NNNN,OOOO",
   "oldest request first")
 assert(rows.AAAA.status == "open" and rows.AAAA.delivery == "none", "open prepared text is undecided")
 assert(rows.BBBB.status == "approved" and rows.BBBB.delivery == "not_started",
@@ -128,6 +133,8 @@ assert(rows.KKKK.target_session == nil and rows.KKKK.instance_bound == nil,
 assert(rows.KKKK.decision_path == "operator", "a terminal answer names the operator path")
 assert(rows.LLLL.instance_bound == true, "a core instance marks the request instance-bound")
 assert(rows.MMMM.instance_bound == true, "a session binding marker marks the request instance-bound")
+assert(rows.NNNN.decision_path == nil, "an unknown answerer is not labelled as the owner")
+assert(rows.OOOO.decision_path == "operator", "a terminal answer wins over a stray event id")
 
 for _, row in ipairs(snapshot.records) do
   assert(row.data == nil and row.nonce == nil and row.event_id == nil and row.text == nil

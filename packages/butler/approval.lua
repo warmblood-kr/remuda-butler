@@ -250,11 +250,12 @@ local function metadata(rec, now)
     or (data ~= nil and tonumber(data.session_binding_version) == 2
       and type(data.session_marker) == "string" and data.session_marker ~= "")
   local decision_path
-  if type(rec.answer_event_id) == "string" and rec.answer_event_id ~= "" then
-    decision_path = "owner_matrix"
-  elseif rec.answered_by == "operator (terminal)" then
+  -- Provenance is only labelled when there is evidence for it. The terminal
+  -- check comes first so a contradictory record (terminal answer plus an event
+  -- id) cannot leak out as an owner decision.
+  if rec.answered_by == "operator (terminal)" then
     decision_path = "operator"
-  elseif type(rec.answered_by) == "string" and rec.answered_by ~= "" then
+  elseif type(rec.answer_event_id) == "string" and rec.answer_event_id ~= "" then
     decision_path = "owner_matrix"
   end
   return {
