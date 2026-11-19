@@ -40,12 +40,12 @@ if type(owners) ~= "table" or type(owners.live) ~= "table" then
   owners = { live = {}, verified = true }
   remuda._butler_relay_owners = owners
 end
--- A cancelled handle must also leave the core registry. A core without that
--- registry cannot be checked here; those builds keep the old stop behaviour,
--- while a core that exposes it proves every handle is gone.
+-- A cancelled handle must also leave the core registry. Without that registry
+-- the teardown cannot be verified, so it fails closed: an older core keeps the
+-- relay stopped rather than risk a second writer.
 local function owner_timers_gone(timers)
   local schedules = remuda.schedules
-  if type(schedules) ~= "table" then return true end
+  if type(schedules) ~= "table" then return false end
   for _, timer in ipairs(timers) do
     if timer ~= nil and schedules[timer] ~= nil then return false end
   end

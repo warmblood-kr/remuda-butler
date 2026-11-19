@@ -13,12 +13,19 @@ remuda.butler = { matrix = {} }
 -- later groups get the same default at load time.
 remuda._butler_new_ulid = remuda._butler_new_ulid or function() return "01TESTULID" end
 remuda._relay_timers = {}
+remuda.schedules = remuda.schedules or {}
 function remuda.schedule(spec)
   local timer = { spec = spec, cancelled = false }
   remuda._relay_timers[#remuda._relay_timers + 1] = timer
+  remuda.schedules[timer] = true
   return timer
 end
-function remuda.cancel(timer) if timer then timer.cancelled = true end end
+function remuda.cancel(timer)
+  if timer then
+    timer.cancelled = true
+    remuda.schedules[timer] = nil
+  end
+end
 local matrix = dofile("packages/butler/matrix_request.lua")
 -- Install shared matrix helpers without using the installed package loader;
 -- this suite loads its fake transport modules directly from the worktree.
@@ -97,20 +104,6 @@ end
 -- teardown that could not clear a scheduled handle, is not proof. Red before
 -- the owner registry existed (the field was nil), green after.
 (function()
-  -- Keep the suite's shared timer stub untouched: this test needs the core
-  -- registry the production core exposes, so it scopes one to itself.
-  local saved = { remuda.schedule, remuda.cancel, remuda.schedules }
-  remuda.schedules = {}
-  remuda.schedule = function(spec)
-    local timer = saved[1](spec)
-    remuda.schedules[timer] = true
-    return timer
-  end
-  remuda.cancel = function(timer)
-    saved[2](timer)
-    if timer then remuda.schedules[timer] = nil end
-  end
-  local ok, err = pcall(function()
   assert(relay_module.owner_proven(), "a cold relay image has nothing to prove")
   local dir, config_path = fixture("typed_lines=false\nshell_lines=false\n")
   local client = scripted_client()
@@ -147,9 +140,6 @@ end
   relay_module.instance = nil
   assert(relay_module.owner_proven(), "a retried stop proves the owner")
   cleanup_fixture(dir, config_path)
-  end)
-  remuda.schedule, remuda.cancel, remuda.schedules = saved[1], saved[2], saved[3]
-  if not ok then error(err, 0) end
 end)()
 -- BMR_OWNER_ONLY=1 stops after the owner-proof case, so this contract can be
 -- red/green checked on a core that is newer than the pinned CORE_REF.
