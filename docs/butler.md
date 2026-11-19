@@ -576,9 +576,9 @@ may be pending at once, and an agent may register at most ten in ten minutes.
 Session binding uses the Butler session identity and a non-secret launch marker;
 the root Butler identity can survive a pane relaunch, so its fresh launch marker
 is what distinguishes that instance.
-`remuda butler approve-text on|off` and the `approve_text` config key are
-legacy: the switch is ignored, and approvals stay on once Matrix live sync is
-configured. Registration is refused in messages fallback mode because that
+`remuda butler approve-text on|off` is no longer a command, and the
+`approve_text` config key is ignored; approvals stay on once Matrix live sync
+is configured. Registration is refused in messages fallback mode because that
 mode cannot receive live owner approvals. Doctor reports `Approve text: on|off`.
 
 ### Status commands
