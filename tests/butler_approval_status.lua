@@ -79,17 +79,36 @@ record("EEEE", "approve_text", "delivery_uncertain", 5)
 record("FFFF", "approve_text", "delivery_quarantined", 6)
 record("GGGG", "dialog_action", "open", 7, { summary = "line one\nline two" })
 record("HHHH", "approve_text", "applied", 8)
+record("IIII", "dialog_action", "open", 9,
+  { data = { session = "target-iiii", instance_id = "instance-iiii" } })
+record("JJJJ", "approve_text", "approved", 10,
+  { answered_by = "@alice:example.org", answer_event_id = "$answer-jjjj",
+    data = { session = "target-jjjj" } })
+-- Synthetic: terminal approve is refused today, so "operator" can only appear
+-- once terminal rows are listed; this checks the projection mapping itself.
+record("KKKK", "approve_text", "approved", 11, { answered_by = "operator (terminal)" })
+record("LLLL", "approve_text", "open", 12,
+  { data = { session = "target-llll", core_instance = "core-llll" } })
+record("MMMM", "approve_text", "open", 13,
+  { data = { session = "target-mmmm", session_binding_version = 2, session_marker = "marker-mmmm" } })
+-- Provenance must be omitted when no evidence supports it, and a contradictory
+-- record (terminal answer plus an event id) must stay the operator path.
+record("NNNN", "approve_text", "approved", 14, { answered_by = "system" })
+record("OOOO", "approve_text", "approved", 15,
+  { answered_by = "operator (terminal)", answer_event_id = "$answer-oooo" })
 
 local snapshot = assert(approval.snapshot(base + 30000))
 assert(snapshot.schema == 1 and snapshot.authority == "butler-local", "snapshot identity")
 assert(snapshot.generated_at == base + 30000, "snapshot time is explicit")
-assert(#snapshot.records == 7, "open and in-flight records are listed, terminal rows are not")
+assert(#snapshot.records == 14, "open and in-flight records are listed, terminal rows are not")
 
 local rows, order = {}, {}
 for _, row in ipairs(snapshot.records) do
   rows[row.id], order[#order + 1] = row, row.id
 end
-assert(table.concat(order, ",") == "AAAA,BBBB,CCCC,DDDD,EEEE,FFFF,GGGG", "oldest request first")
+assert(table.concat(order, ",")
+  == "AAAA,BBBB,CCCC,DDDD,EEEE,FFFF,GGGG,IIII,JJJJ,KKKK,LLLL,MMMM,NNNN,OOOO",
+  "oldest request first")
 assert(rows.AAAA.status == "open" and rows.AAAA.delivery == "none", "open prepared text is undecided")
 assert(rows.BBBB.status == "approved" and rows.BBBB.delivery == "not_started",
   "an approved request is decided but not delivered")
@@ -101,9 +120,25 @@ assert(rows.GGGG.delivery == "not_applicable", "a dialog action has no prepared-
 assert(rows.GGGG.summary == "line one line two", "untrusted text cannot break a row")
 assert(rows.AAAA.expires_in_s == 30 and rows.AAAA.expires_at == base + 60000, "expiry projection")
 assert(rows.AAAA.asker == "worker-AAAA", "the requesting session is identified")
+assert(rows.AAAA.target_session == nil and rows.AAAA.instance_bound == nil
+  and rows.AAAA.decision_path == nil, "a plain request has no target, binding or decision path")
+assert(rows.IIII.target_session == "target-iiii", "the target session is projected")
+assert(rows.IIII.instance_bound == true, "an instance id marks the request instance-bound")
+assert(rows.IIII.decision_path == nil, "an open request has no decision path")
+assert(rows.JJJJ.target_session == "target-jjjj", "the target survives a decided request")
+assert(rows.JJJJ.instance_bound == nil, "no instance evidence stays unknown, not false")
+assert(rows.JJJJ.decision_path == "owner_matrix", "a Matrix owner answer names its path")
+assert(rows.KKKK.target_session == nil and rows.KKKK.instance_bound == nil,
+  "a request without target data omits both fields")
+assert(rows.KKKK.decision_path == "operator", "a terminal answer names the operator path")
+assert(rows.LLLL.instance_bound == true, "a core instance marks the request instance-bound")
+assert(rows.MMMM.instance_bound == true, "a session binding marker marks the request instance-bound")
+assert(rows.NNNN.decision_path == nil, "an unknown answerer is not labelled as the owner")
+assert(rows.OOOO.decision_path == "operator", "a terminal answer wins over a stray event id")
 
 for _, row in ipairs(snapshot.records) do
-  assert(row.data == nil and row.nonce == nil and row.event_id == nil and row.text == nil,
+  assert(row.data == nil and row.nonce == nil and row.event_id == nil and row.text == nil
+    and row.registered_text == nil and row.session_marker == nil and row.instance_id == nil,
     "metadata only: no prepared text, nonce or event proof")
 end
 

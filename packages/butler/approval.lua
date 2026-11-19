@@ -239,16 +239,34 @@ function approval.status_label(rec)
   return tostring(rec.status or "unknown")
 end
 
--- Metadata only: never prepared text, nonces, Matrix/audit proof, or target
--- internals. The message is untrusted input, so keep it on one line.
+-- Metadata only: never prepared text, nonces, Matrix/audit proof, or the rest
+-- of `data`. The message is untrusted input, so keep it on one line.
 local function metadata(rec, now)
   local expires_at = tonumber(rec.expires_at)
+  local data = type(rec.data) == "table" and rec.data or nil
+  local target = data and data.session
+  local instance = data and (data.instance_id or data.core_instance)
+  local instance_bound = type(instance) == "string" and instance ~= ""
+    or (data ~= nil and tonumber(data.session_binding_version) == 2
+      and type(data.session_marker) == "string" and data.session_marker ~= "")
+  local decision_path
+  -- Provenance is only labelled when there is evidence for it. The terminal
+  -- check comes first so a contradictory record (terminal answer plus an event
+  -- id) cannot leak out as an owner decision.
+  if rec.answered_by == "operator (terminal)" then
+    decision_path = "operator"
+  elseif type(rec.answer_event_id) == "string" and rec.answer_event_id ~= "" then
+    decision_path = "owner_matrix"
+  end
   return {
     id = safe_line(rec.id, 26),
     kind = safe_line(rec.kind, 32),
     status = safe_line(rec.status, 32),
     delivery = delivery_state(rec),
     asker = safe_line(rec.asker, 128),
+    target_session = type(target) == "string" and safe_line(target, 128) or nil,
+    instance_bound = instance_bound or nil,
+    decision_path = decision_path,
     summary = safe_line(rec.summary, 128),
     created_at = tonumber(rec.created_ms) or 0,
     expires_at = expires_at or 0,
