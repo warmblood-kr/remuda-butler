@@ -222,7 +222,7 @@ for f in agents-root.md agents-topic.md agents-launch.md welcome.txt; do
   require_text "$f" "request's expiry (default" "the displayed approval expiry"
   require_text "$f" 'approval_ttl_minutes' "the configurable approval TTL"
   require_text "$f" '8 KiB of normalized text' "the normalized 8 KiB limit"
-  require_text "$f" 'live Matrix sync and prepared-text approval on' "the approval prerequisites"
+  require_text "$f" 'live Matrix sync' "the approval prerequisites"
   require_text "$f" 'typed (seen)' "the typed(seen) observation caveat"
   require_text "$f" 'does not approve prepared text' "the owner-Matrix-only approval rule"
   require_text "$f" 'Guidance shared across every node of a cluster lives in the Remuda VFS' "the shared Remuda VFS wording"

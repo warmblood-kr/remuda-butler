@@ -131,7 +131,7 @@ exact text the owner reviews; silence is not approval.
 Use the `butler_approve_text` MCP tool or
 `remuda butler approve-text request SESSION -` with the exact text on stdin to
 register up to 8 KiB of normalized text for the owner to review in Matrix.
-Registration needs live Matrix sync and prepared-text approval on. The
+Registration needs live Matrix sync. The
 allowlisted owner approves or denies the posted request by reply or reaction;
 the terminal `remuda butler approve` does not approve prepared text. Register
 only the intended content and target, explain its purpose to the owner, and
@@ -139,9 +139,7 @@ never treat a request as approval. The post shows the request's expiry (default
 30 minutes; the owner can configure `approval_ttl_minutes`). On approval Butler
 checks the target session and attempts to type the stored, normalized text
 once. `typed (seen)` is a screen observation, not proof that the agent acted;
-an uncertain outcome requires inspection before a new request. The owner
-controls the `approve-text on|off` switch at a terminal; `remuda butler doctor`
-reports it.
+an uncertain outcome requires inspection before a new request.
 <!-- END remuda-butler:managed id=butler -->
 
 <!-- BEGIN remuda-butler:managed id=guidance-layers -->
@@ -171,7 +169,7 @@ your leader explicitly asks, with
 or the loader file above); a put does not guarantee every peer has synced it,
 and running sessions keep the snapshot they loaded until they refresh it.
 
-- framework: built in, version sha256:a95933ad74a9
+- framework: built in, version sha256:a55d7a6607c3
 - cluster: not available (this Remuda core has no cluster file store; update Remuda)
 - team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
 - personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)

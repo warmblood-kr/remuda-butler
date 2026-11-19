@@ -29,7 +29,7 @@ Sessions and teams:
   remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] [--writable DIR]... [--sandbox full] <task...>
 
 Approvals:
-  remuda butler approve-text request SESSION - | on|off
+  remuda butler approve-text request SESSION -
   remuda butler approvals
   remuda butler approve <ID>
   remuda butler deny <ID>
@@ -53,7 +53,6 @@ Native delivery:
   remuda butler native adopt-codex ALIAS --socket PATH --thread UUID | adopt-opencode ALIAS --endpoint URL --conversation SES_ID --password-stdin
 
 Switches and input:
-  remuda butler typed-lines on|off
   remuda butler shell-lines on|off
   remuda butler status-commands on|off
   remuda butler guard on|off|status | approvals on|off|status | deny on|off|status | grants [on|off|status] | stats | verify (guard and approvals are on by default; deny and grants are off)

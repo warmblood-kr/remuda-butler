@@ -187,9 +187,9 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   telemetry_by_kind[kind] = agent_telemetry
   local choose_opts = {
     name = name, cwd = launch_cwd, auto_trust = auto_trust,
-    -- The private argv seam used by the assembled daemon tests applies to a
-    -- member exactly as it does to the root: one fake process for every launch.
-    argv = remuda._butler_argv, skip_probe = remuda._butler_argv ~= nil,
+    -- The private argv seam is the root's launch stand-in. A member must use
+    -- its own builder (or an explicit _butler_agent_builders override), or a
+    -- test that fakes the root silently fakes every member launch too.
     -- Members stay eligible; a leader is protected at the launch assignment
     -- that names it, not because it happens to have children.
     remote_input_disabled = false,

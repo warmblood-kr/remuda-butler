@@ -1590,7 +1590,7 @@ local function test_config_add_room_pads_short_config()
   assert(passed, err)
 end
 
-local function test_typed_line_config_is_strict_and_off_by_default()
+local function test_typed_line_config_keeps_only_shell_lines_switchable()
   local dir, path = fixture()
   local conf = assert(matrix.read_config(path))
   assert(conf.typed_lines == true and conf.shell_lines == true and conf.approve_text == true,
@@ -1599,14 +1599,16 @@ local function test_typed_line_config_is_strict_and_off_by_default()
 
   dir, path = fixture("typed_lines=false\nshell_lines=false\napprove_text=false\n")
   conf = assert(matrix.read_config(path))
-  assert(conf.typed_lines == false and conf.shell_lines == false and conf.approve_text == false,
-    "explicit false must turn the switches off")
+  assert(conf.typed_lines == true and conf.approve_text == true,
+    "the legacy typed_lines/approve_text switches are ignored")
+  assert(conf.shell_lines == false, "explicit false must turn shell_lines off")
   cleanup_fixture(dir, path)
 
   dir, path = fixture("typed_lines=maybe\nshell_lines=maybe\napprove_text=maybe\n")
   conf = assert(matrix.read_config(path))
-  assert(conf.typed_lines == false and conf.shell_lines == false and conf.approve_text == false,
-    "an unreadable value must turn the switches off")
+  assert(conf.typed_lines == true and conf.approve_text == true,
+    "an unreadable legacy value is ignored")
+  assert(conf.shell_lines == false, "an unreadable value must turn shell_lines off")
   assert(conf.approval_room == "all", "approval_room must default to all")
   cleanup_fixture(dir, path)
 
@@ -8057,7 +8059,7 @@ for _, case in ipairs({
   { "test_open_mode_hostile_invite_state_is_refused", test_open_mode_hostile_invite_state_is_refused },
   { "test_open_mode_conflicting_inviter_events_remain_refused", test_open_mode_conflicting_inviter_events_remain_refused },
   { "test_config_add_room_pads_short_config", test_config_add_room_pads_short_config },
-  { "test_typed_line_config_is_strict_and_off_by_default", test_typed_line_config_is_strict_and_off_by_default },
+  { "test_typed_line_config_keeps_only_shell_lines_switchable", test_typed_line_config_keeps_only_shell_lines_switchable },
   { "test_join_leave_missing_room_guidance", test_join_leave_missing_room_guidance },
   { "test_quarantine_list_room_reason_columns", test_quarantine_list_room_reason_columns },
   { "test_matrix_thread_cli_parser_contract", ctx_tests.test_matrix_thread_cli_parser_contract },
