@@ -1,8 +1,9 @@
 #!/bin/sh
 # Installs a persistence layer for `remuda exec butler`: a systemd --user
 # timer (Linux) or a launchd agent (macOS) that polls `remuda ls` every 15s
-# and re-runs `remuda exec butler` whenever no session is named exactly
-# "butler" -- reviving the Matrix bridge after a daemon crash, a daemon
+# and re-runs `remuda exec butler` whenever no session is named exactly the
+# effective Butler session name (default "butler") -- reviving the Matrix
+# bridge after a daemon crash, a daemon
 # restart (`remuda stop` followed by any command), or a reboot, none of which
 # anything in `remuda` itself recovers from on its own (native/tests/daemon.rs,
 # a_daemon_restart_does_not_relaunch_the_butler_session).
@@ -11,6 +12,11 @@
 #
 #   REMUDA_BUTLER_TOKEN_FILE=<path>   default: $XDG_CONFIG_HOME/remuda/butler/token
 #   REMUDA_BUTLER_CONFIG_FILE=<path>  default: $XDG_CONFIG_HOME/remuda/butler/config
+#   REMUDA_BUTLER_NAME=<name>         default: butler; the PHYSICAL session name
+#                                     only (logical identity, memory and the
+#                                     `butler` command never change). Opt in
+#                                     when another instance must run under a
+#                                     distinct name; invalid names are refused.
 #
 # This script only ever CONSUMES a token/config file placed there by some
 # other means -- obtaining a Matrix access token is out of scope here, and
@@ -81,6 +87,20 @@ esac
 config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
 token_file="${REMUDA_BUTLER_TOKEN_FILE:-$config_home/remuda/butler/token}"
 config_file="${REMUDA_BUTLER_CONFIG_FILE:-$config_home/remuda/butler/config}"
+
+# The root's logical identity is always "butler"; this chooses only the
+# PHYSICAL session name, for an operator who needs a distinct Butler instance
+# after a name collision. Default and every existing install keep "butler".
+# Invalid values are refused, never trimmed or silently replaced: this script
+# and the package must agree on one exact name.
+butler_name="${REMUDA_BUTLER_NAME:-butler}"
+case "$butler_name" in
+'' | [!A-Za-z0-9]* | *[!A-Za-z0-9._-]*)
+	die "REMUDA_BUTLER_NAME must start with a letter or digit and contain only letters, digits, '.', '_' or '-' (got '$butler_name')" ;;
+esac
+if [ "${#butler_name}" -gt 64 ]; then
+	die "REMUDA_BUTLER_NAME must be at most 64 characters (got ${#butler_name})"
+fi
 
 [ -f "$token_file" ] || die "no token file at $token_file -- place the Matrix access token there first (this script does not obtain or create one)"
 [ -f "$config_file" ] || die "no config file at $config_file -- place homeserver/room-id/self-mxid/allowed-senders (one per line) there first (this script does not create one)"
@@ -177,6 +197,23 @@ if ! remuda mod install warmblood-kr/remuda-butler --force; then
 	die "could not install the Butler extension"
 fi
 
+# Persist the logical-butler -> physical-name mapping before the probe, so the
+# mod's first launch already reads it (it lives next to agents.jsonl/roster.json
+# and answers "which session name is logical butler" after a daemon restart).
+# The same name also goes into init.lua below, which is what a fresh daemon
+# re-applies even before the mod's own data home is readable.
+data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+effective_record="$data_home/remuda/butler/effective-name"
+mkdir -p "$data_home/remuda/butler" ||
+	die "could not create $data_home/remuda/butler, so the effective name is not recorded"
+# Refuse to continue on a failed write: continuing would leave the record
+# claiming a name this install did not choose, and the probe below would
+# launch under the old one. Dying here keeps every later file untouched.
+(umask 077 && printf 'version=1\nlogical=butler\nname=%s\ninstance=\n' "$butler_name" >"$effective_record") ||
+	die "could not write $effective_record ($butler_name); nothing else was changed"
+chmod 600 "$effective_record" 2>/dev/null || true
+status "recorded effective Butler session name '$butler_name' in $effective_record"
+
 # A real functional probe, not a version-string parse: reuse the exact error
 # text the binary already produces (`no such package: butler`) rather than
 # hardcoding a date or commit that will rot the moment the package is
@@ -184,7 +221,7 @@ fi
 status "registering butler in the running daemon (this starts one if none is up)..."
 probe_err=$(mktemp)
 trap 'rm -f "$probe_err"' EXIT INT TERM
-if ! env -u PWD REMUDA_BUTLER_TOKEN="$token_file" REMUDA_BUTLER_CONFIG="$config_file" remuda exec butler 2>"$probe_err"; then
+if ! env -u PWD REMUDA_BUTLER_NAME="$butler_name" REMUDA_BUTLER_TOKEN="$token_file" REMUDA_BUTLER_CONFIG="$config_file" remuda exec butler 2>"$probe_err"; then
 	if grep -q 'no such package: butler' "$probe_err"; then
 		die "Butler was not installed into Remuda -- run 'remuda mod install warmblood-kr/remuda-butler --force' and retry"
 	fi
@@ -212,14 +249,17 @@ status "butler is ready."
 # writes this file, so there is nothing of the reader's own to preserve.
 mkdir -p "$config_home/remuda"
 init_lua="$config_home/remuda/init.lua"
-cat >"$init_lua" <<'LUA'
+cat >"$init_lua" <<LUA
 -- Written by install-butler.sh. Evaluated automatically by every fresh
 -- remuda daemon at startup -- this is what re-registers butler after a
--- daemon restart (`remuda stop` followed by any command) or machine reboot,
+-- daemon restart (\`remuda stop\` followed by any command) or machine reboot,
 -- with no human hand and no need to
 -- wait for butler-poll.sh's next tick. An older remuda binary (built
 -- before this loader existed) silently ignores this file, exactly as if
 -- it were absent -- no trap, unlike the earlier package-stub window.
+-- The override is the physical session name chosen at install time; the
+-- logical identity stays "butler" (agents.jsonl alias, memory, leader).
+remuda._butler_initial_name_override = "$butler_name"
 remuda.exec("butler")
 LUA
 status "wrote $init_lua"
@@ -247,8 +287,12 @@ cat >"$poll_script" <<POLL
 # birthed the daemon.
 set -eu
 export PATH="$remuda_bin_dir:\$PATH"
-env -u PWD remuda ls | awk '\$1 == "butler" { found = 1 } END { exit !found }' && exit 0
-exec env -u PWD remuda exec butler
+# The effective physical name chosen at install time. Logical identity,
+# memory and the extension command stay "butler"; only this session name
+# varies. Exact first-field match, never a substring.
+butler_name="$butler_name"
+env -u PWD remuda ls | awk -v name="\$butler_name" '\$1 == name { found = 1 } END { exit !found }' && exit 0
+exec env -u PWD REMUDA_BUTLER_NAME="\$butler_name" remuda exec butler
 POLL
 chmod 755 "$poll_script"
 status "wrote $poll_script"
