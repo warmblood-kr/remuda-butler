@@ -41,6 +41,7 @@ local function normalize(text)
     if at then text = text:sub(1, at - 1) .. "<GLOBAL-USAGE>" .. text:sub(to + 1) end
   end
   text = text:gsub("%f[%w][%d%u]+%f[%W]", function(word) return #word == 26 and "<ULID>" or word end)
+  text = text:gsub("%f[%d]%d%d%d%d%d%d%d%d%d%d%d%d%d%f[%D]", "<MS>")
   text = text:gsub("(%.lua\"%]):%d+:", "%1:<LINE>:")
   return (text:gsub("%d%d%d%d%-%d%d%-%d%dT%d%d:%d%d:%d%dZ", "<TS>"))
 end
@@ -196,7 +197,9 @@ families {
       approval.list = function()
         remuda._pr0_note("approval.list")
         if remuda._pr0_approvals.status == "open" then
-          return { { id = "A7K2", kind = "agent", summary = "synthetic", asker = "worker", expires_at = os.time() * 1000 + 60000 } }
+          return { { id = "A7K2", kind = "agent", summary = "synthetic", asker = "worker",
+            status = "open", nonce = "synthetic-nonce", data = { text = "synthetic text" },
+            expires_at = os.time() * 1000 + 3600000 } }
         end
         return {}
       end
@@ -220,7 +223,7 @@ families {
     ]],
     reset = [[remuda._pr0_approvals.status = "open"; remuda._pr0_approvals.calls = 0; remuda._pr0_approvals.expired_record = nil]],
     trace = [[return remuda._pr0_approvals.status .. ":" .. remuda._pr0_approvals.calls]],
-    cases = forms("approvals", { "approvals", "extra" }, { "approvals", "--" },
+    cases = forms("approvals", { "approvals", "--json" }, { "approvals", "extra" }, { "approvals", "--" },
       { "approvals", "--help", "extra" }, { "approvals", "-h", "extra" },
       { argv = { "approvals", "--help" }, as = "agent" },
       { "approve", "A7K2" }, { "deny", "A7K2" }, { "approve" }, { "deny" },

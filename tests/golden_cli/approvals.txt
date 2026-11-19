@@ -1,8 +1,8 @@
 ### remuda butler "approvals"
 exit: 0
 stdout:
-ID  KIND  SUMMARY  ASKER  EXPIRES-IN
-A7K2  agent  synthetic  worker  1m
+ID  KIND  SUMMARY  ASKER  STATUS  EXPIRES-IN
+A7K2  agent  synthetic  worker  open  60m
 Next: remuda butler approve ID, or remuda butler deny ID
 stderr:
 
@@ -13,12 +13,13 @@ state: open:0
 ### remuda butler "approvals" "--help"
 exit: 0
 stdout:
-List open approval requests. Example: remuda butler approvals
+List open and in-flight approval requests. Example: remuda butler approvals --json
 
-Usage: remuda butler approvals
+Usage: remuda butler approvals [OPTIONS]
 
 Options:
   -h, --help  Print help
+      --json  Metadata-only machine-readable status
 
 Next: remuda butler approve --help
 
@@ -30,12 +31,13 @@ state: open:0
 ### remuda butler "approvals" "-h"
 exit: 0
 stdout:
-List open approval requests. Example: remuda butler approvals
+List open and in-flight approval requests. Example: remuda butler approvals --json
 
-Usage: remuda butler approvals
+Usage: remuda butler approvals [OPTIONS]
 
 Options:
   -h, --help  Print help
+      --json  Metadata-only machine-readable status
 
 Next: remuda butler approve --help
 
@@ -50,9 +52,19 @@ stdout:
 
 stderr:
 unexpected argument 'help'
-Usage: remuda butler approvals
+Usage: remuda butler approvals [OPTIONS]
 Next: remuda butler approve --help
 actions:
+state: open:0
+
+### remuda butler "approvals" "--json"
+exit: 0
+stdout:
+{"authority":"butler-local","generated_at":<MS>,"records":[{"asker":"worker","created_at":0,"delivery":"not_applicable","expires_at":<MS>,"expires_in_s":3600,"id":"A7K2","kind":"agent","status":"open","summary":"synthetic"}],"schema":1}
+stderr:
+
+actions:
+approval.list()
 state: open:0
 
 ### remuda butler "approvals" "extra"
@@ -61,7 +73,7 @@ stdout:
 
 stderr:
 unexpected argument 'extra'
-Usage: remuda butler approvals
+Usage: remuda butler approvals [OPTIONS]
 Next: remuda butler approve --help
 actions:
 state: open:0
@@ -69,8 +81,8 @@ state: open:0
 ### remuda butler "approvals" "--"
 exit: 0
 stdout:
-ID  KIND  SUMMARY  ASKER  EXPIRES-IN
-A7K2  agent  synthetic  worker  1m
+ID  KIND  SUMMARY  ASKER  STATUS  EXPIRES-IN
+A7K2  agent  synthetic  worker  open  60m
 Next: remuda butler approve ID, or remuda butler deny ID
 stderr:
 
@@ -81,12 +93,13 @@ state: open:0
 ### remuda butler "approvals" "--help" "extra"
 exit: 0
 stdout:
-List open approval requests. Example: remuda butler approvals
+List open and in-flight approval requests. Example: remuda butler approvals --json
 
-Usage: remuda butler approvals
+Usage: remuda butler approvals [OPTIONS]
 
 Options:
   -h, --help  Print help
+      --json  Metadata-only machine-readable status
 
 Next: remuda butler approve --help
 
@@ -98,12 +111,13 @@ state: open:0
 ### remuda butler "approvals" "-h" "extra"
 exit: 0
 stdout:
-List open approval requests. Example: remuda butler approvals
+List open and in-flight approval requests. Example: remuda butler approvals --json
 
-Usage: remuda butler approvals
+Usage: remuda butler approvals [OPTIONS]
 
 Options:
   -h, --help  Print help
+      --json  Metadata-only machine-readable status
 
 Next: remuda butler approve --help
 
@@ -115,12 +129,13 @@ state: open:0
 ### [agent] remuda butler "approvals" "--help"
 exit: 0
 stdout:
-List open approval requests. Example: remuda butler approvals
+List open and in-flight approval requests. Example: remuda butler approvals --json
 
-Usage: remuda butler approvals
+Usage: remuda butler approvals [OPTIONS]
 
 Options:
   -h, --help  Print help
+      --json  Metadata-only machine-readable status
 
 Next: remuda butler approve --help
 stderr:

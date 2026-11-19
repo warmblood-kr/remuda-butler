@@ -82,7 +82,10 @@ local function open_records(state)
         or record.status == "delivery_uncertain" or record.status == "delivery_quarantined"))) then rows[#rows + 1] = record end
   end
   table.sort(rows, function(a, b)
-    if tonumber(a.created_ms) and tonumber(b.created_ms) then return a.created_ms < b.created_ms end
+    local at, bt = tonumber(a.created_ms), tonumber(b.created_ms)
+    if at and bt and at ~= bt then return at < bt end
+    if at and not bt then return true end
+    if bt and not at then return false end
     return tostring(a.id) < tostring(b.id)
   end)
   return rows
@@ -211,10 +214,66 @@ function approval.begin_delivery(rec, verdict)
   return true
 end
 
+-- Decision and delivery are separate dimensions. `status` is the stored
+-- decision lifecycle; `delivery` is the one-shot delivery observation.
+-- "uncertain" is never success, and it is never retried automatically.
+local function delivery_state(rec)
+  if rec.kind ~= "approve_text" then return "not_applicable" end
+  if rec.status == "open" then return "none" end
+  if rec.status == "queued" then return "queued" end
+  if rec.status == "delivery_uncertain" then return "uncertain" end
+  if rec.status == "delivery_quarantined" then return "quarantined" end
+  if rec.status == "approved" then
+    return rec.delivery_started == true and "in_flight" or "not_started"
+  end
+  return "unknown"
+end
+approval.delivery_state = delivery_state
+
+function approval.status_label(rec)
+  local delivery = delivery_state(rec)
+  if delivery == "uncertain" then return "delivery uncertain" end
+  if delivery == "quarantined" then return "delivery quarantined" end
+  if delivery == "in_flight" then return "delivering" end
+  if delivery == "queued" then return "queued" end
+  return tostring(rec.status or "unknown")
+end
+
+-- Metadata only: never prepared text, nonces, Matrix/audit proof, or target
+-- internals. The message is untrusted input, so keep it on one line.
+local function metadata(rec, now)
+  local expires_at = tonumber(rec.expires_at)
+  return {
+    id = safe_line(rec.id, 26),
+    kind = safe_line(rec.kind, 32),
+    status = safe_line(rec.status, 32),
+    delivery = delivery_state(rec),
+    asker = safe_line(rec.asker, 128),
+    summary = safe_line(rec.summary, 128),
+    created_at = tonumber(rec.created_ms) or 0,
+    expires_at = expires_at or 0,
+    expires_in_s = expires_at and math.max(0, math.ceil((expires_at - now) / 1000)) or 0,
+  }
+end
+
+-- nil means the store is unavailable; an empty table means no requests.
+-- Renderers must not present unavailable as an empty list.
 function approval.list()
-  if not attached then return {} end
+  if not attached then return nil, "unavailable" end
   approval.sweep()
   return open_records(attached.state)
+end
+
+-- A read-only, local snapshot for TUI/GUI/CLI consumers. It carries no
+-- decision authority and does not claim cluster truth; it only reports what
+-- this Butler process currently records.
+function approval.snapshot(now)
+  local rows, why = approval.list()
+  if not rows then return nil, why end
+  now = tonumber(now) or math.floor(os.time() * 1000)
+  local records = {}
+  for i, rec in ipairs(rows) do records[i] = metadata(rec, now) end
+  return { schema = 1, authority = "butler-local", generated_at = now, records = records }
 end
 
 function approval.for_event(event_id)
@@ -601,7 +660,9 @@ end
 local APPROVAL_CLI_SPEC = {
   name = "remuda butler",
   verbs = {
-    approvals = { about = "List open approval requests. Example: remuda butler approvals", next = "remuda butler approve --help" },
+    approvals = { about = "List open and in-flight approval requests. Example: remuda butler approvals --json",
+      options = { { long = "json", help = "Metadata-only machine-readable status" } },
+      next = "remuda butler approve --help" },
     approve = { about = "Approve a request. Example: remuda butler approve A7K2", args = { { name = "ID", help = "Approval request ID" } },
       next = "remuda butler approvals" },
     deny = { about = "Deny a request. Example: remuda butler deny A7K2", args = { { name = "ID", help = "Approval request ID" } },
@@ -624,15 +685,39 @@ function approval.cli(args, agent)
   end
   local verb = report.verb
   if verb == "approvals" then
-    local rows = approval.list()
+    if report.values.json == true then
+      local json = remuda.json
+      if type(json) ~= "table" or type(json.encode) ~= "function"
+          or type(json.array) ~= "function" then
+        return fail("JSON is unavailable on this Remuda core; use remuda butler approvals.")
+      end
+      local snapshot, unavailable = approval.snapshot()
+      if not snapshot then
+        return fail("Approval store unavailable (" .. tostring(unavailable)
+          .. "); this is not an empty list.\nNext: remuda butler matrix status")
+      end
+      -- Empty arrays need the core's explicit JSON array marker.
+      snapshot.records = json.array(snapshot.records)
+      local ok, encoded = pcall(json.encode, snapshot)
+      if not ok or type(encoded) ~= "string" then
+        return fail("Could not encode the approval list as JSON.")
+      end
+      return encoded
+    end
+    local rows, unavailable = approval.list()
+    if not rows then
+      return fail("Approval store unavailable (" .. tostring(unavailable)
+        .. "); this is not an empty list.\nNext: remuda butler matrix status")
+    end
     if #rows == 0 then return "No open approval requests.\nNext: nothing to do; agent requests appear here." end
     local now = math.floor(os.time() * 1000)
-    local lines = { "ID  KIND  SUMMARY  ASKER  EXPIRES-IN" }
+    local lines = { "ID  KIND  SUMMARY  ASKER  STATUS  EXPIRES-IN" }
     local has_prepared_text = false
     for _, rec in ipairs(rows) do
       local minutes = math.max(0, math.ceil(((tonumber(rec.expires_at) or now) - now) / 60000))
-      lines[#lines + 1] = string.format("%s  %s  %s  %s  %s", tostring(rec.id), tostring(rec.kind),
-        tostring(rec.summary), tostring(rec.asker), tostring(minutes) .. "m")
+      lines[#lines + 1] = string.format("%s  %s  %s  %s  %s  %s",
+        safe_line(rec.id, 26), safe_line(rec.kind, 32), safe_line(rec.summary, 128),
+        safe_line(rec.asker, 128), approval.status_label(rec), tostring(minutes) .. "m")
       if rec.kind == "approve_text" or rec.kind == "guard_action" then has_prepared_text = true end
     end
     lines[#lines + 1] = agent and "Next: wait for mail; remuda butler inbox"

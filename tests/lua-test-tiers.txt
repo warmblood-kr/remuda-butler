@@ -2,6 +2,8 @@ deep tests/agent_mcp_escape.lua
 deep tests/butler_adopt.lua
 deep tests/butler_agent_monocle.lua
 deep tests/butler_approval_retry.lua
+deep tests/lua/butler_approval_status_test.lua
+deep tests/butler_approval_status.lua
 deep tests/butler_approve_text.lua
 deep tests/butler_approve_text_syntax.lua
 deep tests/butler_approved_admission.lua
