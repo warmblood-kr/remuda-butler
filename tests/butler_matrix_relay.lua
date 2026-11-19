@@ -93,6 +93,71 @@ local function scripted_client()
   return client
 end
 
+-- The reload admission barrier reads relay.owner_proven(): a live writer, or a
+-- teardown that could not clear a scheduled handle, is not proof. Red before
+-- the owner registry existed (the field was nil), green after.
+(function()
+  -- Keep the suite's shared timer stub untouched: this test needs the core
+  -- registry the production core exposes, so it scopes one to itself.
+  local saved = { remuda.schedule, remuda.cancel, remuda.schedules }
+  remuda.schedules = {}
+  remuda.schedule = function(spec)
+    local timer = saved[1](spec)
+    remuda.schedules[timer] = true
+    return timer
+  end
+  remuda.cancel = function(timer)
+    saved[2](timer)
+    if timer then remuda.schedules[timer] = nil end
+  end
+  local ok, err = pcall(function()
+  assert(relay_module.owner_proven(), "a cold relay image has nothing to prove")
+  local dir, config_path = fixture("typed_lines=false\nshell_lines=false\n")
+  local client = scripted_client()
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function() return true end })
+  relay_module.instance = relay
+  relay:start()
+  client:complete(1, { json = { next_batch = "s0" } })
+  assert(relay_module.owner_proven() == false, "a live writer is not owner proof")
+  relay:stop()
+  relay_module.instance = nil
+  assert(relay_module.owner_proven(), "a verified stop proves the previous owner gone")
+
+  -- A cancellation that did not land leaves a hidden writer; the barrier must
+  -- stay closed until a retried stop can verify every handle.
+  local second_client = scripted_client()
+  local second = relay_module.new({ config_path = config_path, matrix = second_client,
+    deliver = function() return true end })
+  relay_module.instance = second
+  second:start()
+  -- Fail the outstanding request so the relay arms its retry timer.
+  local completed = 0
+  for _ = 1, 4 do
+    if #second_client.requests <= completed then break end
+    completed = completed + 1
+    second_client:complete(completed, { error = "offline" })
+  end
+  local saved_cancel = remuda.cancel
+  remuda.cancel = function(timer) if timer then timer.cancelled = true end end
+  second:stop()
+  remuda.cancel = saved_cancel
+  assert(relay_module.owner_proven() == false, "an unverified stop must fail closed")
+  second:stop()
+  relay_module.instance = nil
+  assert(relay_module.owner_proven(), "a retried stop proves the owner")
+  cleanup_fixture(dir, config_path)
+  end)
+  remuda.schedule, remuda.cancel, remuda.schedules = saved[1], saved[2], saved[3]
+  if not ok then error(err, 0) end
+end)()
+-- BMR_OWNER_ONLY=1 stops after the owner-proof case, so this contract can be
+-- red/green checked on a core that is newer than the pinned CORE_REF.
+if os.getenv("BMR_OWNER_ONLY") then
+  print("ok: relay owner proof")
+  return
+end
+
 remuda._mq_now = 0
 remuda._butler_matrix_request_clock = function() return remuda._mq_now end
 local function tick_timers(count)
