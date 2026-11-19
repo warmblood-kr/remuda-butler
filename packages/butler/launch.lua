@@ -185,11 +185,19 @@ local function launch_agent(kind, requested_name, cwd, model, parent, task, rela
   for _, candidate in ipairs(candidates) do models[candidate] = candidate_model(candidate, model) end
   local agent_telemetry = setup_telemetry(kind, { name = name, model = models[kind], memory_dir = memory_dir })
   telemetry_by_kind[kind] = agent_telemetry
+  -- The private argv seam stands in for a member launch too, but an explicit
+  -- _butler_agent_builders override wins: tests that inject a member builder
+  -- must not be shadowed by the root's fake.
+  local member_argv = remuda._butler_argv
+  if member_argv ~= nil then
+    local builders = remuda._butler_agent_builders
+    local builtins = remuda._butler_agent_builders_builtin
+    local entry = builders and builders[kind]
+    if entry ~= nil and entry ~= (builtins and builtins[kind]) then member_argv = nil end
+  end
   local choose_opts = {
     name = name, cwd = launch_cwd, auto_trust = auto_trust,
-    -- The private argv seam is the root's launch stand-in. A member must use
-    -- its own builder (or an explicit _butler_agent_builders override), or a
-    -- test that fakes the root silently fakes every member launch too.
+    argv = member_argv, skip_probe = member_argv ~= nil,
     -- Members stay eligible; a leader is protected at the launch assignment
     -- that names it, not because it happens to have children.
     remote_input_disabled = false,

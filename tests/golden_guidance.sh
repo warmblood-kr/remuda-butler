@@ -149,6 +149,9 @@ R -e "if not dofile('$REPO/scripts/check-butler-path-convention.lua') then error
 R -e "remuda._butler_argv = {'$T/bin/fake-root'}" >/dev/null   # root session: no agent
 R butler --headless >/dev/null
 wait_live butler
+# The argv seam is the root's stand-in; lead1 must launch the fake claude from
+# PATH and record its own argv, not reuse the root's fake process.
+R -e "remuda._butler_argv = nil" >/dev/null
 # The live root system prompt must name the STICC parts and ask for propagation.
 R -e "local p = remuda._butler_system_prompt or ''; for _, word in ipairs({ 'Situation', 'Task', 'Intent', 'Concern', 'Calibrate', 'propagate' }) do if not p:find(word, 1, true) then error('root SYSTEM_PROMPT lacks ' .. word, 0) end end"
 R butler topic delegate lead1 --agent claude "golden task" >/dev/null

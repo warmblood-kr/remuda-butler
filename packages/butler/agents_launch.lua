@@ -14,6 +14,9 @@ local TELEMETRY_ADAPTERS = remuda._butler_telemetry_adapters
 local PROMPT_DELIVERY = assert(remuda._butler_prompt_delivery)
 local BUILTIN_AGENT_BUILDERS = {}
 for kind, builder in pairs(AGENT_BUILDERS) do BUILTIN_AGENT_BUILDERS[kind] = builder end
+-- launch.lua needs the same distinction between a builtin and a test override:
+-- an explicit override must win over the root's private argv seam.
+remuda._butler_agent_builders_builtin = BUILTIN_AGENT_BUILDERS
 if not remuda.contribute then
   local builtin_order = { { "claude", 10 }, { "codex", 20 }, { "opencode", 25 }, { "monocle", 30 } }
   for _, row in ipairs(builtin_order) do
