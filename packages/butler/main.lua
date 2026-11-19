@@ -1311,6 +1311,7 @@ end
 remuda._butler_roster_config = { bus = bus, data_home = data_home, new_ulid = remuda._butler_new_ulid,
   next_token = next_token }
 remuda.exec("butler/roster")
+remuda.exec("butler/session_recovery")
 local roster = remuda._butler_roster
 local adopted_ok, adopted_on_start = pcall(roster.adopt, remuda.ls())
 if not adopted_ok then
@@ -1354,6 +1355,11 @@ bus.agents.butler = existing_butler or {
 }
 bus.agents.butler.id = root_identity.id
 bus.agents.butler.alias = "butler"
+-- The root always launches in the Butler session directory, so its working
+-- directory is knowable and durable: an explicit replacement rebuilds the same
+-- workdir instead of demanding one from the operator. Keep a recorded value
+-- when this image cannot compute the path (docs/concepts/butler-session-recovery.md).
+bus.agents.butler.cwd = bus.agents.butler.cwd or butler_session_cwd
 bus.agents.butler.session_name = bus.agents.butler.session_name or "butler"
 bus.agents.butler.session_start_marker = remuda._butler_new_ulid()
 -- Carry the verified binding of the same root (the sweep above kept it only if row and record were proven).

@@ -99,7 +99,7 @@ T.test("every_mutating_command_refuses_every_unidentified_caller_before_mutation
       {"reply", "missing-id", "callback probe"},
       {"reply", "missing-id", "--attach", "/missing-file"},
       {"forward", "missing-id", "alice"},
-      {"typed-lines", "off"}, {"shell-lines", "off"}, {"status-commands", "off"},
+      {"shell-lines", "off"}, {"status-commands", "off"},
       {"approve-text", "off"}, {"approve-text", "request", "alice", "-"},
       {"approvals"}, {"approve", "missing-id"}, {"deny", "missing-id"},
       {"schedule", "add", "callback-probe", "* * * * *", "probe"},

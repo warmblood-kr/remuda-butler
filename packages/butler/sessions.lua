@@ -18,6 +18,29 @@ local MAX_TREE_INDENT_DEPTH = 20
 -- identity. A listed row may only stand in for the agent when it is that exact
 -- instance: a bare name, a reused name, and an unavailable row are unknown.
 local BOUND_INSTANCE = 1
+-- The human-facing state label. The word stays visible so a terminal without
+-- emoji support, a copy/paste, or a log reader loses nothing; the glyph is a
+-- quick visual cue. Emoji render double-width in most terminals, so pad the
+-- cell to a fixed display width to keep the TASK tab stop aligned.
+local ACTIVITY_LABELS = {
+  working = { glyph = "🏃", text = "working" },
+  idle = { glyph = "😴", text = "idle" },
+  ["needs you"] = { glyph = "🙋", text = "needs you" },
+  other = { glyph = "", text = "other" },
+}
+local ACTIVITY_LABEL_WIDTH = 14
+local function activity_label(activity)
+  local label = ACTIVITY_LABELS[activity] or { glyph = "", text = activity }
+  local text = label.glyph ~= "" and (label.glyph .. " " .. label.text) or label.text
+  -- The four glyphs used here are double-width in common terminals and every
+  -- other label character is ASCII width 1. That is enough to align this one
+  -- column without a general display-width library.
+  local width = label.glyph ~= "" and (2 + 1 + #label.text) or #label.text
+  if width < ACTIVITY_LABEL_WIDTH then
+    text = text .. string.rep(" ", ACTIVITY_LABEL_WIDTH - width)
+  end
+  return text
+end
 local function instance_row(agent, session)
   if type(agent) ~= "table" or agent.instance_binding ~= BOUND_INSTANCE then return nil end
   if type(agent.instance_id) ~= "string" or agent.instance_id == "" then return nil end
@@ -29,6 +52,9 @@ local function display_name(id)
   local agent = bus.agents[id]
   return agent.alias or agent.session_name or id
 end
+-- Assigned with the OSC helpers below, after the roster function is defined;
+-- the roster is only called at runtime, so the forward local is enough.
+local osc_task
 local function team_order()
   local ids, order, visited = {}, {}, {}
   for id in pairs(bus.agents) do ids[#ids + 1] = id end
@@ -232,12 +258,19 @@ function remuda._butler_sessions()
         if word == "needs you" then activity = "needs you" end
       end
     end
+    -- The task is advisory display text from the exact instance this member is
+    -- bound to. An unbound, reused or unavailable name keeps the column empty.
+    local task = (row and osc_task(instance_row(agent, row))) or "-"
+    -- Keep the word: a terminal without emoji support still shows a usable
+    -- state, and the label survives copy/paste. The padded cell keeps the
+    -- TASK tab stop aligned even though the glyph is wide.
+    local label = activity_label(activity)
     rows[#rows + 1] = string.rep(" ", item.indent * 2) .. (item.orphan and "[orphan] " or "")
       .. display_name(item.id) .. "\t" .. tostring(agent.kind or "") .. "\t"
-      .. tostring(agent.parent or "-") .. "\t" .. activity
+      .. tostring(agent.parent or "-") .. "\t" .. label .. "\t" .. task
   end
   local out = #rows == 0 and "no Butler agents"
-    or "SESSION\tAGENT\tLEADER\tACTIVITY\n" .. table.concat(rows, "\n")
+    or "SESSION\tAGENT\tLEADER\tACTIVITY\tTASK\n" .. table.concat(rows, "\n")
   if bus.agents.butler and #butler_attempts > 0 then
     local details = {}
     for _, attempt in ipairs(butler_attempts) do
@@ -406,6 +439,57 @@ local OSC_ACTIVITY = {
 local OSC_ACTIVITY_MAX_AGE = {
   working = 600, idle = 3600, blocked = 3600, done = 3600, error = 3600,
 }
+-- A task label is display text, not identity or authority. Keep it to one
+-- short line even if an older host or a future agent sends more.
+local OSC_TASK_MAX_BYTES = 64
+local function truncate_utf8(text, max)
+  local out, used, index = {}, 0, 1
+  while index <= #text do
+    local byte = text:byte(index)
+    local width = byte < 0x80 and 1
+      or byte >= 0xF0 and 4
+      or byte >= 0xE0 and 3
+      or byte >= 0xC0 and 2
+      or 1
+    if index + width - 1 > #text or used + width > max then break end
+    out[#out + 1] = text:sub(index, index + width - 1)
+    used = used + width
+    index = index + width
+  end
+  local value = table.concat(out)
+  if index <= #text then value = value .. "…" end
+  return value
+end
+local function clean_task(text)
+  -- C0/C1 controls cannot be displayed literally; bidi and zero-width format
+  -- characters can reorder or hide text, so drop the common UTF-8 sequences
+  -- too. The native parser already rejects them; this is defence in depth.
+  text = text:gsub("[%z\1-\31\127]", " ")
+  text = text:gsub("\194[\128-\159]", " ")
+  text = text:gsub("\216\156", " ")
+  text = text:gsub("\226\128[\139-\143\168-\174]", " ")
+  text = text:gsub("\226\129[\160-\164\166-\169]", " ")
+  text = text:gsub("\239\187\191", "")
+  text = text:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  if text == "" then return nil end
+  return truncate_utf8(text, OSC_TASK_MAX_BYTES)
+end
+-- The task is shown only while the same report is fresh. Working/blocked are
+-- the states where a title describes current work; idle/done/error titles are
+-- stale context, not a current task.
+function osc_task(row)
+  local status = type(row) == "table" and row.program_status
+  if type(status) ~= "table" then return nil end
+  local state = status.state
+  if state ~= "working" and state ~= "blocked" then return nil end
+  local limit = OSC_ACTIVITY_MAX_AGE[state]
+  local age = row.program_status_age
+  if type(age) ~= "number" or age ~= age or age == math.huge or age < 0 or age > limit then
+    return nil
+  end
+  if type(status.title) ~= "string" then return nil end
+  return clean_task(status.title)
+end
 local function osc_activity(session)
   local status = type(session) == "table" and session.program_status
   if type(status) ~= "table" then return nil end

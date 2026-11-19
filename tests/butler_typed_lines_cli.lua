@@ -107,17 +107,9 @@ local function expect_refused(args, agent, fragment)
   assert(#writes == before, "a refused caller or invalid switch must not write the config")
 end
 
-expect_refused({ "typed-lines", "on" }, "agent-01", "operator-only")
 expect_refused({ "shell-lines", "off" }, "agent-01", "operator-only")
 
-local terminal_pending = remuda.pending
-remuda.pending = nil
-expect_refused({ "typed-lines", "on" }, nil, "needs a Remuda core with terminal prompts")
-remuda.pending = terminal_pending
-
 local before_writes = #writes
-local pending = cli({ "typed-lines", "on" }, nil)
-assert(#prompts == 1 and #writes == before_writes, "enabling typed lines must prompt before writing")
 local function assert_preface_fits(preface)
   local lines = {}
   for line in (preface .. "\n"):gmatch("([^\n]*)\n") do
@@ -127,44 +119,31 @@ local function assert_preface_fits(preface)
   end
   assert(#lines <= 32, "prompt_line prefaces must fit the core line-count limit")
 end
-assert_preface_fits(prompts[1].preface)
-assert(prompts[1].preface:gsub("\n", " ") == "Whoever controls the owner's Matrix account, or the homeserver that carries it, can type text into every agent session of this machine, and the session cannot tell that text from text typed at its keyboard. Such text counts as the owner's own instruction, including approvals.",
-  "typed-lines must print the complete warning from the UX note")
-assert(prompts[1].label:find("Type yes", 1, true), "typed-lines must ask for the word yes")
-prompts[1].callback("yes")
-assert(state.typed_lines == true and state.shell_lines == false and #writes == before_writes + 1,
-  "yes should enable only typed-lines")
-assert(pending ~= nil)
-
-state.typed_lines, state.shell_lines = false, false
-expect_refused({ "shell-lines", "on" }, nil, "typed-lines must be on")
-state.typed_lines = true
 local shell_pending = cli({ "shell-lines", "on" }, nil)
-assert(#prompts == 2, "enabling shell-lines should prompt")
-assert_preface_fits(prompts[2].preface)
-assert(prompts[2].preface:gsub("\n", " ") == "Whoever controls that account or homeserver can run shell commands on this machine as this user, with no review by anyone. It is remote command execution, bounded only by rules 1 to 8. Recommended only with the Matrix account protected as well as the machine's own login (device verification, a homeserver the owner runs or trusts).",
+assert(#prompts == 1, "enabling shell-lines should prompt")
+assert_preface_fits(prompts[1].preface)
+assert(prompts[1].preface:gsub("\n", " ") == "Whoever controls that account or homeserver can run shell commands on this machine as this user, with no review by anyone. It is remote command execution, bounded only by rules 1 to 8. Recommended only with the Matrix account protected as well as the machine's own login (device verification, a homeserver the owner runs or trusts).",
   "shell-lines must print the complete warning from the UX note")
-prompts[2].callback("yes")
-assert(state.shell_lines == true and #writes == before_writes + 2, "yes should enable shell-lines")
+prompts[1].callback("yes")
+assert(state.shell_lines == true and #writes == before_writes + 1, "yes should enable shell-lines")
 assert(shell_pending ~= nil)
 
 local prompt_count = #prompts
 local write_count = #writes
-cli({ "typed-lines", "off" }, nil)
-assert(state.typed_lines == false and state.shell_lines == false,
-  "turning typed-lines off must also turn shell-lines off")
+cli({ "shell-lines", "off" }, nil)
+assert(state.shell_lines == false, "shell-lines off turns only shell_lines off")
 assert(#prompts == prompt_count and #writes == write_count + 1,
   "turning switches off must write immediately without prompting")
 local written_file = assert(io.open(config_path, "rb"))
 local written_config = written_file:read("*a")
 written_file:close()
 local typed_count = 0
-for _ in written_config:gmatch("typed_lines=") do typed_count = typed_count + 1 end
-assert(typed_count == 1 and written_config:find("untrusted_per_room_hour=12", 1, true),
-  "the private switch writer must deduplicate switch keys and preserve other config lines")
+for _ in written_config:gmatch("shell_lines=") do typed_count = typed_count + 1 end
+assert(typed_count == 1 and written_config:find("typed_lines=false", 1, true)
+  and written_config:find("untrusted_per_room_hour=12", 1, true),
+  "the private switch writer must touch only its key and preserve other config lines")
 -- status-commands: default on, off is immediate, on asks for yes
 expect_refused({ "status-commands", "off" }, "agent-01", "operator-only")
-expect_refused({ "approve-text", "on" }, "agent-01", "operator-only")
 expect_refused({ "status-commands", "maybe" }, nil, "Usage:")
 prompt_count, write_count = #prompts, #writes
 assert(text(cli({ "status-commands", "on" }, nil)):find("already on", 1, true), "default is on")
@@ -172,7 +151,7 @@ assert(#prompts == prompt_count and #writes == write_count, "already on changes 
 cli({ "status-commands", "off" }, nil)
 assert(state.status_commands == false and #writes == write_count + 1 and #prompts == prompt_count,
   "off writes at once without a prompt")
-assert(state.typed_lines == false, "status-commands off leaves typed-lines alone")
+assert(state.shell_lines == false, "status-commands off leaves shell-lines alone")
 cli({ "status-commands", "on" }, nil)
 assert(#prompts == prompt_count + 1 and state.status_commands == false, "on prompts before writing")
 assert_preface_fits(prompts[#prompts].preface)
@@ -182,15 +161,6 @@ assert(state.status_commands == false, "anything but yes changes nothing")
 cli({ "status-commands", "on" }, nil)
 prompts[#prompts].callback("yes")
 assert(state.status_commands == true, "yes turns it on")
-local approve_pending = cli({ "approve-text", "on" }, nil)
-assert(#prompts == prompt_count + 3 and state.approve_text == false,
-  "approve-text on asks for owner confirmation before writing")
-assert(prompts[#prompts].preface:find("approve registered text", 1, true),
-  "approve-text warns that Matrix approval can type into sessions")
-prompts[#prompts].callback("yes")
-assert(state.approve_text == true and approve_pending ~= nil, "yes enables approve-text")
-cli({ "approve-text", "off" }, nil)
-assert(state.approve_text == false, "approve-text can be turned off immediately")
 written_file = assert(io.open(config_path, "rb"))
 written_config = written_file:read("*a")
 written_file:close()
@@ -198,7 +168,7 @@ local status_count = 0
 for _ in written_config:gmatch("status_commands=") do status_count = status_count + 1 end
 assert(status_count == 1, "the switch key is written once")
 
-state.typed_lines = false
+state.shell_lines = false
 local before_prompt_error_writes = #writes
 local failed_resolution
 local terminal_pending = remuda.pending
@@ -210,13 +180,13 @@ remuda.pending = function()
   return reply
 end
 prompt_error_to_throw = "prompt_line preface line 1 is too long"
-cli({ "typed-lines", "on" }, nil)
+cli({ "shell-lines", "on" }, nil)
 prompt_error_to_throw = nil
 assert(failed_resolution and failed_resolution.code == 1
   and failed_resolution.stderr:find("The typed-line switch prompt failed: prompt_line preface line 1 is too long. Nothing was changed.", 1, true),
   "prompt exceptions should explain the failure and confirm no change: "
     .. tostring(failed_resolution and failed_resolution.stderr))
-assert(#writes == before_prompt_error_writes and state.typed_lines == false,
+assert(#writes == before_prompt_error_writes and state.shell_lines == false,
   "a rejected prompt must not change the config")
 
 local command_rows, bridge_handler = {}, nil
@@ -251,13 +221,13 @@ remuda.pending = function()
   }
   return bridge_reply_object
 end
-local bridge_result = bridge_handler({ "typed-lines", "on" })
+local bridge_result = bridge_handler({ "shell-lines", "on" })
 assert(bridge_result == bridge_reply_object,
   "the real remuda butler command bridge must return the failed prompt reply, not fall through to usage")
 assert(bridge_resolution and bridge_resolution.code == 1
   and bridge_resolution.stderr == "The typed-line switch prompt failed: core prompt failure. Nothing was changed.\n",
   "the real command bridge must resolve prompt_line exceptions with exit 1 and a clear message")
-assert(#writes == before_prompt_error_writes and state.typed_lines == false,
+assert(#writes == before_prompt_error_writes and state.shell_lines == false,
   "a failed prompt through the command bridge must not change the config")
 for _, argv in ipairs({ { "on" }, { "off" }, { "request", "agent-1", "-" } }) do
   approve_text_args = nil
