@@ -272,6 +272,7 @@ local function load_main()
   local restore_capture, candidate_boundary = install_candidate_capture(preload_matrix,
     preload_request_pair(preload_matrix))
   local ok, err = pcall(function()
+    host.exec("butler/effective_name")
     host.exec("butler/system")
     system = assert(host._butler_system)
     host.exec("butler/main")
@@ -321,6 +322,7 @@ local function load_main()
   end
   runtime_refusal_only = false
   main_loaded = true
+
 end
 
 -- A stopped handle does not prove the old writer is gone. A future resource

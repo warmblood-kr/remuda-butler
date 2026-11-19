@@ -53,6 +53,8 @@ local function fixture(options)
       host._butler_system = {}
       return
     end
+    -- init.lua also loads the pure effective-name module before main.
+    if name == "butler/effective_name" then return end
     assert(name == "butler/main")
     loads = loads + 1
     if failing then error("injected main failure") end
@@ -294,6 +296,8 @@ test("a stale refusal marker cannot bypass a later malformed load", function()
   -- accepted as this load's guard decision.
   host.exec = function(name)
     if name == "butler/system" then host._butler_system = {}; return end
+    -- init.lua also loads the pure effective-name module before main.
+    if name == "butler/effective_name" then return end
     assert(name == "butler/main")
     host.butler = { dialogs = { install = function() end, stop = function() end },
       native_dispatch = { admit = function() end }, matrix = {} }
@@ -304,6 +308,8 @@ test("a stale refusal marker cannot bypass a later malformed load", function()
   -- Corrected active graph on the same host still validates.
   host.exec = function(name)
     if name == "butler/system" then host._butler_system = {}; return end
+    -- init.lua also loads the pure effective-name module before main.
+    if name == "butler/effective_name" then return end
     assert(name == "butler/main")
     publish_graph(host)
   end
@@ -628,6 +634,8 @@ test("boolean test-mode load is an explicit partial image", function()
   local host, _, _, emits = fixture({ test_mode = true })
   host.exec = function(name)
     if name == "butler/system" then host._butler_system = {}; return end
+    -- init.lua also loads the pure effective-name module before main.
+    if name == "butler/effective_name" then return end
     assert(name == "butler/main")
     -- main.lua returns before policy/native/notice/matrix in boolean mode.
     host.butler = host.butler or {}
@@ -656,6 +664,8 @@ test("a direct start constructs only the restricted partial image", function()
   local host, _, _, emits = fixture({ test_mode = true })
   host.exec = function(name)
     if name == "butler/system" then host._butler_system = {}; return end
+    -- init.lua also loads the pure effective-name module before main.
+    if name == "butler/effective_name" then return end
     assert(name == "butler/main")
     host.butler = host.butler or {}
   end
