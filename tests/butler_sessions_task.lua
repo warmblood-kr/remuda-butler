@@ -146,4 +146,91 @@ assert(#bounded <= 67, "bounded title must stay short: " .. #bounded)
 assert(bounded:sub(-3) == "…", "a truncated title must carry the marker")
 assert(not bounded:find("\239\191\189", 1, true), "truncation must not split UTF-8")
 
+-- The age comes from the report time on every render, with the daemon's
+-- monotonic age as a floor. The test clock advances by 3 s per render to pass
+-- the 2 s status cache.
+local clock = 2000
+remuda._butler_status_now = function() return clock end
+local function render()
+  clock = clock + 3
+  return remuda._butler_sessions()
+end
+local function set_row_at(state, age, at, title)
+  rows = { {
+    name = "work",
+    instance_id = "inst-1",
+    program_status = { state = state, app = "opencode", title = title, last_updated_at = at },
+    program_status_age = age,
+  } }
+end
+
+set_agent("inst-1")
+
+-- Canonical case: the age is derived from the report time, so it grows between
+-- renders even when the snapshot age does not change (a cached row ages out).
+local frozen = clock
+set_row_at("working", 5, frozen - 596, "Cached row ages")
+expect("cached row fresh within the limit", task_for(render(), "work"), "Cached row ages")
+expect("cached row ages out from the timestamp", task_for(render(), "work"), "-")
+
+-- A timestamp older than the limit wins over a fresh snapshot age.
+set_row_at("working", 5, clock - 700, "Old report time")
+expect("old timestamp is not fresh", task_for(render(), "work"), "-")
+
+-- A fresh wall clock cannot resurrect a stale monotonic age (clock rollback).
+set_row_at("working", 700, clock, "Wall clock says fresh")
+expect("stale monotonic age is not fresh", task_for(render(), "work"), "-")
+
+-- A report in the current second is not from the future.
+set_row_at("working", 5, clock + 0.6, "Same second")
+expect("sub-second timestamp stays fresh", task_for(render(), "work"), "Same second")
+
+-- A timestamp ahead of the clock is not evidence, even with a fresh age.
+set_row_at("working", 5, clock + 120, "Future timestamp")
+expect("future timestamp is not fresh", task_for(render(), "work"), "-")
+
+-- A non-positive timestamp is not usable.
+set_row_at("working", 5, -1, "Negative timestamp")
+expect("negative timestamp is not fresh", task_for(render(), "work"), "-")
+
+-- A future timestamp as the only evidence is unknown.
+rows = { {
+  name = "work",
+  instance_id = "inst-1",
+  program_status = { state = "working", app = "opencode", title = "Future only", last_updated_at = clock + 60 },
+} }
+expect("future timestamp only is not fresh", task_for(render(), "work"), "-")
+
+-- The roster relists on every render: a grown snapshot age hides the task even
+-- with an unchanged report time.
+set_row_at("working", 5, clock, "Relist re-reads the age")
+expect("fresh age shows the task", task_for(render(), "work"), "Relist re-reads the age")
+rows[1].program_status_age = 601
+expect("relist sees the grown age", task_for(render(), "work"), "-")
+
+-- A malformed timestamp fails closed even with a fresh age.
+set_row_at("working", 5, "not-a-time", "Malformed timestamp")
+expect("malformed timestamp is not fresh", task_for(render(), "work"), "-")
+
+-- An old core with no timestamp still uses the monotonic age.
+rows = { {
+  name = "work",
+  instance_id = "inst-1",
+  program_status = { state = "working", app = "opencode", title = "Old core row" },
+  program_status_age = 10,
+} }
+expect("missing timestamp falls back to age", task_for(render(), "work"), "Old core row")
+
+rows = { {
+  name = "work",
+  instance_id = "inst-1",
+  program_status = { state = "working", app = "opencode", title = "No evidence" },
+} }
+expect("missing age is not fresh", task_for(render(), "work"), "-")
+
+set_row_at("blocked", 5, clock, "Permission by age")
+expect("blocked fresh by age", task_for(render(), "work"), "Permission by age")
+set_row_at("blocked", 3601, clock, "Stale blocked")
+expect("blocked age limit", task_for(render(), "work"), "-")
+
 print("butler sessions task: ok")

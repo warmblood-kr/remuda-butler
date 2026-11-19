@@ -474,6 +474,32 @@ local function clean_task(text)
   if text == "" then return nil end
   return truncate_utf8(text, OSC_TASK_MAX_BYTES)
 end
+-- The age is computed from the report time on every render, so a row that
+-- outlives its list keeps aging; the daemon's monotonic age is a separate
+-- floor, so a wall clock that steps backwards cannot make it look young. The
+-- larger of the two decides freshness, and a report time that is present but
+-- unusable (future, non-positive, unparsable) fails closed. Only an absent
+-- report time falls back to the monotonic age alone (an older core).
+local function report_age(row, status)
+  local monotonic = row.program_status_age
+  if type(monotonic) ~= "number" or monotonic ~= monotonic
+    or monotonic == math.huge or monotonic < 0 then
+    return nil
+  end
+  local raw = type(status) == "table" and status.last_updated_at
+  if raw == nil then return monotonic end
+  local at = tonumber(raw)
+  if not at or at ~= at or at == math.huge or at <= 0 then return nil end
+  local now = (remuda._butler_status_now or os.time)()
+  -- os.time() is whole seconds while the report time carries milliseconds:
+  -- same-second reports must not read as if they came from the future.
+  if at > now + 1 then return nil end
+  return math.max(monotonic, now - at)
+end
+local function report_fresh(row, status, limit)
+  local age = report_age(row, status)
+  return age ~= nil and age <= limit
+end
 -- The task is shown only while the same report is fresh. Working/blocked are
 -- the states where a title describes current work; idle/done/error titles are
 -- stale context, not a current task.
@@ -483,10 +509,7 @@ function osc_task(row)
   local state = status.state
   if state ~= "working" and state ~= "blocked" then return nil end
   local limit = OSC_ACTIVITY_MAX_AGE[state]
-  local age = row.program_status_age
-  if type(age) ~= "number" or age ~= age or age == math.huge or age < 0 or age > limit then
-    return nil
-  end
+  if not report_fresh(row, status, limit) then return nil end
   if type(status.title) ~= "string" then return nil end
   return clean_task(status.title)
 end
@@ -499,10 +522,7 @@ local function osc_activity(session)
   -- Missing or malformed age is unknown, never fresh. NaN and infinities must
   -- not slip through the comparisons.
   if not activity or not limit then return nil end
-  local age = session.program_status_age
-  if type(age) ~= "number" or age ~= age or age == math.huge or age < 0 or age > limit then
-    return nil
-  end
+  if not report_fresh(session, status, limit) then return nil end
   return activity
 end
 -- `remuda.session_detail` is also called with just {name=...}; find the live
