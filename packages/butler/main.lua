@@ -1355,6 +1355,11 @@ bus.agents.butler = existing_butler or {
 }
 bus.agents.butler.id = root_identity.id
 bus.agents.butler.alias = "butler"
+-- The root always launches in the Butler session directory, so its working
+-- directory is knowable and durable: an explicit replacement rebuilds the same
+-- workdir instead of demanding one from the operator. Keep a recorded value
+-- when this image cannot compute the path (docs/concepts/butler-session-recovery.md).
+bus.agents.butler.cwd = bus.agents.butler.cwd or butler_session_cwd
 bus.agents.butler.session_name = bus.agents.butler.session_name or "butler"
 bus.agents.butler.session_start_marker = remuda._butler_new_ulid()
 -- Carry the verified binding of the same root (the sweep above kept it only if row and record were proven).

@@ -68,19 +68,14 @@ T.test("the decision names the exact instance and reuses the identity", function
   T.eq(state.roster_instance, state.instance,
     "the roster binds the root to the live instance: " .. tostring(state.roster_instance)
       .. " vs " .. tostring(state.instance))
-  -- The root's roster row has no cwd today (it is launched in the daemon's),
-  -- so the decision refuses instead of inventing one; an explicit --workdir
-  -- stands in for it, exactly as the operator would supply it.
-  local refused = fields(decide("butler", state.instance, "unreachable = true,"))
-  T.eq(refused[1], "REFUSED", "a missing workdir is refused, not guessed")
-  T.eq(refused[2], "workdir_missing", "the refusal code names the missing field")
-  local out = fields(decide("butler", state.instance, 'unreachable = true, workdir = "/srv/butler",'))
+  T.ok(state.cwd ~= "", "the root's durable roster row carries its workdir")
+  local out = fields(decide("butler", state.instance, "unreachable = true,"))
   T.eq(out[1], "PLAN", "the decision produced a plan: " .. tostring(out[3]))
   T.eq(out[2], state.instance, "the plan carries the exact instance")
   T.eq(out[3], state.id, "the plan reuses the durable id")
   T.eq(out[4], "butler", "the logical alias is unchanged")
   T.eq(out[5], state.kind, "the agent kind comes from the roster")
-  T.eq(out[6], "/srv/butler", "the explicit workdir stands in for the missing one")
+  T.eq(out[6], state.cwd, "the workdir comes from the roster, with no operator override")
   T.eq(out[7], "true", "the operator's declaration is recorded")
   T.eq(out[8], "nil", "the root has no leader")
 end)
@@ -89,7 +84,7 @@ T.test("the plan states the identity it keeps and the losses it cannot avoid", f
   local state = root_state()
   local text = T.eval(("return (function()\n"
     .. "  local plan = assert(remuda._butler_session_recovery.decide({\n"
-    .. "    name = 'butler', instance_id = %q, unreachable = true, workdir = '/srv/butler',\n"
+    .. "    name = 'butler', instance_id = %q, unreachable = true,\n"
     .. "    rows = remuda.ls(), roster = remuda._butler_roster.load() }))\n"
     .. "  return remuda._butler_session_recovery.render(plan)\n"
     .. "end)()"):format(state.instance))
@@ -105,13 +100,13 @@ end)
 
 T.test("a different instance, a missing declaration and an unknown name are refused", function()
   local state = root_state()
-  local mismatch = fields(decide("butler", "not-" .. state.instance, 'unreachable = true, workdir = "/srv/butler",'))
+  local mismatch = fields(decide("butler", "not-" .. state.instance, "unreachable = true,"))
   T.eq(mismatch[1], "REFUSED", "a mismatched instance is refused")
   T.eq(mismatch[2], "instance_mismatch", "the refusal code names the fence")
   T.ok(tostring(mismatch[3]):find("runs as instance", 1, true) ~= nil,
     "the refusal names the real instance: " .. tostring(mismatch[3]))
 
-  local undeclared = fields(decide("butler", state.instance, 'workdir = "/srv/butler",'))
+  local undeclared = fields(decide("butler", state.instance))
   T.eq(undeclared[1], "REFUSED", "no --unreachable is refused")
   T.eq(undeclared[2], "declaration_required", "the refusal asks for the declaration")
 
@@ -120,9 +115,24 @@ T.test("a different instance, a missing declaration and an unknown name are refu
   T.eq(absent[2], "no_session", "the refusal says the session is absent")
 end)
 
+T.test("a missing workdir is still refused, not guessed", function()
+  local state = root_state()
+  local out = fields(T.eval(("return (function()\n"
+    .. "  local rows = remuda.ls()\n"
+    .. "  local roster = remuda._butler_roster.load()\n"
+    .. "  for _, item in ipairs(roster) do if item.alias == 'butler' then item.cwd = nil end end\n"
+    .. "  local plan, why = remuda._butler_session_recovery.decide({ name = 'butler',\n"
+    .. "    instance_id = %q, unreachable = true, rows = rows, roster = roster })\n"
+    .. "  if plan then return 'PLAN' end\n"
+    .. "  return 'REFUSED|' .. tostring(why.code)\n"
+    .. "end)()"):format(state.instance)))
+  T.eq(out[1], "REFUSED", "a absent workdir does not become a plan")
+  T.eq(out[2], "workdir_missing", "the refusal names the missing field")
+end)
+
 T.test("deciding changes nothing: the root is still the same live instance", function()
   local before = root_state()
-  decide("butler", before.instance, 'unreachable = true, workdir = "/srv/butler",')
+  decide("butler", before.instance, "unreachable = true,")
   local after = root_state()
   T.eq(after.instance, before.instance, "the instance is unchanged")
   T.eq(after.alive, "true", "the root is still alive")
