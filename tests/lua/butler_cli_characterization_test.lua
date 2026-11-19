@@ -523,7 +523,9 @@ families {
       agent("request-text-approval", "agent-test"),
       agent("request-text-approval"),
       agent("request-text-approval", "--help"),
+      agent("request-text-approval", "request", "--help"),
       agent("approve-text", "--help"),
+      agent("approve-text", "request", "--help"),
       agent("approve-text"),
     } },
 }

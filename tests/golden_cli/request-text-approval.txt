@@ -71,7 +71,27 @@ stderr:
 actions:
 state: 
 
+### [agent] remuda butler "request-text-approval" "request" "--help"
+exit: 0
+stdout:
+  remuda butler request-text-approval SESSION -
+  The text is read from stdin; the alias form is
+  remuda butler approve-text request SESSION -
+stderr:
+
+actions:
+state: 
+
 ### [agent] remuda butler "approve-text" "--help"
+exit: 0
+stdout:
+  remuda butler approve-text request SESSION -
+stderr:
+
+actions:
+state: 
+
+### [agent] remuda butler "approve-text" "request" "--help"
 exit: 0
 stdout:
   remuda butler approve-text request SESSION -
