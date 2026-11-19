@@ -82,7 +82,7 @@ T.test("approvals declared parsing leaves state untouched for help and malformed
   both_approval({ "approvals" }, "OK:No open approval requests.\nNext: nothing to do; agent requests appear here.|open:0:1")
   for _, args in ipairs({ { "approvals", "--help" }, { "approvals", "-h" } }) do
     local result = approval_case(true, args)
-    T.ok(result:find("OK:List open approval requests.", 1, true)
+    T.ok(result:find("OK:List open and in-flight approval requests.", 1, true)
         and result:find("Usage: remuda butler approvals", 1, true)
         and result:match("|open:0:0$"), "generated approval help is side-effect free")
     T.eq(approval_case(false, args), result, "same declared help when public parser table is absent")
@@ -93,7 +93,7 @@ T.test("approvals declared parsing leaves state untouched for help and malformed
     T.ok(result:match("|open:0:0$"), "no list or decision on parse failure")
     T.eq(approval_case(false, args), result, "fallback result for " .. table.concat(args, " "))
   end
-  T.ok(approval_case(true, { "approvals", "--help", "extra" }):find("OK:List open approval requests.", 1, true),
+  T.ok(approval_case(true, { "approvals", "--help", "extra" }):find("OK:List open and in-flight approval requests.", 1, true),
     "parser help takes priority over later arguments")
   T.ok(approval_case(true, { "approvals", "--" }):match("|open:0:1$"), "bare separator leaves zero-argument list valid")
 end)
