@@ -50,49 +50,39 @@ T.test("switches preserve usage, gate order and side-effect-free parse", functio
     local real_fail = remuda.fail
     remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
   ]]
-  local malformed = run_command(true, "typed-lines", { "typed-lines", "maybe" }, agent, capture)
-  T.ok(malformed:find("Usage: remuda butler typed%-lines"), "invalid values include parser-generated switch usage: " .. malformed)
+  local malformed = run_command(true, "shell-lines", { "shell-lines", "maybe" }, agent, capture)
+  T.ok(malformed:find("Usage: remuda butler shell%-lines"), "invalid values include parser-generated switch usage: " .. malformed)
   for _, parser in ipairs({ true, false }) do
-    local result = run_command(parser, "typed-lines", { "typed-lines", "on" }, agent, [[
+    local result = run_command(parser, "shell-lines", { "shell-lines", "on" }, agent, [[
       remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
     ]])
-    T.ok(result:find("typed%-lines is operator%-only"), "authorization follows valid parsing")
-    local no_config = run_command(parser, "typed-lines", { "typed-lines", "off" }, '{ kind = "outside" }', [[
+    T.ok(result:find("shell%-lines is operator%-only"), "authorization follows valid parsing")
+    local no_config = run_command(parser, "shell-lines", { "shell-lines", "off" }, '{ kind = "outside" }', [[
       remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
       remuda._butler_matrix_config = {}
     ]])
     T.ok(no_config:find("Matrix is not configured"), "configuration is checked after parsing")
-    local dependency = run_command(parser, "shell-lines", { "shell-lines", "on" }, '{ kind = "outside" }', [[
-      local reads, writes = 0, 0
-      remuda._butler_matrix_config = { config_path = "/synthetic/config" }
-      remuda.butler.matrix.read_config = function() reads = reads + 1; return { typed_lines = false, shell_lines = false } end
-      remuda.fs.write_atomic = function(target) if target == "/synthetic/config" then writes = writes + 1 end; return true end
-      remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
-      remuda._pr2_switch_counts = function() return reads .. ":" .. writes end
-    ]])
-    T.ok(dependency:find("typed%-lines must be on before shell%-lines"), "dependency check follows parse/config")
-    T.ok(dependency:find("|1:0$"), "dependency gate reads config but does not write it")
-    local already = run_command(parser, "typed-lines", { "typed-lines", "on" }, '{ kind = "outside" }', [[
+    local already = run_command(parser, "shell-lines", { "shell-lines", "on" }, '{ kind = "outside" }', [[
       local reads = 0
       remuda._butler_matrix_config = { config_path = "/synthetic/config" }
-      remuda.butler.matrix.read_config = function() reads = reads + 1; return { typed_lines = true, shell_lines = false } end
+      remuda.butler.matrix.read_config = function() reads = reads + 1; return { shell_lines = true } end
       remuda._pr2_switch_counts = function() return reads .. ":0" end
       remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
     ]])
-    T.eq(already, "true|typed-lines is already on.|1:0", "already-on remains after one config read")
+    T.eq(already, "true|shell-lines is already on.|1:0", "already-on remains after one config read")
   end
   for _, parser in ipairs({ true, false }) do
-    local extra = run_command(parser, "typed-lines", { "typed-lines", "on", "extra" }, agent, [[
+    local extra = run_command(parser, "shell-lines", { "shell-lines", "on", "extra" }, agent, [[
       local reads = 0
       remuda._butler_matrix_config = { config_path = "/synthetic/config" }
       remuda.butler.matrix.read_config = function() reads = reads + 1; return {} end
       remuda._pr2_switch_counts = function() return reads .. ":0" end
       remuda.fail = function(message, code) return { failed = true, code = code, text = message } end
     ]])
-    T.ok(extra:find("Usage: remuda butler typed%-lines"), "extra arguments are rejected before the operator gate: " .. extra)
+    T.ok(extra:find("Usage: remuda butler shell%-lines"), "extra arguments are rejected before the operator gate: " .. extra)
     T.ok(extra:find("|0:0$"), "invalid parsing does not read or write switch state")
   end
-  for _, verb in ipairs({ "typed-lines", "shell-lines", "status-commands" }) do
+  for _, verb in ipairs({ "shell-lines", "status-commands" }) do
     for _, state in ipairs({ "on", "off" }) do
       local path = assert(os.getenv("REMUDA_LUA_SCRATCH")) .. "/pr2-" .. verb .. "-" .. state .. ".conf"
       local make_case = function(parser)
@@ -120,7 +110,7 @@ T.test("switches preserve usage, gate order and side-effect-free parse", functio
         T.ok(current:find("|3:1$"), verb .. " on reads and writes only after confirmation")
         T.ok(fallback:find("|3:1$"), verb .. " fallback on has the same actions")
       else
-        T.eq(current, "true|" .. verb .. " is now off." .. (verb == "typed-lines" and " shell-lines is also off." or "") .. "|2:1")
+        T.eq(current, "true|" .. verb .. " is now off.|2:1")
         T.eq(fallback, current, verb .. " off is identical without the parser")
       end
     end
