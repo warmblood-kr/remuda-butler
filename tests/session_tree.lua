@@ -20,6 +20,15 @@ local function displayed_rows(output)
   for line in output:gmatch("[^\n]+") do rows[#rows + 1] = line end
   return rows
 end
+local function assert_row(line, name, agent, leader, activity, task)
+  local fields = {}
+  for field in (line .. "\t"):gmatch("(.-)\t") do fields[#fields + 1] = field end
+  assert_equal(fields[1], name, "row name: " .. line)
+  assert_equal(fields[2], agent, "row agent: " .. line)
+  assert_equal(fields[3], leader, "row leader: " .. line)
+  assert_equal((fields[4]:gsub("%s+$", "")), activity, "row activity: " .. line)
+  assert_equal(fields[5], task or "-", "row task: " .. line)
+end
 
 local real_detail = remuda.session_detail
 remuda.session_detail = function(session)
@@ -32,18 +41,18 @@ local rows = displayed_rows(fixture({
   {"alpha", "codex", "root"},
   {"worker", "codex", "alpha"},
 }))
-assert_equal(rows[1], "SESSION\tAGENT\tLEADER\tACTIVITY", "roster header")
-assert_equal(rows[2], "root\tclaude\t-\tidle", "root row")
+assert_equal(rows[1], "SESSION\tAGENT\tLEADER\tACTIVITY\tTASK", "roster header")
+assert_row(rows[2], "root", "claude", "-", "😴 idle")
 -- View policy: a root (butler) and its direct children sit at the margin;
 -- indentation starts at grandchildren (indent = max(0, depth - 1)).
-assert_equal(rows[3], "alpha\tcodex\troot\tworking", "direct child stays at the margin")
-assert_equal(rows[4], "  worker\tcodex\talpha\tneeds you", "grandchild is the first indented row")
-assert_equal(rows[5], "zeta\tclaude\troot\tother", "sorted second child")
+assert_row(rows[3], "alpha", "codex", "root", "🏃 working")
+assert_row(rows[4], "  worker", "codex", "alpha", "🙋 needs you")
+assert_row(rows[5], "zeta", "claude", "root", "other")
 remuda.session_detail = real_detail
 
 remuda.session_detail = function() error("adapter unavailable") end
 rows = displayed_rows(fixture({ {"unknown", "claude"} }))
-assert_equal(rows[2], "unknown\tclaude\t-\tother", "status failures remain explicitly unknown")
+assert_row(rows[2], "unknown", "claude", "-", "other")
 remuda.session_detail = real_detail
 
 -- The client's session pane asks the same tree for its order (core's
@@ -68,13 +77,13 @@ rows = displayed_rows(fixture({
   {"cycle-a", "claude", "cycle-b"},
   {"cycle-b", "codex", "cycle-a"},
 }))
-assert_equal(rows[2], "root-a\tclaude\t-\tother", "roots are sorted")
-assert_equal(rows[3], "root-b\tcodex\t-\tother", "all roots are rendered")
+assert_row(rows[2], "root-a", "claude", "-", "other")
+assert_row(rows[3], "root-b", "codex", "-", "other")
 local found_orphan, found_cycle_a, found_cycle_b = false, false, false
 local seen = {}
 for _, line in ipairs(rows) do
   assert(line ~= "", "roster contains a blank row")
-  if line == "[orphan] orphan\tcodex\tMISSING_PARENT\tother" then found_orphan = true end
+  if line:match("^%[orphan%] orphan\tcodex\tMISSING_PARENT\t") and line:find("other", 1, true) then found_orphan = true end
   if line:find("cycle-a", 1, true) then found_cycle_a = true end
   if line:find("cycle-b", 1, true) then found_cycle_b = true end
   local display = line:match("^[^\t]+")
@@ -122,8 +131,8 @@ for depth = 1, 26 do deep[#deep + 1] = {"depth-" .. depth, "codex", "depth-" .. 
 rows = displayed_rows(fixture(deep))
 assert_equal(#rows, 28, "header plus all 27 agents")
 for index = 2, #rows do
-  local alias, kind, leader, activity = rows[index]:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
-  assert(alias and kind and leader and activity, "compact four-column row: " .. rows[index])
+  local alias, kind, leader, activity, task = rows[index]:match("^([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)\t([^\t]*)$")
+  assert(alias and kind and leader and activity and task, "compact five-column row: " .. rows[index])
   local indent = #(alias:match("^ *"))
   assert(indent <= 40 and indent % 2 == 0, "bounded two-space indentation")
   assert(not kind:match("^ ") and not leader:match("^ "), "only session display column is indented")

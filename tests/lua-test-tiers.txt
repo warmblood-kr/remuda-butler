@@ -77,6 +77,7 @@ deep tests/butler_schedule_cli.lua
 deep tests/butler_simple_inbox_acceptance.lua
 deep tests/butler_send_policy_closure.lua
 deep tests/butler_session_status.lua
+fast tests/butler_sessions_task.lua
 deep tests/butler_status_command.lua
 deep tests/butler_status_hook.lua
 deep tests/butler_status_switch.lua
