@@ -173,6 +173,17 @@ set_row_at("working", 5, frozen - 596, "Cached row ages")
 expect("cached row fresh within the limit", task_for(render(), "work"), "Cached row ages")
 expect("cached row ages out from the timestamp", task_for(render(), "work"), "-")
 
+-- Acceptance: only time passes between renders. The row and its snapshot age
+-- stay unchanged, and the age derived from the absolute report time must grow
+-- until the task disappears.
+local base = clock
+set_row_at("working", 0, base - 100, "Absolute age grows")
+expect("100 s report is fresh", task_for(render(), "work"), "Absolute age grows")
+clock = clock + 450
+expect("same row stays fresh just under the limit", task_for(render(), "work"), "Absolute age grows")
+clock = clock + 60
+expect("same row is stale past the limit", task_for(render(), "work"), "-")
+
 -- A timestamp older than the limit wins over a fresh snapshot age.
 set_row_at("working", 5, clock - 700, "Old report time")
 expect("old timestamp is not fresh", task_for(render(), "work"), "-")
