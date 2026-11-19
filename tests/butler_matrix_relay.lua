@@ -13,12 +13,19 @@ remuda.butler = { matrix = {} }
 -- later groups get the same default at load time.
 remuda._butler_new_ulid = remuda._butler_new_ulid or function() return "01TESTULID" end
 remuda._relay_timers = {}
+remuda.schedules = remuda.schedules or {}
 function remuda.schedule(spec)
   local timer = { spec = spec, cancelled = false }
   remuda._relay_timers[#remuda._relay_timers + 1] = timer
+  remuda.schedules[timer] = true
   return timer
 end
-function remuda.cancel(timer) if timer then timer.cancelled = true end end
+function remuda.cancel(timer)
+  if timer then
+    timer.cancelled = true
+    remuda.schedules[timer] = nil
+  end
+end
 local matrix = dofile("packages/butler/matrix_request.lua")
 -- Install shared matrix helpers without using the installed package loader;
 -- this suite loads its fake transport modules directly from the worktree.
@@ -91,6 +98,74 @@ local function scripted_client()
     callback(value)
   end
   return client
+end
+
+-- The reload admission barrier reads relay.owner_proven(): a live writer, or a
+-- teardown that could not clear a scheduled handle, is not proof. Red before
+-- the owner registry existed (the field was nil), green after.
+(function()
+  assert(relay_module.owner_proven(), "a cold relay image has nothing to prove")
+  local dir, config_path = fixture("typed_lines=false\nshell_lines=false\n")
+  local client = scripted_client()
+  local relay = relay_module.new({ config_path = config_path, matrix = client,
+    deliver = function() return true end })
+  relay_module.instance = relay
+  relay:start()
+  client:complete(1, { json = { next_batch = "s0" } })
+  assert(relay_module.owner_proven() == false, "a live writer is not owner proof")
+  relay:stop()
+  relay_module.instance = nil
+  assert(relay_module.owner_proven(), "a verified stop proves the previous owner gone")
+
+  -- A cancellation that did not land leaves a hidden writer; the barrier must
+  -- stay closed until a retried stop can verify every handle.
+  local second_client = scripted_client()
+  local second = relay_module.new({ config_path = config_path, matrix = second_client,
+    deliver = function() return true end })
+  relay_module.instance = second
+  second:start()
+  -- Fail the outstanding request so the relay arms its retry timer.
+  local completed = 0
+  for _ = 1, 4 do
+    if #second_client.requests <= completed then break end
+    completed = completed + 1
+    second_client:complete(completed, { error = "offline" })
+  end
+  local saved_cancel = remuda.cancel
+  remuda.cancel = function(timer) if timer then timer.cancelled = true end end
+  second:stop()
+  remuda.cancel = saved_cancel
+  assert(relay_module.owner_proven() == false, "an unverified stop must fail closed")
+  second:stop()
+  relay_module.instance = nil
+  assert(relay_module.owner_proven(), "a retried stop proves the owner")
+
+  -- A core without the schedule registry cannot prove cancellation.
+  local third_client = scripted_client()
+  local third = relay_module.new({ config_path = config_path, matrix = third_client,
+    deliver = function() return true end })
+  relay_module.instance = third
+  third:start()
+  third_client:complete(1, { error = "offline" })
+  local saved_schedules, saved_cancel = remuda.schedules, remuda.cancel
+  remuda.schedules = nil
+  -- Keep cancel independent of the registry so the early type branch is what
+  -- proves fail-closed, not a throwing stub.
+  remuda.cancel = function(timer) if timer then timer.cancelled = true end end
+  third:stop()
+  remuda.cancel = saved_cancel
+  assert(relay_module.owner_proven() == false, "a core without the registry fails closed")
+  remuda.schedules = saved_schedules
+  third:stop()
+  relay_module.instance = nil
+  assert(relay_module.owner_proven(), "a retried stop with the registry proves the owner")
+  cleanup_fixture(dir, config_path)
+end)()
+-- BMR_OWNER_ONLY=1 stops after the owner-proof case, so this contract can be
+-- red/green checked on a core that is newer than the pinned CORE_REF.
+if os.getenv("BMR_OWNER_ONLY") then
+  print("ok: relay owner proof")
+  return
 end
 
 remuda._mq_now = 0

@@ -30,6 +30,31 @@ assert(matrix.delivery_policy, "load butler/matrix_delivery_policy before butler
 local json = assert(remuda.json, "Matrix requires core remuda.json")
 local relay = matrix.relay or {}
 matrix.relay = relay
+-- Relay owner registry, shared by every load of this image. A load may restart
+-- the relay only after the previous writer proves it stopped: a live instance
+-- or a schedule handle that survived its stop is a hidden writer, so the entry
+-- stays registered and the admission barrier reports owner_unknown instead of
+-- racing a second poll loop. A cold image has nothing to prove.
+local owners = remuda._butler_relay_owners
+if type(owners) ~= "table" or type(owners.live) ~= "table" then
+  owners = { live = {}, verified = true }
+  remuda._butler_relay_owners = owners
+end
+-- A cancelled handle must also leave the core registry. Without that registry
+-- the teardown cannot be verified, so it fails closed: an older core keeps the
+-- relay stopped rather than risk a second writer.
+local function owner_timers_gone(timers)
+  local schedules = remuda.schedules
+  if type(schedules) ~= "table" then return false end
+  for _, timer in ipairs(timers) do
+    if timer ~= nil and schedules[timer] ~= nil then return false end
+  end
+  return true
+end
+-- Reach the registry through the module table the relay already captures:
+-- relay.new is at LuaJIT's 60-upvalue limit and must not gain another local.
+matrix._relay_owner_registry = owners
+matrix._relay_owner_timers_gone = owner_timers_gone
 function relay.approval_room_for_config(cfg)
   if type(cfg) ~= "table" then return nil end
   if cfg.approval_room == "home" then return cfg.home_room end
@@ -3017,6 +3042,8 @@ function relay.new(options)
     live_sync_ready = false
     notification_rooms, notification_full_state = {}, true
     active = true
+    matrix._relay_owner_registry.live[self] = true
+    matrix._relay_owner_registry.verified = false
     remuda._butler_matrix_live_config = cfg
     if approval and type(approval.reapply_approved) == "function" then approval.reapply_approved() end
     if approval and type(approval.sweep) == "function" and type(remuda.schedule) == "function" then
@@ -3054,17 +3081,27 @@ function relay.new(options)
       if token.handle and token.handle.cancel then pcall(function() token.handle:cancel() end) end
     end
     reply_in_flight = {}
-    if retry_timer then pcall(remuda.cancel, retry_timer) end
-    if backfill_timer then pcall(remuda.cancel, backfill_timer) end
-    if approval_timer then pcall(remuda.cancel, approval_timer) end
-    for _, timer in pairs(delivery_retry_timers) do pcall(remuda.cancel, timer) end
-    for _, timer in pairs(reply_retry_timers) do pcall(remuda.cancel, timer) end
+    local timers = { retry_timer, backfill_timer, approval_timer }
+    for _, timer in pairs(delivery_retry_timers) do timers[#timers + 1] = timer end
+    for _, timer in pairs(reply_retry_timers) do timers[#timers + 1] = timer end
+    local cancelled = true
+    for _, timer in ipairs(timers) do
+      if timer ~= nil and not pcall(remuda.cancel, timer) then cancelled = false end
+    end
     for _, handle in pairs(context_fetch_handles) do
       if handle and handle.cancel then pcall(function() handle:cancel() end) end
     end
-    delivery_retry_timers, delivery_retry_waiting, reply_retry_timers = {}, {}, {}
     context_fetching, context_fetch_handles = {}, {}
-    retry_timer, backfill_timer, approval_timer = nil, nil, nil
+    if cancelled and matrix._relay_owner_timers_gone(timers) then
+      delivery_retry_timers, delivery_retry_waiting, reply_retry_timers = {}, {}, {}
+      retry_timer, backfill_timer, approval_timer = nil, nil, nil
+      matrix._relay_owner_registry.live[self] = nil
+      matrix._relay_owner_registry.verified = true
+    else
+      -- Keep the handles so a direct retry can verify them; the entry stays
+      -- registered, so the admission barrier stays closed.
+      matrix._relay_owner_registry.verified = false
+    end
     return true
   end
 
@@ -3127,6 +3164,16 @@ function relay.stop()
   relay.instance:stop()
   relay.instance = nil
   return true
+end
+
+-- Positive owner proof for the reload admission barrier: no writer is
+-- registered and the last teardown cleared every scheduled handle. A live
+-- instance or an unverified stop keeps this false, so a candidate relay never
+-- starts beside a possible hidden writer.
+function relay.owner_proven()
+  local owners = matrix._relay_owner_registry
+  if type(owners) ~= "table" or next(owners.live) ~= nil then return false end
+  return owners.verified == true
 end
 
 function matrix.quarantine_list()
