@@ -1311,6 +1311,7 @@ end
 remuda._butler_roster_config = { bus = bus, data_home = data_home, new_ulid = remuda._butler_new_ulid,
   next_token = next_token }
 remuda.exec("butler/roster")
+remuda.exec("butler/session_recovery")
 local roster = remuda._butler_roster
 local adopted_ok, adopted_on_start = pcall(roster.adopt, remuda.ls())
 if not adopted_ok then
