@@ -608,6 +608,11 @@ local REQUEST_TEXT_APPROVAL_USAGE = "  remuda butler request-text-approval SESSI
   .. "  remuda butler approve-text request SESSION -"
 -- The parser's first word is its verb, so prepend `request` when the direct
 -- primary form omits it. The alias already carries the word.
+-- `--help` must work for an anonymous caller; every other form resolves the
+-- caller first, so an unidentified caller is refused before argument validity.
+local function request_text_approval_help(argv)
+  return argv[2] == "--help" or argv[2] == "-h"
+end
 local function request_text_approval_rest(args)
   local rest = {}
   for i = 2, #args do rest[#rest + 1] = args[i] end
@@ -619,13 +624,20 @@ local function request_text_approval_argv(args)
   return argv
 end
 command(19, "request-text-approval", "  remuda butler request-text-approval SESSION -", function(args, caller)
+  if not request_text_approval_help(args) then current_agent(caller) end
   local report = cli_parser(REQUEST_TEXT_APPROVAL_CLI_SPEC, request_text_approval_argv(args))
   if report and report.kind == "help" then return REQUEST_TEXT_APPROVAL_USAGE end
   if report and not report.ok then return remuda.fail(REQUEST_TEXT_APPROVAL_USAGE, 2) end
   return request_text_approval(args, caller, "request-text-approval")
 end)
 command(19.1, "approve-text", "  remuda butler approve-text request SESSION -  (alias of request-text-approval)", function(args, caller)
+  if not request_text_approval_help(args) then current_agent(caller) end
   local rest = request_text_approval_rest(args)
+  -- The retired switch words still reach the handler, so an old
+  -- `approve-text on|off` gets the handler's refusal rather than a parser error.
+  if rest[1] == "on" or rest[1] == "off" then
+    return request_text_approval(args, caller, "approve-text")
+  end
   -- The alias keeps its exact argv, so `agent -` stays invalid; only `--help`
   -- is normalised, because the parser needs a verb word to describe it.
   local report

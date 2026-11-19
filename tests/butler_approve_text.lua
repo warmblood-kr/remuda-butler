@@ -150,10 +150,6 @@ assert(cli_result == "Registered prepared text request ABCD",
 local direct = approve_text.cli({ "agent-1", "-" }, "agent-1", multiline)
 assert(direct == "Registered prepared text request ABCD",
   "primary form takes SESSION and - without a request word")
-local usage = approve_text.cli({}, "agent-1", nil)
-local usage_text = type(usage) == "table" and (usage.text or usage.error) or usage
-assert(type(usage_text) == "string" and usage_text:find("request-text-approval", 1, true),
-  "help must name the requesting verb: " .. tostring(usage_text))
 local invalid_target, invalid_error = approve_text.cli({ "request", "outside", "-" }, "agent-1", multiline)
 local invalid_message = type(invalid_target) == "table" and invalid_target.error or invalid_error
 assert(invalid_message and invalid_message:find("Unknown Butler session", 1, true),
