@@ -149,6 +149,9 @@ R -e "if not dofile('$REPO/scripts/check-butler-path-convention.lua') then error
 R -e "remuda._butler_argv = {'$T/bin/fake-root'}" >/dev/null   # root session: no agent
 R butler --headless >/dev/null
 wait_live butler
+# The argv seam is the root's stand-in; lead1 must launch the fake claude from
+# PATH and record its own argv, not reuse the root's fake process.
+R -e "remuda._butler_argv = nil" >/dev/null
 # The live root system prompt must name the STICC parts and ask for propagation.
 R -e "local p = remuda._butler_system_prompt or ''; for _, word in ipairs({ 'Situation', 'Task', 'Intent', 'Concern', 'Calibrate', 'propagate' }) do if not p:find(word, 1, true) then error('root SYSTEM_PROMPT lacks ' .. word, 0) end end"
 R butler topic delegate lead1 --agent claude "golden task" >/dev/null
@@ -222,7 +225,7 @@ for f in agents-root.md agents-topic.md agents-launch.md welcome.txt; do
   require_text "$f" "request's expiry (default" "the displayed approval expiry"
   require_text "$f" 'approval_ttl_minutes' "the configurable approval TTL"
   require_text "$f" '8 KiB of normalized text' "the normalized 8 KiB limit"
-  require_text "$f" 'live Matrix sync and prepared-text approval on' "the approval prerequisites"
+  require_text "$f" 'live Matrix sync' "the approval prerequisites"
   require_text "$f" 'typed (seen)' "the typed(seen) observation caveat"
   require_text "$f" 'does not approve prepared text' "the owner-Matrix-only approval rule"
   require_text "$f" 'Guidance shared across every node of a cluster lives in the Remuda VFS' "the shared Remuda VFS wording"

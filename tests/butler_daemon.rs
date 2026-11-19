@@ -1854,10 +1854,10 @@ fn butler_lifecycle_reload_replaces_hooks_and_schedules_and_rolls_back() {
         // Require its identity exactly once as well as the total; reload and
         // rollback below must preserve this complete registration snapshot.
         // OpenCode contributes its agent/launch registrations alongside the
-        // durable input operator command, the prepared-text guidance
-        // contribution adds one more owned registration, and the native
-        // adoption command adds the 36th.
-        initial == "1|4|1|1|1|1|36|shell-lines,status-commands,typed-lines|1|1"
+        // durable input operator command, and the native adoption command
+        // adds one more owned registration. The typed-lines switch was
+        // retired, so only shell-lines and status-commands remain.
+        initial == "1|4|1|1|1|1|35|shell-lines,status-commands|1|1"
             || initial == "1|4|1|1|1|1|-1||0|0",
         "unexpected Butler lifecycle registrations: {initial}"
     );
