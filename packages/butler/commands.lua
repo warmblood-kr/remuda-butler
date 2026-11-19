@@ -580,8 +580,12 @@ end)
 -- same handler, inputs and approval authority.
 local function request_text_approval(args, caller, name)
   if wants_verb_help(args) then
-    return verb_help(name, "Request the owner's approval of exact prepared text. Form: request SESSION - (text on stdin). Example: remuda butler "
-      .. name .. " request worker -", "remuda butler " .. name .. " request --help")
+    if name == "approve-text" then
+      return verb_help(name, "Request the owner's approval of exact prepared text. Form: remuda butler approve-text request SESSION - (text on stdin). Example: remuda butler approve-text request worker -",
+        "remuda butler approve-text request --help")
+    end
+    return verb_help(name, "Request the owner's approval of exact prepared text. Form: remuda butler request-text-approval SESSION - (text on stdin). Example: remuda butler request-text-approval worker -",
+      "remuda butler request-text-approval --help")
   end
   -- The verb receives the whole argv; approve_text.cli takes what follows the verb.
   local rest = {}
@@ -621,7 +625,15 @@ command(19, "request-text-approval", "  remuda butler request-text-approval SESS
   return request_text_approval(args, caller, "request-text-approval")
 end)
 command(19.1, "approve-text", "  remuda butler approve-text request SESSION -  (alias of request-text-approval)", function(args, caller)
-  local report = cli_parser(REQUEST_TEXT_APPROVAL_CLI_SPEC, request_text_approval_rest(args))
+  local rest = request_text_approval_rest(args)
+  -- The alias keeps its exact argv, so `agent -` stays invalid; only `--help`
+  -- is normalised, because the parser needs a verb word to describe it.
+  local report
+  if rest[1] == "--help" or rest[1] == "-h" then
+    report = cli_parser(REQUEST_TEXT_APPROVAL_CLI_SPEC, { "request", "--help" })
+  else
+    report = cli_parser(REQUEST_TEXT_APPROVAL_CLI_SPEC, rest)
+  end
   if report and report.kind == "help" then return "  remuda butler approve-text request SESSION -" end
   if report and not report.ok then
     return remuda.fail("Usage: remuda butler approve-text request SESSION -", 2)

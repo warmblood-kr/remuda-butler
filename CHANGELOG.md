@@ -12,8 +12,9 @@ release tags yet; entries come from merged pull requests.
   owner's approval instead of implying that the agent approves. The old
   `approve-text request SESSION -` command and `butler_approve_text` tool keep
   working as aliases with the same handler, inputs, ids and approval authority.
-  `approve-text` is no longer an on/off switch; the `approve_text` config key
-  and the doctor line stay readable for existing setups.
+  `approve-text` no longer names an on/off switch: the old switch and the
+  `approve_text` config key are ignored, and prepared-text approvals stay on
+  once Matrix live sync is configured.
 - On a core that reports `remuda.db.capabilities().must_exist`, an active
   SQLite inbox now opens with `must_exist = true`, so a database that
   disappears between the startup check and the open is refused instead of

@@ -1150,8 +1150,9 @@ reporting to a human at every firing.
 
 Use the `butler_request_text_approval` MCP tool or
 `remuda butler request-text-approval SESSION -` with the exact text on
-stdin to register up to 8 KiB (the old `butler_approve_text` / `approve-text`
-names still work as aliases). of normalized text for the owner to review in Matrix.
+stdin to register up to 8 KiB of normalized text for the owner to review in
+Matrix (the old `butler_approve_text` / `approve-text` names still work as
+aliases).
 Registration needs live Matrix sync. The
 allowlisted owner approves or denies the posted request by reply or reaction;
 the terminal `remuda butler approve` does not approve prepared text. Register

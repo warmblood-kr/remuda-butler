@@ -501,3 +501,50 @@ families {
       return cases
     end)() },
 }
+
+-- Prepared-text request: the agent requests, the owner approves. The primary
+-- form takes SESSION -, the alias keeps its old `request` word, and both reach
+-- the same handler.
+families {
+  { name = "request-text-approval",
+    setup = [[
+      remuda._pr0_saved_approve_cli = remuda.butler.approve_text.cli
+      remuda.butler.approve_text.cli = function(words, agent, stdin)
+        remuda._pr0_note("approve_text.cli", table.concat(words, "|"))
+        return "STUB"
+      end
+    ]],
+    trace = [[return ""]],
+    cases = {
+      agent("request-text-approval", "agent-test", "-"),
+      agent("approve-text", "request", "agent-test", "-"),
+      agent("approve-text", "agent-test", "-"),
+      agent("request-text-approval", "request", "agent-test", "-"),
+      agent("request-text-approval", "agent-test"),
+      agent("request-text-approval"),
+      agent("request-text-approval", "--help"),
+      agent("approve-text", "--help"),
+      agent("approve-text"),
+    } },
+}
+
+T.test("both prepared-text verbs run through the registered handler", function()
+  start_butler()
+  local out = T.eval([[
+    local feature = remuda.butler.approve_text
+    local saved = feature.cli
+    local log = {}
+    feature.cli = function(words)
+      log[#log + 1] = table.concat(words, "|")
+      return "STUB"
+    end
+    local caller = { kind = "session", session = "agent-test" }
+    local primary = remuda._butler_command_run("request-text-approval",
+      { "request-text-approval", "agent-test", "-" }, caller)
+    local alias = remuda._butler_command_run("approve-text",
+      { "approve-text", "request", "agent-test", "-" }, caller)
+    feature.cli = saved
+    return tostring(primary) .. ";" .. tostring(alias) .. ";" .. table.concat(log, ",")
+  ]])
+  T.eq(out, "STUB;STUB;agent-test|-,request|agent-test|-", "both verbs must reach one handler")
+end)
