@@ -1148,9 +1148,10 @@ reporting to a human at every firing.
 
 ## Prepared text for owner approval
 
-Use the `butler_approve_text` MCP tool or
-`remuda butler approve-text request SESSION -` with the exact text on stdin to
-register up to 8 KiB of normalized text for the owner to review in Matrix.
+Use the `butler_request_text_approval` MCP tool or
+`remuda butler request-text-approval request SESSION -` with the exact text on
+stdin to register up to 8 KiB (the old `butler_approve_text` / `approve-text`
+names still work as aliases). of normalized text for the owner to review in Matrix.
 Registration needs live Matrix sync. The
 allowlisted owner approves or denies the posted request by reply or reaction;
 the terminal `remuda butler approve` does not approve prepared text. Register
@@ -1232,7 +1233,9 @@ an uncertain outcome requires inspection before a new request.
         run = function(_, args, caller) return host._butler_command_run("agents", args, caller) end },
       { id = "status-commands", order = 17, verb = "status-commands", usage = "  remuda butler status-commands on|off",
         run = function(_, args, caller) return host._butler_command_run("status-commands", args, caller) end },
-      { id = "approve-text", order = 19, verb = "approve-text", usage = "  remuda butler approve-text request SESSION -",
+      { id = "request-text-approval", order = 19, verb = "request-text-approval", usage = "  remuda butler request-text-approval request SESSION -",
+        run = function(_, args, caller) return host._butler_command_run("request-text-approval", args, caller) end },
+      { id = "approve-text", order = 19.1, verb = "approve-text", usage = "  remuda butler approve-text request SESSION -  (alias of request-text-approval)",
         run = function(_, args, caller) return host._butler_command_run("approve-text", args, caller) end },
       { id = "schedule", order = 18, verb = "schedule", usage = "  remuda butler schedule list\n"
           .. '  remuda butler schedule add <name> "<M H * * *>" <text> | - [--to SESSION] [--once]\n'

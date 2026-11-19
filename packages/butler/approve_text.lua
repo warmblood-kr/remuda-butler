@@ -469,9 +469,9 @@ end
 
 function M.cli(args, agent, stdin)
   local spec = {
-    name = "remuda butler approve-text",
+    name = "remuda butler request-text-approval",
     verbs = {
-      request = { about = "Register text for owner approval. Example: remuda butler approve-text request worker -",
+      request = { about = "Request the owner's approval of exact text. Example: remuda butler request-text-approval request worker -",
         args = { { name = "SESSION", help = "Target Butler session" },
           { name = "STDIN", help = "Must be -; text is read from stdin" } }, next = "remuda butler approvals" },
     },
@@ -479,9 +479,9 @@ function M.cli(args, agent, stdin)
   local report = parse_cli(spec, args or {})
   if report.kind == "help" then return report.text end
   if not report.ok then return fail(type(report.text) == "string" and report.text ~= ""
-    and report.text or "Usage: remuda butler approve-text request SESSION -") end
+    and report.text or "Usage: remuda butler request-text-approval request SESSION -") end
   if report.verb ~= "request" or report.values.STDIN ~= "-" then
-    return fail("Usage: remuda butler approve-text request SESSION -")
+    return fail("Usage: remuda butler request-text-approval request SESSION -")
   end
   if not M.target_session_allowed(report.values.SESSION) then return fail("Unknown Butler session: " .. tostring(report.values.SESSION)) end
   local id, why = M.request(report.values.SESSION, stdin, agent or "operator")

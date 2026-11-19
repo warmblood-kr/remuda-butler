@@ -58,7 +58,7 @@ local USAGE_SECTIONS = {
   { id = "mail", title = "Mail", verbs = { "send", "send-to-leader", "inbox", "reply", "forward" } },
   { id = "sessions", title = "Sessions and teams",
     verbs = { "sessions", "agents", "launch", "topic", "close", "compact" } },
-  { id = "approvals", title = "Approvals", verbs = { "approvals", "approve", "deny", "approve-text" } },
+  { id = "approvals", title = "Approvals", verbs = { "approvals", "approve", "deny", "request-text-approval", "approve-text" } },
   { id = "matrix", title = "Matrix", verbs = { "matrix" },
     summary = "  remuda butler matrix [--json] [--room ROOM] <verb> [ARGS]\n"
       .. "  remuda butler matrix setup [OPTIONS]\n"
@@ -575,14 +575,35 @@ end)
 command(17, "status-commands", "  remuda butler status-commands on|off", function(args, caller)
   return typed_lines_cli.cli(args, current_agent(caller))
 end)
-command(19, "approve-text", "  remuda butler approve-text request SESSION -", function(args, caller)
+-- The name says who acts: the agent requests the owner's approval and never
+-- approves its own text. `approve-text` stays as a compatibility alias with the
+-- same handler, inputs and approval authority.
+local function request_text_approval(args, caller, name)
   if wants_verb_help(args) then
-    return verb_help("approve-text", "Prepared text for owner approval. Form: request SESSION - (text on stdin). Example: remuda butler approve-text request worker -", "remuda butler approve-text request --help")
+    return verb_help(name, "Request the owner's approval of exact prepared text. Form: request SESSION - (text on stdin). Example: remuda butler "
+      .. name .. " request worker -", "remuda butler " .. name .. " request --help")
   end
   -- The verb receives the whole argv; approve_text.cli takes what follows the verb.
   local rest = {}
   for i = 2, #args do rest[#rest + 1] = args[i] end
   return approve_text.cli(rest, current_agent(caller), caller and caller.stdin)
+end
+local REQUEST_TEXT_APPROVAL_CLI_SPEC = {
+  name = "remuda butler request-text-approval",
+  verbs = {
+    request = { about = "Request the owner's approval of exact text on stdin.",
+      args = { { name = "SESSION", help = "Target Butler session" },
+        { name = "STDIN", help = "Must be -; text is read from stdin" } },
+      next = "remuda butler approvals" },
+  },
+}
+command(19, "request-text-approval", "  remuda butler request-text-approval request SESSION -", function(args, caller)
+  local report = cli_parser(REQUEST_TEXT_APPROVAL_CLI_SPEC, args)
+  if report and report.kind == "help" then return report.text end
+  return request_text_approval(args, caller, "request-text-approval")
+end)
+command(19.1, "approve-text", "  remuda butler approve-text request SESSION -  (alias of request-text-approval)", function(args, caller)
+  return request_text_approval(args, caller, "approve-text")
 end)
 command(22, "input-queue", "  remuda butler input-queue status [ID] | cancel ID | resolve ID not_sent|delivered", function(args, caller)
   if wants_verb_help(args) then

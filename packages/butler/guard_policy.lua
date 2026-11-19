@@ -300,7 +300,7 @@ local RANK = { weaken = 1, control = 2, identity = 3, push = 4, destroy = 5, esc
 local NET = { curl = true, wget = true, scp = true, sftp = true, ssh = true, nc = true, ncat = true, ftp = true, rsync = true }
 local WRITERS = { rm = true, mv = true, cp = true, tee = true, dd = true, chmod = true, chown = true, ln = true,
   touch = true, truncate = true, install = true }
-local IDENTITY = { approve = true, deny = true, ["approve-text"] = true, ["typed-lines"] = true,
+local IDENTITY = { approve = true, deny = true, ["approve-text"] = true, ["request-text-approval"] = true, ["typed-lines"] = true,
   ["shell-lines"] = true, ["status-commands"] = true }
 
 -- Global `remuda` options that take the next word as their value (`--opt=value` is one word and needs no entry).
@@ -477,7 +477,7 @@ local function owner_or_daemon_command(w, text)
     if verb == "guard" and sub == "grants" and (w[butler_at + 3] == "on" or w[butler_at + 3] == "off") then
       return "Butler owner control"
     end
-    if verb == "approve" or verb == "deny" or verb == "approve-text" or verb == "typed-lines"
+    if verb == "approve" or verb == "deny" or verb == "approve-text" or verb == "request-text-approval" or verb == "typed-lines"
       or verb == "shell-lines" or verb == "status-commands" then return "Butler owner control" end
   end
   local subcommand

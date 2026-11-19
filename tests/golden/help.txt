@@ -29,7 +29,8 @@ Sessions and teams:
   remuda butler topic delegate <name> [--agent A] [--leader L] [--model M] [--cwd DIR] [--writable DIR]... [--sandbox full] <task...>
 
 Approvals:
-  remuda butler approve-text request SESSION -
+  remuda butler request-text-approval request SESSION -
+  remuda butler approve-text request SESSION -  (alias of request-text-approval)
   remuda butler approvals
   remuda butler approve <ID>
   remuda butler deny <ID>

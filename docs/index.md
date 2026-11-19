@@ -172,7 +172,7 @@ for Claude members launched after the switch. The `PermissionRequest` hook of
 such a member registers each permission prompt as an approval request (id,
 stored redacted summary, class, a sha256 of the request text) and posts one
 message to the owner's Matrix HOME room. The verified owner answers it as for
-`approve-text`: reply `yes` or `no` (also `승인`/`거부`) to that post, or react ✅ or
+`request-text-approval` (alias `approve-text`): reply `yes` or `no` (also `승인`/`거부`) to that post, or react ✅ or
 ❌ to it. Only an allowlisted human in HOME on a live sync counts; an edit, a
 reaction on another post or an unknown id does nothing, and a terminal cannot
 approve (it may deny). An answer applies once, to that request, while the
