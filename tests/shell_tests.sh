@@ -48,6 +48,11 @@ fi
 core_ref_check
 mkdir -p "$T/bin" && cp "$REMUDA_BIN" "$T/bin/remuda" ||
   { echo "cannot copy the core binary from $REMUDA_BIN. Next: set REMUDA_BIN to a built remuda" >&2; exit 2; }
+# A host-backed core resolves its session host next to the CLI. Installed
+# binaries ship it as a sibling; a source build that hosts sessions has it in
+# the same release directory. Copy it when present so hosted fixtures work.
+host_bin="$(dirname "$REMUDA_BIN")/remuda-session-host"
+[[ -f $host_bin ]] && cp "$host_bin" "$T/bin/remuda-session-host"
 export PATH="$T/bin:$PATH" REMUDA_BIN="$T/bin/remuda" REMUDA_NO_UPDATE_CHECK=1
 unset REMUDA_SERVER
 version=$("$REMUDA_BIN" --version 2>/dev/null | tail -1)

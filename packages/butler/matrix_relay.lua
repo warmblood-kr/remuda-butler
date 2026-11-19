@@ -51,6 +51,10 @@ local function owner_timers_gone(timers)
   end
   return true
 end
+-- Reach the registry through the module table the relay already captures:
+-- relay.new is at LuaJIT's 60-upvalue limit and must not gain another local.
+matrix._relay_owner_registry = owners
+matrix._relay_owner_timers_gone = owner_timers_gone
 function relay.approval_room_for_config(cfg)
   if type(cfg) ~= "table" then return nil end
   if cfg.approval_room == "home" then return cfg.home_room end
@@ -3038,8 +3042,8 @@ function relay.new(options)
     live_sync_ready = false
     notification_rooms, notification_full_state = {}, true
     active = true
-    owners.live[self] = true
-    owners.verified = false
+    matrix._relay_owner_registry.live[self] = true
+    matrix._relay_owner_registry.verified = false
     remuda._butler_matrix_live_config = cfg
     if approval and type(approval.reapply_approved) == "function" then approval.reapply_approved() end
     if approval and type(approval.sweep) == "function" and type(remuda.schedule) == "function" then
@@ -3088,15 +3092,15 @@ function relay.new(options)
       if handle and handle.cancel then pcall(function() handle:cancel() end) end
     end
     context_fetching, context_fetch_handles = {}, {}
-    if cancelled and owner_timers_gone(timers) then
+    if cancelled and matrix._relay_owner_timers_gone(timers) then
       delivery_retry_timers, delivery_retry_waiting, reply_retry_timers = {}, {}, {}
       retry_timer, backfill_timer, approval_timer = nil, nil, nil
-      owners.live[self] = nil
-      owners.verified = true
+      matrix._relay_owner_registry.live[self] = nil
+      matrix._relay_owner_registry.verified = true
     else
       -- Keep the handles so a direct retry can verify them; the entry stays
       -- registered, so the admission barrier stays closed.
-      owners.verified = false
+      matrix._relay_owner_registry.verified = false
     end
     return true
   end
@@ -3167,7 +3171,8 @@ end
 -- instance or an unverified stop keeps this false, so a candidate relay never
 -- starts beside a possible hidden writer.
 function relay.owner_proven()
-  if next(owners.live) ~= nil then return false end
+  local owners = matrix._relay_owner_registry
+  if type(owners) ~= "table" or next(owners.live) ~= nil then return false end
   return owners.verified == true
 end
 
