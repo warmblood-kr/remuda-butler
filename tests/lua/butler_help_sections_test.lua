@@ -75,6 +75,32 @@ T.test("remuda butler help, --help and -h print the same grouped sections", func
   T.expect(not text:find("redact EVENT_ID", 1, true), "help must not list every Matrix verb: " .. text)
 end)
 
+T.test("both prepared-text names dispatch to the requesting command", function()
+  start_butler()
+  local primary = butler("request-text-approval", "--help")
+  T.eq(primary.code, 0, "primary --help exit: " .. primary.stderr)
+  T.expect(primary.stdout:find("remuda butler request-text-approval SESSION -", 1, true) ~= nil,
+    "primary usage must take SESSION -: " .. primary.stdout)
+  T.expect(primary.stdout:find("request-text-approval request", 1, true) == nil,
+    "primary usage must not repeat the request word: " .. primary.stdout)
+
+  local alias = butler("approve-text", "--help")
+  T.eq(alias.code, 0, "alias --help exit: " .. alias.stderr)
+  T.expect(alias.stdout:find("remuda butler approve-text request SESSION -", 1, true) ~= nil,
+    "alias must keep its old argv: " .. alias.stdout)
+
+  -- Both names must reach the handler: an unknown target is refused by the
+  -- handler, not by an unknown-verb error.
+  local primary_bad = butler("request-text-approval", "no-such-session", "-")
+  T.eq(primary_bad.code, 1, "primary wrong target exit")
+  T.expect(primary_bad.stderr:find("Unknown Butler session", 1, true) ~= nil,
+    "primary dispatch: " .. primary_bad.stderr)
+  local alias_bad = butler("approve-text", "request", "no-such-session", "-")
+  T.eq(alias_bad.code, 1, "alias wrong target exit")
+  T.expect(alias_bad.stderr:find("Unknown Butler session", 1, true) ~= nil,
+    "alias dispatch: " .. alias_bad.stderr)
+end)
+
 T.test("remuda butler matrix --help lists the Matrix verbs in groups", function()
   start_butler()
   local help = butler("matrix", "--help")
