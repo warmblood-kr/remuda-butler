@@ -1,0 +1,110 @@
+### [agent] remuda butler "request-text-approval" "agent-test" "-"
+exit: 0
+stdout:
+STUB
+stderr:
+
+actions:
+approve_text.cli(agent-test|-)
+state: 
+
+### [agent] remuda butler "approve-text" "request" "agent-test" "-"
+exit: 0
+stdout:
+STUB
+stderr:
+
+actions:
+approve_text.cli(request|agent-test|-)
+state: 
+
+### [agent] remuda butler "approve-text" "agent-test" "-"
+exit: 2
+stdout:
+
+stderr:
+Usage: remuda butler approve-text request SESSION -
+actions:
+state: 
+
+### [agent] remuda butler "request-text-approval" "request" "agent-test" "-"
+exit: 2
+stdout:
+
+stderr:
+  remuda butler request-text-approval SESSION -
+  The text is read from stdin; the alias form is
+  remuda butler approve-text request SESSION -
+actions:
+state: 
+
+### [agent] remuda butler "request-text-approval" "agent-test"
+exit: 2
+stdout:
+
+stderr:
+  remuda butler request-text-approval SESSION -
+  The text is read from stdin; the alias form is
+  remuda butler approve-text request SESSION -
+actions:
+state: 
+
+### [agent] remuda butler "request-text-approval"
+exit: 2
+stdout:
+
+stderr:
+  remuda butler request-text-approval SESSION -
+  The text is read from stdin; the alias form is
+  remuda butler approve-text request SESSION -
+actions:
+state: 
+
+### [agent] remuda butler "request-text-approval" "--help"
+exit: 0
+stdout:
+  remuda butler request-text-approval SESSION -
+  The text is read from stdin; the alias form is
+  remuda butler approve-text request SESSION -
+stderr:
+
+actions:
+state: 
+
+### [agent] remuda butler "request-text-approval" "request" "--help"
+exit: 0
+stdout:
+  remuda butler request-text-approval SESSION -
+  The text is read from stdin; the alias form is
+  remuda butler approve-text request SESSION -
+stderr:
+
+actions:
+state: 
+
+### [agent] remuda butler "approve-text" "--help"
+exit: 0
+stdout:
+  remuda butler approve-text request SESSION -
+stderr:
+
+actions:
+state: 
+
+### [agent] remuda butler "approve-text" "request" "--help"
+exit: 0
+stdout:
+  remuda butler approve-text request SESSION -
+stderr:
+
+actions:
+state: 
+
+### [agent] remuda butler "approve-text"
+exit: 2
+stdout:
+
+stderr:
+Usage: remuda butler approve-text request SESSION -
+actions:
+state: 

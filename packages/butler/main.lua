@@ -1174,9 +1174,10 @@ remuda.tool{
     return remuda._butler_send(principal, a.to, a.text)
   end,
 }
-remuda.tool{
-  name = "butler_approve_text",
-  about = "Register exact prepared text for owner approval before it is typed into a Butler session.",
+-- The agent requests approval; it never approves its own text. The old tool
+-- name stays as an alias with identical inputs and approval authority.
+local approve_text_tool = {
+  about = "Request the owner's approval of exact prepared text before it is typed into a Butler session.",
   args = { session = "Target Butler session name.", text = "Exact text to register, up to 8 KiB." },
   needs = { "session", "text" },
   run = function(a, caller)
@@ -1191,6 +1192,10 @@ remuda.tool{
     return id
   end,
 }
+remuda.tool{ name = "butler_request_text_approval", about = approve_text_tool.about,
+  args = approve_text_tool.args, needs = approve_text_tool.needs, run = approve_text_tool.run }
+remuda.tool{ name = "butler_approve_text", about = "Old name of butler_request_text_approval. Same inputs and approval authority.",
+  args = approve_text_tool.args, needs = approve_text_tool.needs, run = approve_text_tool.run }
 remuda.tool{
   name = "butler_inbox",
   about = "Drain this agent's Butler inbox and return its queued messages in arrival order.",
@@ -1535,9 +1540,11 @@ exact text the owner reviews; silence is not approval.
 
 ## Prepared text for owner approval
 
-Use the `butler_approve_text` MCP tool or
-`remuda butler approve-text request SESSION -` with the exact text on stdin to
-register up to 8 KiB of normalized text for the owner to review in Matrix.
+Use the `butler_request_text_approval` MCP tool or
+`remuda butler request-text-approval SESSION -` with the exact text on
+stdin to register up to 8 KiB of normalized text for the owner to review in
+Matrix (the old `butler_approve_text` / `approve-text` names still work as
+aliases).
 Registration needs live Matrix sync. The
 allowlisted owner approves or denies the posted request by reply or reaction;
 the terminal `remuda butler approve` does not approve prepared text. Register

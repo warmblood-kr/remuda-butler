@@ -165,9 +165,11 @@ Matrix is the human-facing adapter: never call the homeserver REST API or curl d
 
 ## Prepared text for owner approval
 
-Use the `butler_approve_text` MCP tool or
-`remuda butler approve-text request SESSION -` with the exact text on stdin to
-register up to 8 KiB of normalized text for the owner to review in Matrix.
+Use the `butler_request_text_approval` MCP tool or
+`remuda butler request-text-approval SESSION -` with the exact text on
+stdin to register up to 8 KiB of normalized text for the owner to review in
+Matrix (the old `butler_approve_text` / `approve-text` names still work as
+aliases).
 Registration needs live Matrix sync. The
 allowlisted owner approves or denies the posted request by reply or reaction;
 the terminal `remuda butler approve` does not approve prepared text. Register
@@ -204,7 +206,7 @@ your leader explicitly asks, with
 or the loader file above); a put does not guarantee every peer has synced it,
 and running sessions keep the snapshot they loaded until they refresh it.
 
-- framework: built in, version sha256:79ca4706d4d5
+- framework: built in, version sha256:21708ef20490
 - cluster: not available (this Remuda core has no cluster file store; update Remuda)
 - team: not loaded (no file at <T>/config/remuda/butler/guidance/team.md)
 - personal: not loaded (no file at <T>/config/remuda/butler/guidance/personal.md)

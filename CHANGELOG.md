@@ -7,6 +7,14 @@ release tags yet; entries come from merged pull requests.
 ## Unreleased
 
 ### Changed
+- The prepared-text command is now `remuda butler request-text-approval` (MCP
+  `butler_request_text_approval`), so its name says that the agent requests the
+  owner's approval instead of implying that the agent approves. The old
+  `approve-text request SESSION -` command and `butler_approve_text` tool keep
+  working as aliases with the same handler, inputs, ids and approval authority.
+  `approve-text` is not an on/off switch: the old switch command is gone and
+  the `approve_text` config key is ignored, so prepared-text approvals stay on
+  once Matrix live sync is configured.
 - On a core that reports `remuda.db.capabilities().must_exist`, an active
   SQLite inbox now opens with `must_exist = true`, so a database that
   disappears between the startup check and the open is refused instead of

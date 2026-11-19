@@ -540,8 +540,12 @@ machine; an agent is refused.
 
 ### Prepared text approvals
 
-An agent can register exact text with `remuda butler approve-text request
-SESSION -` and stdin, or the `butler_approve_text` MCP tool. Text can contain
+An agent requests the owner's approval of exact text with `remuda butler
+request-text-approval SESSION -` and stdin, or the
+`butler_request_text_approval` MCP tool. The old `approve-text request
+SESSION -` command and `butler_approve_text` tool remain as aliases with the
+same handler, inputs and approval authority. The name states the split: the
+agent requests, and only the owner approves. Text can contain
 multiple lines and is limited to 8 KiB. Core input normalization strips ESC
 and other C0/C1 controls and turns CR and CRLF into LF. Registration applies
 the CR normalization and refuses those controls except tab and newline. Butler
@@ -572,11 +576,10 @@ may be pending at once, and an agent may register at most ten in ten minutes.
 Session binding uses the Butler session identity and a non-secret launch marker;
 the root Butler identity can survive a pane relaunch, so its fresh launch marker
 is what distinguishes that instance.
-`remuda butler approve-text on|off` is a terminal-only switch that asks for
-`yes` before enabling. It is on by default (once Matrix is set up; `approve-text off` or `approve_text=false` turns it off); with it off, replies stay on the
-ordinary mail path. Registration is also refused in Matrix messages fallback
-mode because that mode cannot receive live owner approvals. Doctor reports
-`Approve text: on|off`.
+`remuda butler approve-text on|off` is no longer a command, and the
+`approve_text` config key is ignored; approvals stay on once Matrix live sync
+is configured. Registration is refused in messages fallback mode because that
+mode cannot receive live owner approvals. Doctor reports `Approve text: on|off`.
 
 ### Status commands
 

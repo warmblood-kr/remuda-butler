@@ -147,6 +147,9 @@ assert(applied[1] == false and applied[2] == "text_changed",
 local cli_result = approve_text.cli({ "request", "agent-1", "-" }, "agent-1", multiline)
 assert(cli_result == "Registered prepared text request ABCD",
   "CLI registers stdin bytes for a Butler session and returns the short id")
+local direct = approve_text.cli({ "agent-1", "-" }, "agent-1", multiline)
+assert(direct == "Registered prepared text request ABCD",
+  "primary form takes SESSION and - without a request word")
 local invalid_target, invalid_error = approve_text.cli({ "request", "outside", "-" }, "agent-1", multiline)
 local invalid_message = type(invalid_target) == "table" and invalid_target.error or invalid_error
 assert(invalid_message and invalid_message:find("Unknown Butler session", 1, true),
