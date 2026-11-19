@@ -18,7 +18,7 @@ listed, and it therefore has to kill first.
   id across restarts.
 - **`roster.json`** (private): alias, id, kind, model, session name,
   `parent`/`parent_id`, cwd, sandbox, writable, instance id, native row. It is
-  the only durable launch spec. Today the *root's* row carries no `cwd`.
+  the only durable launch spec; the root's `cwd` is recorded at registration.
 - **Mailbox**: per-alias JSONL under a shared root, addressed by alias and
   message id. **Memory**: `memory/<alias>`. Both are keyed to the logical alias.
 
