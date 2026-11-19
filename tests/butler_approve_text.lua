@@ -147,6 +147,9 @@ assert(applied[1] == false and applied[2] == "text_changed",
 local cli_result = approve_text.cli({ "request", "agent-1", "-" }, "agent-1", multiline)
 assert(cli_result == "Registered prepared text request ABCD",
   "CLI registers stdin bytes for a Butler session and returns the short id")
+local direct = approve_text.cli({ "agent-1", "-" }, "agent-1", multiline)
+assert(direct == "Registered prepared text request ABCD",
+  "primary form takes SESSION and - without a request word")
 local usage = approve_text.cli({}, "agent-1", nil)
 local usage_text = type(usage) == "table" and (usage.text or usage.error) or usage
 assert(type(usage_text) == "string" and usage_text:find("request-text-approval", 1, true),

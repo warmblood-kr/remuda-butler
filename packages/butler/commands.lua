@@ -588,6 +588,8 @@ local function request_text_approval(args, caller, name)
   for i = 2, #args do rest[#rest + 1] = args[i] end
   return approve_text.cli(rest, current_agent(caller), caller and caller.stdin)
 end
+-- The parser names a `request` verb, so the direct primary form is normalised
+-- before parsing; the compatibility alias keeps `approve-text request ...`.
 local REQUEST_TEXT_APPROVAL_CLI_SPEC = {
   name = "remuda butler request-text-approval",
   verbs = {
@@ -597,12 +599,33 @@ local REQUEST_TEXT_APPROVAL_CLI_SPEC = {
       next = "remuda butler approvals" },
   },
 }
-command(19, "request-text-approval", "  remuda butler request-text-approval request SESSION -", function(args, caller)
-  local report = cli_parser(REQUEST_TEXT_APPROVAL_CLI_SPEC, args)
-  if report and report.kind == "help" then return report.text end
+local REQUEST_TEXT_APPROVAL_USAGE = "  remuda butler request-text-approval SESSION -\n"
+  .. "  The text is read from stdin; the alias form is\n"
+  .. "  remuda butler approve-text request SESSION -"
+-- The parser's first word is its verb, so prepend `request` when the direct
+-- primary form omits it. The alias already carries the word.
+local function request_text_approval_rest(args)
+  local rest = {}
+  for i = 2, #args do rest[#rest + 1] = args[i] end
+  return rest
+end
+local function request_text_approval_argv(args)
+  local argv = { "request" }
+  for i = 2, #args do argv[#argv + 1] = args[i] end
+  return argv
+end
+command(19, "request-text-approval", "  remuda butler request-text-approval SESSION -", function(args, caller)
+  local report = cli_parser(REQUEST_TEXT_APPROVAL_CLI_SPEC, request_text_approval_argv(args))
+  if report and report.kind == "help" then return REQUEST_TEXT_APPROVAL_USAGE end
+  if report and not report.ok then return remuda.fail(REQUEST_TEXT_APPROVAL_USAGE, 2) end
   return request_text_approval(args, caller, "request-text-approval")
 end)
 command(19.1, "approve-text", "  remuda butler approve-text request SESSION -  (alias of request-text-approval)", function(args, caller)
+  local report = cli_parser(REQUEST_TEXT_APPROVAL_CLI_SPEC, request_text_approval_rest(args))
+  if report and report.kind == "help" then return "  remuda butler approve-text request SESSION -" end
+  if report and not report.ok then
+    return remuda.fail("Usage: remuda butler approve-text request SESSION -", 2)
+  end
   return request_text_approval(args, caller, "approve-text")
 end)
 command(22, "input-queue", "  remuda butler input-queue status [ID] | cancel ID | resolve ID not_sent|delivered", function(args, caller)

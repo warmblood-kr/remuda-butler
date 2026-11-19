@@ -69,7 +69,7 @@ T.test("remuda butler help, --help and -h print the same grouped sections", func
   local ok, line = headed_blocks_separated(text)
   T.expect(ok, "section " .. tostring(line) .. " is not preceded by a blank line: " .. text)
   T.expect(text:find("Mail:\n  remuda butler send <to>", 1, true), "mail verbs under Mail: " .. text)
-  T.expect(text:find("Approvals:\n  remuda butler request-text-approval request SESSION -\n  remuda butler approve-text request SESSION -  (alias of request-text-approval)\n  remuda butler approvals\n  remuda butler approve <ID>\n  remuda butler deny <ID>\n", 1, true),
+  T.expect(text:find("Approvals:\n  remuda butler request-text-approval SESSION -\n  remuda butler approve-text request SESSION -  (alias of request-text-approval)\n  remuda butler approvals\n  remuda butler approve <ID>\n  remuda butler deny <ID>\n", 1, true),
     "approval verbs under Approvals: " .. text)
   T.expect(text:find("remuda butler matrix --help", 1, true), "help must point at matrix --help: " .. text)
   T.expect(not text:find("redact EVENT_ID", 1, true), "help must not list every Matrix verb: " .. text)

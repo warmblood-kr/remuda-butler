@@ -1233,7 +1233,7 @@ an uncertain outcome requires inspection before a new request.
         run = function(_, args, caller) return host._butler_command_run("agents", args, caller) end },
       { id = "status-commands", order = 17, verb = "status-commands", usage = "  remuda butler status-commands on|off",
         run = function(_, args, caller) return host._butler_command_run("status-commands", args, caller) end },
-      { id = "request-text-approval", order = 19, verb = "request-text-approval", usage = "  remuda butler request-text-approval request SESSION -",
+      { id = "request-text-approval", order = 19, verb = "request-text-approval", usage = "  remuda butler request-text-approval SESSION -",
         run = function(_, args, caller) return host._butler_command_run("request-text-approval", args, caller) end },
       { id = "approve-text", order = 19.1, verb = "approve-text", usage = "  remuda butler approve-text request SESSION -  (alias of request-text-approval)",
         run = function(_, args, caller) return host._butler_command_run("approve-text", args, caller) end },

@@ -541,10 +541,10 @@ machine; an agent is refused.
 ### Prepared text approvals
 
 An agent requests the owner's approval of exact text with `remuda butler
-request-text-approval request SESSION -` and stdin, or the
-`butler_request_text_approval` MCP tool. The old `approve-text` and
-`butler_approve_text` names remain as aliases: same handler, same inputs, same
-approval authority. The name matters because the agent only requests; the
+request-text-approval SESSION -` and stdin, or the
+`butler_request_text_approval` MCP tool. The old `approve-text request
+SESSION -` and `butler_approve_text` forms remain as aliases: same handler,
+same inputs, same approval authority. The name matters because the agent only requests; the
 owner approves. Text can contain
 multiple lines and is limited to 8 KiB. Core input normalization strips ESC
 and other C0/C1 controls and turns CR and CRLF into LF. Registration applies
