@@ -128,7 +128,8 @@ end
 
 local function test_typed_line_switches_and_non_candidates()
   with_typed_line_stubs(function(typed, keys)
-    -- The switches default on; this case needs them explicitly off.
+    -- The legacy typed_lines switch is ignored now: setting it false still
+    -- leaves an owner line on the typed path. Only shell_lines still switches.
     local dir, config_path = fixture("typed_lines=false\nshell_lines=false\n")
     local client, delivered = scripted_client(), {}
     local relay = relay_module.new({ config_path = config_path, matrix = client,
@@ -137,35 +138,23 @@ local function test_typed_line_switches_and_non_candidates()
     client:complete(1, { json = { next_batch = "s0" } })
     client:complete(2, { json = { next_batch = "s1", rooms = { join = {
       ["!room:example.org"] = { timeline = { events = {
-        typed_line_event("$off-multiline", "!a\nb"),
-        (function()
-          local event = typed_line_event("$off-stale", "!hi")
-          event.origin_server_ts = (os.time() - 6 * 60) * 1000
-          return event
-        end)(),
-        typed_line_event("$off-triple", "!!!x"),
+        typed_line_event("$legacy-off", "!hi"),
       } } },
     } } } })
-    client:complete(3, { json = { next_batch = "s2", rooms = { join = {
-      ["!room:example.org"] = { timeline = { limited = true,
-        events = { typed_line_event("$off-nonlive", "!hi") } } },
-    } } } })
-    assert(#typed == 0, "both typed-line switches explicitly off type nothing")
-    local delivered_ids = {}
-    for _, event in ipairs(delivered) do delivered_ids[event.event_id] = true end
-    for _, event_id in ipairs({ "$off-multiline", "$off-stale", "$off-triple", "$off-nonlive" }) do
-      assert(delivered_ids[event_id], "with switches off " .. event_id .. " stays on the ordinary mail path")
-    end
-    assert(#delivered == 4, "each disabled owner line should produce exactly one ordinary mail")
+    assert(#typed == 1 and typed[1].session == "butler" and typed[1].text == "hi",
+      "typed_lines=false is a legacy value and must not stop an owner line")
+    assert(#delivered == 1 and delivered[1].event_id == "$legacy-off",
+      "a typed owner line also continues through the mail path")
     for _, request in ipairs(client.requests) do
       assert(not tostring(request.path):find("/send/m.room.message/", 1, true),
-        "with switches off the owner line must not get a refusal thread line")
+        "a typed owner line must not get a refusal thread line")
     end
     relay:stop()
     cleanup_fixture(dir, config_path)
 
     dir, config_path = fixture("typed_lines=true\nshell_lines=true\n")
     client, delivered = scripted_client(), {}
+    local typed_before, keys_before = #typed, #keys
     relay = relay_module.new({ config_path = config_path, matrix = client,
       deliver = function(event) delivered[#delivered + 1] = event return true end })
     relay:start()
@@ -175,9 +164,9 @@ local function test_typed_line_switches_and_non_candidates()
         typed_line_event("$ordinary", "ordinary mail"), typed_line_event("$on", "!hello"),
       } } },
     } } } })
-    assert(#typed == 1 and typed[1].session == "butler" and typed[1].text == "hello",
+    assert(#typed == typed_before + 1 and typed[#typed].session == "butler" and typed[#typed].text == "hello",
       "enabled owner line should type once into the root Butler session")
-    assert(#keys == 1 and keys[1].session == "butler" and keys[1].key == "RET",
+    assert(#keys == keys_before + 1 and keys[#keys].session == "butler" and keys[#keys].key == "RET",
       "a successfully typed line should submit Return once")
     local success_reactions = 0
     for _, request in ipairs(client.requests) do
@@ -191,6 +180,7 @@ local function test_typed_line_switches_and_non_candidates()
 
     dir, config_path = fixture("typed_lines=true\nshell_lines=false\n")
     client, delivered = scripted_client(), {}
+    local typed_before_shell = #typed
     relay = relay_module.new({ config_path = config_path, matrix = client,
       deliver = function(event) delivered[#delivered + 1] = event return true end })
     relay:start()
@@ -200,7 +190,7 @@ local function test_typed_line_switches_and_non_candidates()
         typed_line_event("$shell-off", "!!ls"), typed_line_event("$plain-on", "!ls"),
       } } },
     } } } })
-    assert(#typed == 2 and typed[2].session == "butler" and typed[2].text == "ls",
+    assert(#typed == typed_before_shell + 1 and typed[#typed].session == "butler" and typed[#typed].text == "ls",
       "with shell lines off, !! must not type while a plain ! line still types")
     assert(#delivered == 2 and delivered[1].event_id == "$shell-off" and delivered[2].event_id == "$plain-on",
       "a shell line refused by its switch stays ordinary mail and a typed plain line is also mailed")
@@ -222,9 +212,10 @@ local function test_typed_line_switches_and_non_candidates()
     client:complete(2, { json = { next_batch = "s1", rooms = { join = {
       ["!room:example.org"] = { timeline = { events = { typed_line_event("$config-read-failed", "!hi") } } },
     } } } })
-    assert(#typed == typed_before, "a failed config reload must turn both typed-line switches off")
+    assert(#typed == typed_before + 1,
+      "a failed config reload must turn shell_lines off; the legacy typed_lines switch stays on")
     assert(#delivered == 1 and delivered[1].event_id == "$config-read-failed",
-      "a failed config reload must leave the owner line on the ordinary mail path")
+      "a typed owner line still continues through the ordinary mail path")
     for _, request in ipairs(client.requests) do
       assert(not tostring(request.path):find("/send/m.room.message/", 1, true),
         "a failed config reload must not send a typed-line refusal")
@@ -1640,8 +1631,8 @@ local function test_typed_line_config_keeps_only_shell_lines_switchable()
 
   dir, path = fixture("typed_lines=on\nshell_lines=TRUE\n")
   conf = assert(matrix.read_config(path))
-  assert(conf.typed_lines == false and conf.shell_lines == false,
-    "non-boolean spellings must not enable either typed-line switch")
+  assert(conf.typed_lines == true and conf.shell_lines == false,
+    "a non-boolean spelling must not enable shell_lines; the legacy typed_lines switch is ignored")
   cleanup_fixture(dir, path)
 
   assert(matrix.config_set_typed_line_switches == nil,
@@ -9064,7 +9055,7 @@ local function test_approved_text_refusal_stays_approved_for_owner_retry()
   end)
 end
 
-local function test_approved_text_switch_off_keeps_reply_on_mail_path()
+local function test_approved_text_legacy_switch_off_still_delivers()
   with_approved_text_stubs(function(typed)
     approval_env(nil, function(env)
       local id = assert(remuda.butler.approve_text.request("butler", "prepared", ASKER))
@@ -9077,20 +9068,20 @@ local function test_approved_text_switch_off_keeps_reply_on_mail_path()
       file:write((config:gsub("approve_text=true\n", "approve_text=false\n")))
       file:close()
       room_events(env, { text_event("$switch-off-reply", OWNER, "yes " .. id, rec.event_id) })
-      assert(#typed == 0 and rec.status == "open" and delivered_ids(env.delivered, "$switch-off-reply"),
-        "with approve-text off, the reply stays ordinary mail and cannot deliver")
+      assert(#typed == 1 and rec.status == "applied",
+        "approve_text=false is a legacy value and must not stop an approved delivery")
     end, "approve_text=true\n")
   end)
 end
 
-local function test_approved_text_registration_refuses_when_switch_is_off()
+local function test_approved_text_legacy_switch_off_still_registers()
   with_approved_text_stubs(function()
     approval_env(nil, function(env)
       local before = #home_posts(env, "Approve prepared text for")
-      local id, why = remuda.butler.approve_text.request("butler", "prepared", ASKER)
-      assert(id == nil and tostring(why):find("Prepared text approvals are off", 1, true)
-        and #home_posts(env, "Approve prepared text for") == before,
-        "switch-off registration must report a clear refusal without a HOME post")
+      local id = remuda.butler.approve_text.request("butler", "prepared", ASKER)
+      assert(id ~= nil, "approve_text=false is a legacy value and must not refuse registration")
+      assert(#home_posts(env, "Approve prepared text for") == before + 1,
+        "registration still posts the approval request")
     end, "approve_text=false\n")
   end)
 end
@@ -9544,8 +9535,8 @@ for _, case in ipairs({
   { "test_approved_text_unknown_explicit_id_never_uses_reply_target", test_approved_text_unknown_explicit_id_never_uses_reply_target },
   { "test_approved_text_cancel_and_failed_delivery_are_one_shot", test_approved_text_cancel_and_failed_delivery_are_one_shot },
   { "test_approved_text_refusal_stays_approved_for_owner_retry", test_approved_text_refusal_stays_approved_for_owner_retry },
-  { "test_approved_text_switch_off_keeps_reply_on_mail_path", test_approved_text_switch_off_keeps_reply_on_mail_path },
-  { "test_approved_text_registration_refuses_when_switch_is_off", test_approved_text_registration_refuses_when_switch_is_off },
+  { "test_approved_text_legacy_switch_off_still_delivers", test_approved_text_legacy_switch_off_still_delivers },
+  { "test_approved_text_legacy_switch_off_still_registers", test_approved_text_legacy_switch_off_still_registers },
   { "test_approved_text_denial_and_expiry_type_nothing", test_approved_text_denial_and_expiry_type_nothing },
   { "test_dialog_action_uses_strict_live_owner_gate", function()
     approval_env(OWNER, function(env)
