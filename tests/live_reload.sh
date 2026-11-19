@@ -201,7 +201,7 @@ EXPECT_NEW_EMPTY="hooks=1,1,1 legacy_matrix_hooks=0,0 schedules=3 sessions=butle
 # A verified stop proves the previous owner gone, so every reload restarts the
 # relay exactly once. Only the old mod, which has no owner proof, stays blocked.
 EXPECT_RELOAD_EMPTY=$EXPECT_NEW_EMPTY
-EXPECT_BLOCKED=${EXPECT_NEW_EMPTY/$RELAY_STATE/relay=false owners=0 owner_ok=false}
+EXPECT_RELOAD=$EXPECT_NEW
 
 echo "== swap in lifecycle files, reload x3"
 new_files
@@ -224,7 +224,7 @@ for i in 1 2 3; do
     # script path lives outside this Butler module directory.
     lua "remuda._butler_matrix_relay = $FOREIGN_RELAY_ID; remuda._butler_matrix_relay_script_path = '$FOREIGN_SCRIPT'"
     # Mark the writer that reload 2 must replace; a survivor keeps the marker.
-    lua "remuda.butler.matrix.relay.instance._probe = 'old'"
+    [[ $RELAY_EXPECT == true ]] && lua "remuda.butler.matrix.relay.instance._probe = 'old'"
   fi
   if [[ $i == 1 ]]; then
     # The legacy root was explicitly made with the test's fake argv and has
@@ -243,7 +243,7 @@ for i in 1 2 3; do
       [[ $(lua 'return tostring(remuda._butler_relay_restart_blocked)') != true ]] || \
         fail "reload $i: a verified stop must restart the relay"
     fi
-    if [[ $i == 2 ]]; then
+    if [[ $i == 2 && $RELAY_EXPECT == true ]]; then
       lua "local r = remuda.butler.matrix.relay.instance assert(r ~= nil and r._probe ~= 'old', 'the previous relay writer was not replaced')" >/dev/null
     fi
   fi

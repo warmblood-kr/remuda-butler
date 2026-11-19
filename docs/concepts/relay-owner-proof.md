@@ -45,7 +45,9 @@ guard.
 - A live instance is never proof: the barrier stays closed while a relay runs.
 - A stop whose cancellation did not land keeps its handles and its registry
   entry, so the barrier stays closed (`owner_unknown`) instead of racing a
-  hidden writer. A direct retry that verifies every handle clears it.
+  hidden writer. `relay.stop()` still drops the public instance, so recovery is
+  a cold boot (or a caller that kept the instance and retries its stop); the
+  barrier never reopens by itself.
 - A core without `remuda.schedules` cannot verify cancellation, so it fails
   closed: an old core keeps the relay stopped rather than risk a second writer.
 - A cold image has no marker and starts normally.
@@ -58,5 +60,4 @@ guard.
   live writer, a verified stop, an unverified stop, and a retried stop.
 - `tests/live_reload.sh`: the real daemon and mod source refresh; every reload
   must restart exactly one owner, and the old mod (no proof) must stay down.
-- `tests/butler_reload_real.sh`: a real `remuda reload` must leave exactly one
-  owner and preserve the queued mail exactly once.
+

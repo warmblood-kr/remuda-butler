@@ -147,9 +147,13 @@ end
   relay_module.instance = third
   third:start()
   third_client:complete(1, { error = "offline" })
-  local saved_schedules = remuda.schedules
+  local saved_schedules, saved_cancel = remuda.schedules, remuda.cancel
   remuda.schedules = nil
+  -- Keep cancel independent of the registry so the early type branch is what
+  -- proves fail-closed, not a throwing stub.
+  remuda.cancel = function(timer) if timer then timer.cancelled = true end end
   third:stop()
+  remuda.cancel = saved_cancel
   assert(relay_module.owner_proven() == false, "a core without the registry fails closed")
   remuda.schedules = saved_schedules
   third:stop()
