@@ -46,8 +46,9 @@ T.test("open, decided and uncertain rows are distinguishable and metadata only",
       for key, value in pairs(extra or {}) do rec[key] = value end
       remuda._t_state.approvals[id] = rec
     end
-    add("AAAA", "open")
+    add("AAAA", "open", { data = { text = "SECRET-TEXT", session = "target-a", instance_id = "instance-a" } })
     add("EEEE", "delivery_uncertain")
+    add("ZZZZ", "approved", { answered_by = "@alice:example.org", answer_event_id = "$answer" })
     add("TTTT", "applied")
     return "ok"
   ]])
@@ -66,9 +67,12 @@ T.test("open, decided and uncertain rows are distinguishable and metadata only",
       tostring(#decoded.records), tostring(decoded.records[1].status),
       tostring(decoded.records[2].delivery),
       tostring(decoded.records[1].data == nil and decoded.records[1].nonce == nil),
-      tostring(decoded.records[1].expires_in_s > 0) }, "|")
+      tostring(decoded.records[1].expires_in_s > 0),
+      tostring(decoded.records[1].target_session),
+      tostring(decoded.records[1].instance_bound),
+      tostring(decoded.records[3].decision_path) }, "|")
   ]])
-  T.eq(fields, "butler-local|1|2|open|uncertain|true|true",
+  T.eq(fields, "butler-local|1|3|open|uncertain|true|true|target-a|true|owner_matrix",
     "JSON projection fields: " .. fields .. " raw=" .. raw)
 
   T.eval('remuda._t_state.approvals = remuda.json.object({})')
